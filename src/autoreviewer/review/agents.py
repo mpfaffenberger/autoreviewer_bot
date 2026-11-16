@@ -19,10 +19,11 @@ from autoreviewer.review.workspace import Workspace
 
 PROMPTS = Path(__file__).parent / "prompts"
 
-LENS_LIMITS = UsageLimits(request_limit=60, total_tokens_limit=1_500_000)
-VERIFIER_LIMITS = UsageLimits(request_limit=25, total_tokens_limit=400_000)
-"""Hard ceilings per run: a looping model must not hold the shared GPU. The lens explores the diff
-through tools now, so it needs more round trips than when the diff was pasted into its prompt."""
+LENS_LIMITS = UsageLimits(request_limit=10_000)
+VERIFIER_LIMITS = UsageLimits(request_limit=10_000)
+"""No token, tool-call, or cost limits: a review may explore as much as it needs. The request limit
+only stops a model stuck in a loop (pydantic-ai's default is 50). The practical ceiling is the model's
+context window per request."""
 
 
 def boodleton_model(name: str, *, base_url: str, api_key: str) -> OpenAIChatModel:
