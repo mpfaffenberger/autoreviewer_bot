@@ -9,7 +9,7 @@ from fnmatch import fnmatch
 
 from autoreviewer.github import ChangedFile
 
-MAX_CHANGED_LINES = 3000
+MAX_CHANGED_LINES = 60_000
 """Above this, a PR is too big to review well; we say so instead of guessing."""
 
 SKIPPED_PATTERNS = (
