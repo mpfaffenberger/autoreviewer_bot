@@ -18,7 +18,13 @@ class Settings:
     private_key: str = field(repr=False)
     repos: frozenset[str]
     """`owner/name` (lowercase) the bot acts on. Everything else is ignored: deny by default."""
-    max_concurrent_jobs: int = 4
+    max_concurrent_jobs: int = 2
+    """Reviews run on the shared GPU; two at a time leaves room for everyone else."""
+    boodleton_base_url: str = "http://boodleton:8000/v1"
+    boodleton_api_key: str = field(default="", repr=False)
+    lens_model: str = "qwen3.8-flash-next"
+    verifier_model: str = "deepseek-v4.1-flash"
+    work_dir: Path = Path("/var/lib/autoreviewer/work")
 
     @property
     def bot_login(self) -> str:
@@ -33,7 +39,12 @@ class Settings:
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
             repos=parse_repos(env.get("AUTOREVIEWER_REPOS", "")),
-            max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", "4")),
+            max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", "2")),
+            boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
+            boodleton_api_key=env["BOODLETON_API_KEY"],
+            lens_model=env.get("AUTOREVIEWER_LENS_MODEL", cls.lens_model),
+            verifier_model=env.get("AUTOREVIEWER_VERIFIER_MODEL", cls.verifier_model),
+            work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
         )
 
 

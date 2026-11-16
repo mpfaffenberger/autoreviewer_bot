@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -13,19 +13,20 @@ from githubkit.webhooks import verify
 
 from autoreviewer.web.config import Settings
 from autoreviewer.web.dispatch import Dispatcher
-from autoreviewer.web.github import CheckRuns, GitHubApp
 from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
 
 logger = logging.getLogger("autoreviewer.web")
 
-GREETING_TITLE = "autoreviewer is listening"
+PullRequestHandler = Callable[[PullRequestUpdated], Awaitable[None]]
 
 
 def _reply(status_code: int, **body: str) -> JSONResponse:
     return JSONResponse(body, status_code=status_code)
 
 
-def create_app(settings: Settings, checks: CheckRuns, dispatcher: Dispatcher | None = None) -> FastAPI:
+def create_app(
+    settings: Settings, on_pull_request: PullRequestHandler, dispatcher: Dispatcher | None = None
+) -> FastAPI:
     dispatcher = dispatcher or Dispatcher(max_concurrent=settings.max_concurrent_jobs)
 
     @contextlib.asynccontextmanager
@@ -65,38 +66,39 @@ def create_app(settings: Settings, checks: CheckRuns, dispatcher: Dispatcher | N
                 return _reply(200, status="pong")
             case Ignore(reason=reason):
                 return _reply(200, status="ignored", reason=reason)
-            case PullRequestUpdated():
-                dispatcher.submit(
-                    f"greet {decision.owner}/{decision.repo}#{decision.number}", lambda: _greet(checks, decision)
-                )
+            case PullRequestUpdated() as pull:
+                dispatcher.submit(f"review {pull.owner}/{pull.repo}#{pull.number}", lambda: on_pull_request(pull))
                 return _reply(202, status="accepted")
 
     return app
 
 
-async def _greet(checks: CheckRuns, pull: PullRequestUpdated) -> None:
-    """M0's whole job: prove the write path with a neutral check run. Reviews replace this."""
-    await checks.create_check_run(
-        installation_id=pull.installation_id,
-        owner=pull.owner,
-        repo=pull.repo,
-        head_sha=pull.head_sha,
-        conclusion="neutral",
-        title=GREETING_TITLE,
-        summary=(
-            f"Received and verified the webhook for #{pull.number} at `{pull.head_sha[:7]}`. "
-            "Reviews are not enabled yet."
-        ),
-    )
-
-
 def main() -> None:
+    import functools
+
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    from autoreviewer import logs
+    from autoreviewer.github import GitHubApp
+    from autoreviewer.review.agents import boodleton_model, correctness_agent, verifier_agent
+    from autoreviewer.review.job import ReviewDeps, review_pull_request
+
+    logs.configure()
     settings = Settings.from_env()
+    settings.work_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
         "starting as %s; acting on %s", settings.bot_login, ", ".join(sorted(settings.repos)) or "no repositories"
     )
-    app = create_app(settings, GitHubApp.from_key(settings.app_id, settings.private_key))
+
+    def model(name: str):
+        return boodleton_model(name, base_url=settings.boodleton_base_url, api_key=settings.boodleton_api_key)
+
+    lens_model, verifier_model = model(settings.lens_model), model(settings.verifier_model)
+    deps = ReviewDeps(
+        github=GitHubApp.from_key(settings.app_id, settings.private_key),
+        agents=lambda root: (correctness_agent(lens_model, root), verifier_agent(verifier_model, root)),
+        work_dir=settings.work_dir,
+        models_note=f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`",
+    )
+    app = create_app(settings, functools.partial(review_pull_request, deps))
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

@@ -14,12 +14,14 @@ EnvironmentFile=/home/bazzite/.config/homelab/autoreviewer-app.env
 EnvironmentFile=/home/bazzite/.config/homelab/autoreviewer.env
 Volume=/home/bazzite/.config/homelab/autoreviewer-app.pem:/run/secrets/github-app.pem:ro,Z
 Environment=AUTOREVIEWER_PRIVATE_KEY_PATH=/run/secrets/github-app.pem
+# Checkouts for reviews: disk-backed (a tmpfs would count against the memory limit).
+Volume=/home/bazzite/.local/share/autoreviewer:/var/lib/autoreviewer:Z
 ReadOnly=true
 Tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m
 DropCapability=all
 NoNewPrivileges=true
 # uid 999 in the container is bazzite on the host, so the 0600 key stays readable without loosening it.
-PodmanArgs=--userns=keep-id:uid=999,gid=999 --pids-limit=256 --memory=1g
+PodmanArgs=--userns=keep-id:uid=999,gid=999 --pids-limit=256 --memory=2g
 
 [Service]
 Restart=always

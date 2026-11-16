@@ -302,7 +302,7 @@ def build_lens_agent(lens: Lens) -> Agent[ReviewDeps, list[Finding]]:
 | # | Ships | Done when |
 |---|---|---|
 | M0 | **Done 2026-11-16.** GitHub App `chaos-emerald-reviewer` (id 5786748), receiver at `review.chaos-emerald.com/webhook` (signature check, repo allowlist, dedupe), quadlet, Caddy route | PR #18 in `pydantic-ai-claude-code` got the neutral "autoreviewer is listening" check run. Jobs run in an in-process `Dispatcher`; DBOS replaces it behind the same `submit()` in M1, when a review must survive a restart |
-| M1 | Correctness lens + verifier + poster (REQUEST_CHANGES / APPROVE) | Seeded-bug PRs get correct inline comments |
+| M1 | **Review pipeline done 2026-11-16:** correctness lens (`qwen3.8-flash-next`) + verifier (`deepseek-v4.1-flash`) with read-only file tools over a safe checkout, computed verdict, inline comments, check run, stale-head check. **Still to do: DBOS durability** (see EXECUTION.md / next step) | Live on PR #19: the seeded `chunk()` bug got one correct inline comment + REQUEST_CHANGES; the fix got APPROVE; a correct-but-suspicious `last_n()` was left alone |
 | **Eval gate** | `pydantic_evals` corpus of ~30 PRs (seeded bugs, duplicated helpers, injected vulns, plus clean PRs) | Precision ≥ 0.8 on the clean set, *before* adding lenses |
 | M2 | DRY + security lenses, fingerprints, incremental re-review, auto-resolve fixed threads | The eval corpus passes per lens |
 | M3 | Thread conversations, bot-turn caps, human dismiss | A bot author can argue a DRY finding away; ping-pong is capped |

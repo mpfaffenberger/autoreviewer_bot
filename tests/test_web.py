@@ -12,10 +12,9 @@ from typing import Any
 import httpx
 import pytest
 
-from autoreviewer.web.app import GREETING_TITLE, create_app
+from autoreviewer.web.app import create_app
 from autoreviewer.web.config import Settings, parse_repos
 from autoreviewer.web.dispatch import Dispatcher
-from autoreviewer.web.github import Conclusion
 from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
 
 pytestmark = pytest.mark.anyio
@@ -40,36 +39,20 @@ def signature(body: bytes, secret: str = SECRET) -> str:
 
 
 @dataclass
-class FakeChecks:
-    created: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+class FakeHandler:
+    handled: list[PullRequestUpdated] = field(default_factory=list[PullRequestUpdated])
+    fail: bool = False
 
-    async def create_check_run(
-        self,
-        *,
-        installation_id: int,
-        owner: str,
-        repo: str,
-        head_sha: str,
-        conclusion: Conclusion,
-        title: str,
-        summary: str,
-    ) -> None:
-        self.created.append(
-            dict(
-                installation_id=installation_id,
-                owner=owner,
-                repo=repo,
-                head_sha=head_sha,
-                conclusion=conclusion,
-                title=title,
-            )
-        )
+    async def __call__(self, pull: PullRequestUpdated) -> None:
+        if self.fail:
+            raise RuntimeError("GitHub is down")
+        self.handled.append(pull)
 
 
 @dataclass
 class Receiver:
     client: httpx.AsyncClient
-    checks: FakeChecks
+    handler: FakeHandler
     dispatcher: Dispatcher
 
     async def deliver(
@@ -95,10 +78,10 @@ async def receiver() -> AsyncIterator[Receiver]:
     settings = Settings(
         app_id=1, app_slug="chaos-emerald-reviewer", webhook_secret=SECRET, private_key="unused", repos=REPOS
     )
-    checks, dispatcher = FakeChecks(), Dispatcher()
-    app = create_app(settings, checks, dispatcher)
+    handler, dispatcher = FakeHandler(), Dispatcher()
+    app = create_app(settings, handler, dispatcher)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        yield Receiver(client, checks, dispatcher)
+        yield Receiver(client, handler, dispatcher)
 
 
 # --- signatures ---------------------------------------------------------------------------------
@@ -124,7 +107,7 @@ async def test_bad_signatures_are_rejected_before_anything_else(receiver: Receiv
     response = await receiver.deliver("pull_request", pull_request_payload(), sign=sign)
     assert response.status_code == 401
     await receiver.dispatcher.drain()
-    assert receiver.checks.created == []
+    assert receiver.handler.handled == []
 
 
 async def test_a_sha1_signature_header_alone_is_not_enough(receiver: Receiver) -> None:
@@ -139,18 +122,17 @@ async def test_a_sha1_signature_header_alone_is_not_enough(receiver: Receiver) -
 # --- delivery handling --------------------------------------------------------------------------
 
 
-async def test_allowlisted_pull_request_gets_a_neutral_check_run(receiver: Receiver) -> None:
+async def test_allowlisted_pull_request_is_handed_to_the_review_job(receiver: Receiver) -> None:
     response = await receiver.deliver("pull_request", pull_request_payload())
     assert response.status_code == 202
     await receiver.dispatcher.drain()
-    assert receiver.checks.created == [
-        dict(
+    assert receiver.handler.handled == [
+        PullRequestUpdated(
             installation_id=182623847,
             owner="mpfaffenberger",
             repo="pydantic-ai-claude-code",
+            number=7,
             head_sha="0123456789abcdef0123456789abcdef01234567",
-            conclusion="neutral",
-            title=GREETING_TITLE,
         )
     ]
 
@@ -160,14 +142,14 @@ async def test_redelivered_ids_are_processed_once(receiver: Receiver) -> None:
     second = await receiver.deliver("pull_request", pull_request_payload(), delivery="same")
     await receiver.dispatcher.drain()
     assert (first.status_code, second.json()) == (202, {"status": "duplicate"})
-    assert len(receiver.checks.created) == 1
+    assert len(receiver.handler.handled) == 1
 
 
 async def test_repos_off_the_allowlist_are_ignored(receiver: Receiver) -> None:
     response = await receiver.deliver("pull_request", pull_request_payload(repo="mpfaffenberger/code_puppy"))
     await receiver.dispatcher.drain()
     assert response.json() == {"status": "ignored", "reason": "repository is not on the allowlist"}
-    assert receiver.checks.created == []
+    assert receiver.handler.handled == []
 
 
 @pytest.mark.parametrize("payload", [b"not json", json.dumps({"action": "opened"}).encode()])
@@ -186,10 +168,7 @@ async def test_missing_event_headers_are_a_client_error(receiver: Receiver) -> N
 
 
 async def test_a_failing_job_does_not_break_the_receiver(receiver: Receiver) -> None:
-    async def boom(**_: object) -> None:
-        raise RuntimeError("GitHub is down")
-
-    receiver.checks.create_check_run = boom  # type: ignore[method-assign]
+    receiver.handler.fail = True
     assert (await receiver.deliver("pull_request", pull_request_payload(), delivery="a")).status_code == 202
     await receiver.dispatcher.drain()
     assert (await receiver.deliver("ping", {}, delivery="b")).json() == {"status": "pong"}
