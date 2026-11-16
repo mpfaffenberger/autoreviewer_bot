@@ -1,10 +1,9 @@
-"""Shared fakes for the review tests: a scripted GitHub and scripted models (no network anywhere)."""
+"""Shared fakes for the review tests: a real local git repo, a scripted GitHub, scripted models."""
 
 from __future__ import annotations
 
-import io
 import json
-import tarfile
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,32 +13,62 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from autoreviewer.github import ChangedFile, Conclusion, PullRequestState, Repo, ReviewComment, ReviewEvent
+from autoreviewer.github import Conclusion, PullRequestState, Repo, ReviewComment, ReviewEvent, ReviewRejected
 from autoreviewer.review.agents import correctness_agent, verifier_agent
+from autoreviewer.review.job import ReviewDeps
 from autoreviewer.review.schemas import LensReport, Verification
-
-PATCH = """@@ -1,5 +1,5 @@
- def average(xs):
-     total = 0
-     for x in xs:
-         total += x
--    return total / len(xs)
-+    return total / len(xs) - 1"""
+from autoreviewer.review.workspace import Workspace, fetch
 
 BOT = "chaos-emerald-reviewer[bot]"
 
-SOURCE = "def average(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total / len(xs) - 1\n"
+BASE_SOURCE = "def average(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total / len(xs)\n"
+HEAD_SOURCE = "def average(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total / len(xs) - 1\n"
 
 
-def tarball(files: dict[str, str], top: str = "owner-repo-abc1234") -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for path, content in files.items():
-            data = content.encode()
-            info = tarfile.TarInfo(f"{top}/{path}")
-            info.size = len(data)
-            archive.addfile(info, io.BytesIO(data))
-    return buffer.getvalue()
+@dataclass(frozen=True)
+class GitRepo:
+    path: Path
+    base: str
+    head: str
+
+    @property
+    def url(self) -> str:
+        return f"file://{self.path}"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def make_repo(path: Path) -> GitRepo:
+    """base: stats.py + uv.lock + a symlink. head: the seeded bug, a lockfile bump, a new file."""
+    path.mkdir(parents=True)
+    _git(path, "init", "-q", "-b", "main")
+    _git(path, "config", "uploadpack.allowAnySHA1InWant", "true")  # GitHub serves any SHA; mimic it
+    (path / "stats.py").write_text(BASE_SOURCE)
+    (path / "uv.lock").write_text("version = 1\n")
+    (path / "secrets").symlink_to("/etc/passwd")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-qm", "base")
+    base = _git(path, "rev-parse", "HEAD")
+    (path / "stats.py").write_text(HEAD_SOURCE)
+    (path / "uv.lock").write_text("version = 2\n")
+    (path / "notes.py").write_text("GREETING = 'hi'\n")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-qm", "head")
+    return GitRepo(path, base, _git(path, "rev-parse", "HEAD"))
+
+
+class LocalSource:
+    """RepoSource over a local repository: the real fetch() path, no network."""
+
+    def __init__(self, repo: GitRepo) -> None:
+        self._repo = repo
+
+    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path) -> Workspace:
+        return await fetch(dest, url=self._repo.url, head=head, base=base)
 
 
 def finding(line: int = 5, *, path: str = "stats.py", title: str = "Mean is off by one") -> dict[str, Any]:
@@ -82,31 +111,32 @@ def verifier_model(confirm: Callable[[dict[str, Any]], bool]) -> FunctionModel:
 
 def agents(
     findings: list[dict[str, Any]], confirm: Callable[[dict[str, Any]], bool] = lambda f: True
-) -> Callable[[Path], tuple[Agent[None, LensReport], Agent[None, Verification]]]:
-    return lambda root: (correctness_agent(lens_model(findings), root), verifier_agent(verifier_model(confirm), root))
+) -> Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]:
+    return lambda ws: (correctness_agent(lens_model(findings), ws), verifier_agent(verifier_model(confirm), ws))
 
 
 @dataclass
 class FakeGitHub:
-    """Implements PullRequests; records every write."""
+    """Implements PullRequests against a GitRepo; records every write."""
 
-    files: list[ChangedFile] = field(default_factory=lambda: [ChangedFile("stats.py", "modified", PATCH)])
-    head_shas: list[str] = field(default_factory=lambda: ["a" * 40])
-    """Successive heads `get_pull` reports; the last one repeats."""
+    repo: GitRepo
+    head_shas: list[str] = field(default_factory=list[str])
+    """Successive heads `get_pull` reports (default: the repo's head); the last one repeats."""
     pr_state: str = "open"
-    archive: bytes = field(default_factory=lambda: tarball({"stats.py": SOURCE}))
+    reject_inline: bool = False
+    """Make create_review raise ReviewRejected when it has comments, like GitHub's 422."""
     reviews: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     checks: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
-        head = self.head_shas.pop(0) if len(self.head_shas) > 1 else self.head_shas[0]
-        return PullRequestState(head_sha=head, state=self.pr_state, draft=False, title="Add average()", body="")
+        heads = self.head_shas or [self.repo.head]
+        head = heads.pop(0) if len(heads) > 1 else heads[0]
+        return PullRequestState(
+            head_sha=head, base_sha=self.repo.base, state=self.pr_state, draft=False, title="Add average()", body=""
+        )
 
-    async def list_files(self, repo: Repo, number: int) -> list[ChangedFile]:
-        return self.files
-
-    async def download_tarball(self, repo: Repo, sha: str) -> bytes:
-        return self.archive
+    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
+        return self.repo.base
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
         self.checks.append({"status": "in_progress", "head_sha": head_sha})
@@ -120,6 +150,8 @@ class FakeGitHub:
     async def create_review(
         self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]
     ) -> None:
+        if self.reject_inline and comments:
+            raise ReviewRejected("Unprocessable Entity: line must be part of the diff")
         self.reviews.append(
             {"commit_sha": commit_sha, "event": event, "body": body, "comments": comments, "author": BOT}
         )
@@ -128,11 +160,12 @@ class FakeGitHub:
         return any(r["commit_sha"] == commit_sha and r["author"] == author for r in self.reviews)
 
 
-def job_deps(github: object, work_dir: Path, findings: list[dict[str, Any]] | None = None, **kwargs: Any) -> Any:
-    from autoreviewer.review.job import ReviewDeps
-
+def job_deps(
+    github: FakeGitHub, work_dir: Path, findings: list[dict[str, Any]] | None = None, **kwargs: Any
+) -> ReviewDeps:
     return ReviewDeps(
-        github=github,  # type: ignore[arg-type]
+        github=github,
+        source=LocalSource(github.repo),
         agents=agents([] if findings is None else findings, **kwargs),
         work_dir=work_dir,
         bot_login=BOT,

@@ -14,32 +14,39 @@ import pytest
 
 from autoreviewer.review import durable
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import FakeGitHub, finding, job_deps
+from tests.review_fakes import FakeGitHub, GitRepo, finding, job_deps, make_repo
 
 pytestmark = pytest.mark.anyio
 
 HEAD = "a" * 40
 PULL = PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha=HEAD)
+
+
+def pull_for(repo: GitRepo) -> PullRequestUpdated:
+    return PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha=repo.head)
+
+
 CRASH_SCRIPT = Path(__file__).with_name("durable_crash_script.py")
 
-Launch = Callable[[FakeGitHub, list[dict[str, Any]]], Awaitable[None]]
+Launch = Callable[[list[dict[str, Any]]], Awaitable[FakeGitHub]]
 
 
 @pytest.fixture
 async def launch(tmp_path: Path) -> AsyncIterator[Launch]:
-    async def start(github: FakeGitHub, findings: list[dict[str, Any]]) -> None:
+    async def start(findings: list[dict[str, Any]]) -> FakeGitHub:
+        github = FakeGitHub(make_repo(tmp_path / "origin"))
         durable.configure(tmp_path / "dbos.sqlite")
         await durable.launch(job_deps(github, tmp_path, findings), concurrency=2)
+        return github
 
     yield start
     durable.shutdown()
 
 
 async def test_a_queued_review_runs_all_three_phases(launch: Launch) -> None:
-    github = FakeGitHub()
-    await launch(github, [finding(5)])
+    github = await launch([finding(5)])
 
-    result = await (await durable.enqueue(PULL)).get_result()
+    result = await (await durable.enqueue(pull_for(github.repo))).get_result()
 
     assert result.conclusion == "failure"
     assert [c["status"] for c in github.checks] == ["completed"]
@@ -48,10 +55,9 @@ async def test_a_queued_review_runs_all_three_phases(launch: Launch) -> None:
 
 
 async def test_duplicate_events_for_one_head_produce_one_review(launch: Launch) -> None:
-    github = FakeGitHub()
-    await launch(github, [finding(5)])
+    github = await launch([finding(5)])
 
-    handles = [await durable.enqueue(PULL) for _ in range(3)]  # e.g. GitHub redeliveries
+    handles = [await durable.enqueue(pull_for(github.repo)) for _ in range(3)]  # e.g. GitHub redeliveries
     for handle in handles:
         await handle.get_result()
 

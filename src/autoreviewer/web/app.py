@@ -77,6 +77,7 @@ def main() -> None:
     from autoreviewer.review import durable
     from autoreviewer.review.agents import boodleton_model, correctness_agent, verifier_agent
     from autoreviewer.review.job import ReviewDeps
+    from autoreviewer.review.workspace import GitHubSource
 
     logs.configure()
     settings = Settings.from_env()
@@ -89,9 +90,11 @@ def main() -> None:
         return boodleton_model(name, base_url=settings.boodleton_base_url, api_key=settings.boodleton_api_key)
 
     lens_model, verifier_model = model(settings.lens_model), model(settings.verifier_model)
+    github = GitHubApp.from_key(settings.app_id, settings.private_key)
     deps = ReviewDeps(
-        github=GitHubApp.from_key(settings.app_id, settings.private_key),
-        agents=lambda root: (correctness_agent(lens_model, root), verifier_agent(verifier_model, root)),
+        github=github,
+        source=GitHubSource(github),
+        agents=lambda workspace: (correctness_agent(lens_model, workspace), verifier_agent(verifier_model, workspace)),
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
         models_note=f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`",

@@ -1,4 +1,8 @@
-"""lens -> verify -> dedupe -> anchor. No GitHub here: input is the PR's text, output is typed findings."""
+"""lens -> verify -> dedupe -> anchor. No GitHub here: input is the PR's text and git facts, output is findings.
+
+The models explore the change with their git and file tools; the prompts carry only the PR's text and
+the list of changed files, so prompt size no longer grows with the diff.
+"""
 
 from __future__ import annotations
 
@@ -9,15 +13,15 @@ from dataclasses import dataclass, field
 
 from pydantic_ai import Agent
 
-from autoreviewer.github import ChangedFile
 from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
-from autoreviewer.review.diff import annotate, commentable_lines
+from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.schemas import Finding, LensReport, Verification
 
 logger = logging.getLogger("autoreviewer.review")
 
 MAX_FINDINGS = 10
 MAX_DESCRIPTION_CHARS = 4000
+MAX_LISTED_FILES = 300
 VERIFY_CONCURRENCY = 3
 
 
@@ -25,8 +29,10 @@ VERIFY_CONCURRENCY = 3
 class PullRequestText:
     title: str
     body: str
-    files: list[ChangedFile]
-    """Reviewable files only, each with a patch."""
+    reviewable: list[ChangedPath]
+    skipped: list[ChangedPath]
+    patches: dict[str, str]
+    """Hunks per reviewable path, from git: decides which lines take an inline comment."""
 
 
 @dataclass
@@ -42,19 +48,31 @@ class Outcome:
         return bool(self.inline or self.general)
 
 
+def _row(change: ChangedPath) -> str:
+    return f"- {change.status} {change.path} (+{change.added} -{change.removed})"
+
+
 def lens_prompt(pr: PullRequestText) -> str:
-    parts = [f"# Pull request\n\nTitle: {pr.title}\n\nDescription:\n{pr.body[:MAX_DESCRIPTION_CHARS] or '(none)'}\n"]
-    parts.append("# Annotated diff\n")
-    for changed in pr.files:
-        parts.append(f"## {changed.path} ({changed.status})\n```diff\n{annotate(changed.patch or '')}\n```\n")
-    return "\n".join(parts)
+    listed = pr.reviewable[:MAX_LISTED_FILES]
+    more = len(pr.reviewable) - len(listed)
+    lines = [
+        f"# Pull request\n\nTitle: {pr.title}\n\nDescription:\n{pr.body[:MAX_DESCRIPTION_CHARS] or '(none)'}\n",
+        f"# Changed files to review ({len(pr.reviewable)})\n",
+        *(_row(change) for change in listed),
+    ]
+    if more:
+        lines.append(f"- ... and {more} more: call changed_files() for the full list")
+    if pr.skipped:
+        lines.append(f"\n{len(pr.skipped)} generated, vendored, binary, or deleted file(s) are not reviewed.")
+    lines.append("\nStart with diff(path) for each file above.")
+    return "\n".join(lines)
 
 
-def verifier_prompt(pr: PullRequestText, finding: Finding, patch: str) -> str:
+def verifier_prompt(pr: PullRequestText, finding: Finding) -> str:
     return (
         f"# Reported finding\n```json\n{json.dumps(finding.model_dump(), indent=2)}\n```\n\n"
         f"# Pull request title\n{pr.title}\n\n"
-        f"# Annotated diff of {finding.path}\n```diff\n{annotate(patch)}\n```\n"
+        f'Check it: start with diff(path="{finding.path}") and read the surrounding code.\n'
     )
 
 
@@ -69,15 +87,16 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
 
 
 async def review(pr: PullRequestText, lens: Agent[None, LensReport], verifier: Agent[None, Verification]) -> Outcome:
-    patches = {changed.path: changed.patch or "" for changed in pr.files}
-    report = (await lens.run(lens_prompt(pr), usage_limits=LENS_LIMITS)).output
+    lens_run = await lens.run(lens_prompt(pr), usage_limits=LENS_LIMITS)
+    report, usage = lens_run.output, lens_run.usage
     outcome = Outcome()
+    reviewable = {change.path for change in pr.reviewable}
 
     candidates = []
     for finding in _dedupe(report.findings):
-        if finding.path in patches:
+        if finding.path in reviewable:
             candidates.append(finding)
-        else:  # a path the PR doesn't touch: hallucinated or out of scope, not worth a verifier call
+        else:  # a path the PR doesn't change: hallucinated or out of scope, not worth a verifier call
             outcome.rejected.append((finding, "path is not among the changed files"))
 
     slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
@@ -85,10 +104,7 @@ async def review(pr: PullRequestText, lens: Agent[None, LensReport], verifier: A
     async def verify(finding: Finding) -> Verification:
         async with slots:
             try:
-                result = await verifier.run(
-                    verifier_prompt(pr, finding, patches[finding.path]), usage_limits=VERIFIER_LIMITS
-                )
-                return result.output
+                return (await verifier.run(verifier_prompt(pr, finding), usage_limits=VERIFIER_LIMITS)).output
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
                 return Verification(confirmed=False, reason=f"verification failed: {type(error).__name__}")
@@ -97,12 +113,17 @@ async def review(pr: PullRequestText, lens: Agent[None, LensReport], verifier: A
     for finding, verdict in zip(candidates, verdicts, strict=True):
         if not verdict.confirmed:
             outcome.rejected.append((finding, verdict.reason))
-        elif finding.line in commentable_lines(patches[finding.path]):
+        elif finding.line in commentable_lines(pr.patches.get(finding.path, "")):
             outcome.inline.append(finding)
         else:
             outcome.general.append(finding)
     logger.info(
-        "review: %d found, %d inline, %d general, %d rejected",
-        len(report.findings), len(outcome.inline), len(outcome.general), len(outcome.rejected),
-    )  # fmt: skip
+        "review: lens made %d requests and %d tool calls; %d found, %d inline, %d general, %d rejected",
+        usage.requests,
+        usage.tool_calls,
+        len(report.findings),
+        len(outcome.inline),
+        len(outcome.general),
+        len(outcome.rejected),
+    )
     return outcome

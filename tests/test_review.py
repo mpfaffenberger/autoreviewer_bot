@@ -1,30 +1,47 @@
-"""The review: diff facts, safe checkout, rendering, the lens->verify pipeline, and the job's policies."""
+"""The review: git-derived diff facts, the checkout, the agents' git tools, the pipeline, and the job's policies."""
 
 from __future__ import annotations
 
-import io
-import tarfile
 from pathlib import Path
 
 import pytest
+from pydantic_ai import ModelRetry
 
-from autoreviewer.github import ChangedFile
-from autoreviewer.review import checkout
-from autoreviewer.review.diff import MAX_CHANGED_LINES, annotate, commentable_lines, select
+from autoreviewer.review.diff import (
+    ChangedPath,
+    annotate_git_diff,
+    commentable_lines,
+    parse_changes,
+    select,
+    split_git_diff,
+)
+from autoreviewer.review.gittools import git_tools
 from autoreviewer.review.job import review_and_post
-from autoreviewer.review.pipeline import PullRequestText, review
+from autoreviewer.review.pipeline import PullRequestText, lens_prompt, review
 from autoreviewer.review.render import comment_body, sanitize
 from autoreviewer.review.schemas import Finding
+from autoreviewer.review.workspace import BASE, HEAD, Workspace, fetch, read_changes, run_git
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import BOT, PATCH, FakeGitHub, agents, finding, job_deps, tarball
+from tests.review_fakes import BOT, FakeGitHub, GitRepo, agents, finding, job_deps, make_repo
 
 pytestmark = pytest.mark.anyio
 
-HEAD = "a" * 40
-PULL = PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha=HEAD)
+
+@pytest.fixture
+def repo(tmp_path: Path) -> GitRepo:
+    return make_repo(tmp_path / "origin")
 
 
-# --- diff -----------------------------------------------------------------------------------------
+@pytest.fixture
+async def workspace(repo: GitRepo, tmp_path: Path) -> Workspace:
+    return await fetch(tmp_path / "checkout", url=repo.url, head=repo.head, base=repo.base)
+
+
+def pull(repo: GitRepo) -> PullRequestUpdated:
+    return PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha=repo.head)
+
+
+# --- diff facts (pure) ----------------------------------------------------------------------------
 
 
 def test_commentable_lines_are_the_new_side_of_the_hunks() -> None:
@@ -32,69 +49,96 @@ def test_commentable_lines_are_the_new_side_of_the_hunks() -> None:
     assert commentable_lines(patch) == frozenset({20, 21, 22, 23})
 
 
-def test_annotate_numbers_new_lines_and_leaves_removed_lines_blank() -> None:
-    lines = annotate(PATCH).splitlines()
-    assert lines[1] == "    1  def average(xs):"
-    assert lines[5] == "      -    return total / len(xs)"
-    assert lines[6] == "    5 +    return total / len(xs) - 1"
-
-
-def test_select_skips_generated_vendored_removed_and_binary_files() -> None:
-    files = [
-        ChangedFile("src/app.py", "modified", "@@ -1 +1 @@\n-a\n+b"),
-        ChangedFile("uv.lock", "modified", "@@ -1 +1 @@\n-a\n+b"),
-        ChangedFile("web/vendor/lib.js", "added", "@@ -0,0 +1 @@\n+x"),
-        ChangedFile("old.py", "removed", "@@ -1 +0,0 @@\n-a"),
-        ChangedFile("logo.png", "added", None),
+def test_parse_changes_handles_renames_deletions_and_binaries() -> None:
+    name_status = "M\0a.py\0R087\0old.py\0new.py\0D\0gone.py\0A\0logo.png\0"
+    # Joined with "\0".join, not adjacent literals: a formatter merging "...\0" "2..." yields the octal escape "\02".
+    numstat = "\0".join(["3\t1\ta.py", "2\t2\t", "old.py", "new.py", "0\t5\tgone.py", "-\t-\tlogo.png", ""])
+    assert parse_changes(name_status, numstat) == [
+        ChangedPath("a.py", "M", 3, 1),
+        ChangedPath("new.py", "R", 2, 2),
+        ChangedPath("gone.py", "D", 0, 5),
+        ChangedPath("logo.png", "A", None, None),
     ]
-    selection = select(files)
-    assert [f.path for f in selection.reviewable] == ["src/app.py"]
+
+
+def test_select_skips_generated_vendored_deleted_and_binary_files() -> None:
+    changes = [
+        ChangedPath("src/app.py", "M", 1, 1),
+        ChangedPath("uv.lock", "M", 9, 9),
+        ChangedPath("web/vendor/lib.js", "A", 5, 0),
+        ChangedPath("old.py", "D", 0, 4),
+        ChangedPath("logo.png", "A", None, None),
+    ]
+    selection = select(changes)
+    assert [c.path for c in selection.reviewable] == ["src/app.py"]
     assert selection.changed_lines == 2
+
+
+def test_split_and_annotate_a_multi_file_git_diff() -> None:
+    text = (
+        "diff --git a/x.py b/x.py\nindex 1..2 100644\n--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+        "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    )
+    assert split_git_diff(text) == {"x.py": "@@ -1,2 +1,2 @@\n a\n-b\n+c"}
+    annotated = annotate_git_diff(text).splitlines()
+    assert annotated[3] == "       +++ b/x.py"  # header lines get no number, even though they start with "-"/"+"
+    assert annotated[5] == "     1  a" and annotated[6] == "       -b" and annotated[7] == "     2 +c"
 
 
 # --- checkout -------------------------------------------------------------------------------------
 
 
-def test_checkout_returns_the_archive_root(tmp_path: Path) -> None:
-    root = checkout.extract(tarball({"pkg/mod.py": "x = 1\n"}), tmp_path)
-    assert (root / "pkg/mod.py").read_text() == "x = 1\n"
+async def test_checkout_has_head_files_and_named_refs(repo: GitRepo, workspace: Workspace) -> None:
+    assert (workspace.root / "stats.py").read_text().endswith("- 1\n")
+    assert (await run_git(workspace.root, "rev-parse", BASE)).strip() == repo.base
+    assert (await run_git(workspace.root, "rev-parse", HEAD)).strip() == repo.head
 
 
-def _one_member_tarball(name: str) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        archive.addfile(tarfile.TarInfo(name), io.BytesIO(b""))
-    return buffer.getvalue()
+async def test_symlinks_are_checked_out_as_plain_files(workspace: Workspace) -> None:
+    link = workspace.root / "secrets"
+    assert not link.is_symlink() and link.read_text() == "/etc/passwd"  # the target's name, not its contents
 
 
-def test_checkout_refuses_parent_directory_escapes(tmp_path: Path) -> None:
-    with pytest.raises(checkout.CheckoutError):
-        checkout.extract(_one_member_tarball("../escape.txt"), tmp_path / "dest")
-    assert not (tmp_path / "escape.txt").exists()
+async def test_read_changes_lists_files_and_patches(workspace: Workspace) -> None:
+    changes, patches = await read_changes(workspace)
+    assert {(c.path, c.status) for c in changes} == {("stats.py", "M"), ("uv.lock", "M"), ("notes.py", "A")}
+    assert 5 in commentable_lines(patches["stats.py"])
 
 
-def test_checkout_confines_absolute_paths(tmp_path: Path) -> None:
-    # The data filter strips the leading "/" rather than refusing: the file lands inside the checkout.
-    target = f"/tmp/autoreviewer-absolute-{tmp_path.name}"
-    root = checkout.extract(_one_member_tarball(target), tmp_path / "dest")
-    assert not Path(target).exists()
-    assert (root / f"autoreviewer-absolute-{tmp_path.name}").exists()
+# --- the agents' git tools ------------------------------------------------------------------------
 
 
-def test_checkout_refuses_links_out_of_the_tree(tmp_path: Path) -> None:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        link = tarfile.TarInfo("top/secrets")
-        link.type, link.linkname = tarfile.SYMTYPE, "/home/bazzite/.ssh"
-        archive.addfile(link)
-    with pytest.raises(checkout.CheckoutError):
-        checkout.extract(buffer.getvalue(), tmp_path)
+async def call(workspace: Workspace, name: str, **args: object) -> str:
+    tool = (git_tools(workspace).tools)[name]
+    return await tool.function(**args)  # type: ignore[misc]
 
 
-def test_checkout_enforces_size_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(checkout, "MAX_UNPACKED_BYTES", 10)
-    with pytest.raises(checkout.CheckoutError, match="unpacks to more than"):
-        checkout.extract(tarball({"big.txt": "x" * 100}), tmp_path)
+async def test_changed_files_marks_what_is_not_reviewed(workspace: Workspace) -> None:
+    listing = await call(workspace, "changed_files")
+    assert "M +1 -1 stats.py" in listing
+    assert "uv.lock  (generated, vendored, binary, or deleted: not reviewed)" in listing
+
+
+async def test_diff_is_annotated_with_new_line_numbers(workspace: Workspace) -> None:
+    text = await call(workspace, "diff", path="stats.py")
+    assert "     5 +    return total / len(xs) - 1" in text
+
+
+async def test_diff_pages_large_output(workspace: Workspace) -> None:
+    first = await call(workspace, "diff", limit=3)
+    assert first.startswith("[diff (all files): lines 1-3 of") and "call again with offset=3" in first
+
+
+async def test_show_file_gives_the_version_before_the_pr(workspace: Workspace) -> None:
+    text = await call(workspace, "show_file", path="stats.py", ref="base")
+    assert "     5      return total / len(xs)" in text and "- 1" not in text
+    assert await call(workspace, "show_file", path="notes.py", ref="base") == "notes.py does not exist at base"
+
+
+@pytest.mark.parametrize("bad", ["/run/secrets/github-app.pem", "../outside.py", "--output=/tmp/x", "a\0b", ""])
+async def test_git_tools_refuse_paths_outside_the_repo(workspace: Workspace, bad: str) -> None:
+    with pytest.raises(ModelRetry):
+        await call(workspace, "diff", path=bad)
 
 
 # --- render ---------------------------------------------------------------------------------------
@@ -120,79 +164,105 @@ def test_comment_body_runs_through_sanitize() -> None:
 # --- pipeline -------------------------------------------------------------------------------------
 
 
-def pr_text() -> PullRequestText:
-    return PullRequestText("Add average()", "", [ChangedFile("stats.py", "modified", PATCH)])
+async def pr_text(workspace: Workspace) -> PullRequestText:
+    changes, patches = await read_changes(workspace)
+    selection = select(changes)
+    return PullRequestText("Add average()", "", selection.reviewable, selection.skipped, patches)
 
 
-async def test_confirmed_findings_on_diff_lines_are_inline(tmp_path: Path) -> None:
-    lens, verifier = agents([finding(5)])(tmp_path)
-    outcome = await review(pr_text(), lens, verifier)
+async def test_the_lens_prompt_lists_files_but_carries_no_diff(workspace: Workspace) -> None:
+    prompt = lens_prompt(await pr_text(workspace))
+    assert "- M stats.py (+1 -1)" in prompt and "1 generated, vendored, binary, or deleted" in prompt
+    assert "len(xs) - 1" not in prompt  # the model reads the change through its tools
+
+
+async def test_confirmed_findings_on_diff_lines_are_inline(workspace: Workspace) -> None:
+    lens, verifier = agents([finding(5)])(workspace)
+    outcome = await review(await pr_text(workspace), lens, verifier)
     assert [(f.path, f.line) for f in outcome.inline] == [("stats.py", 5)]
     assert outcome.general == [] and outcome.blocking
 
 
-async def test_verifier_rejections_are_dropped(tmp_path: Path) -> None:
-    lens, verifier = agents([finding(5), finding(3, title="Loop is wrong")], confirm=lambda f: f["line"] == 5)(tmp_path)
-    outcome = await review(pr_text(), lens, verifier)
+async def test_verifier_rejections_are_dropped(workspace: Workspace) -> None:
+    lens, verifier = agents([finding(5), finding(3, title="Loop is wrong")], confirm=lambda f: f["line"] == 5)(
+        workspace
+    )
+    outcome = await review(await pr_text(workspace), lens, verifier)
     assert [f.line for f in outcome.inline] == [5]
     assert [(f.line, reason) for f, reason in outcome.rejected] == [(3, "not a real bug")]
 
 
-async def test_findings_off_the_diff_go_to_the_body_and_unknown_paths_are_dropped(tmp_path: Path) -> None:
-    lens, verifier = agents([finding(40), finding(1, path="never_touched.py")])(tmp_path)
-    outcome = await review(pr_text(), lens, verifier)
+async def test_findings_off_the_diff_go_to_the_body_and_unchanged_paths_are_dropped(workspace: Workspace) -> None:
+    lens, verifier = agents([finding(40), finding(1, path="uv.lock"), finding(1, path="never_touched.py")])(workspace)
+    outcome = await review(await pr_text(workspace), lens, verifier)
     assert [f.line for f in outcome.general] == [40]
-    assert [reason for _, reason in outcome.rejected] == ["path is not among the changed files"]
+    assert [reason for _, reason in outcome.rejected] == ["path is not among the changed files"] * 2
 
 
-async def test_duplicate_findings_are_reported_once(tmp_path: Path) -> None:
-    lens, verifier = agents([finding(5), finding(5, title="Same bug, other words")])(tmp_path)
-    assert len((await review(pr_text(), lens, verifier)).inline) == 1
+async def test_duplicate_findings_are_reported_once(workspace: Workspace) -> None:
+    lens, verifier = agents([finding(5), finding(5, title="Same bug, other words")])(workspace)
+    assert len((await review(await pr_text(workspace), lens, verifier)).inline) == 1
 
 
 # --- job (the review_and_post phase; composition and recovery are in test_durable.py) --------------
 
 
-async def test_a_bug_requests_changes_with_an_inline_comment(tmp_path: Path) -> None:
-    github = FakeGitHub()
-    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+async def test_a_bug_requests_changes_with_an_inline_comment(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
 
     [posted] = github.reviews
-    assert posted["event"] == "REQUEST_CHANGES" and posted["commit_sha"] == HEAD
+    assert posted["event"] == "REQUEST_CHANGES" and posted["commit_sha"] == repo.head
     assert [(c.path, c.line) for c in posted["comments"]] == [("stats.py", 5)]
     assert (result.conclusion, result.title) == ("failure", "1 correctness issue(s)")
 
 
-async def test_a_clean_pr_is_approved(tmp_path: Path) -> None:
-    github = FakeGitHub()
-    result = await review_and_post(job_deps(github, tmp_path, []), PULL)
+async def test_a_clean_pr_is_approved(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    result = await review_and_post(job_deps(github, tmp_path, []), pull(repo))
     assert github.reviews[0]["event"] == "APPROVE" and github.reviews[0]["comments"] == []
     assert result.conclusion == "success"
 
 
-async def test_a_commit_already_reviewed_is_not_reviewed_again(tmp_path: Path) -> None:
+async def test_rejected_inline_comments_fall_back_to_the_body(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo, reject_inline=True)
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
+    [posted] = github.reviews
+    assert posted["event"] == "REQUEST_CHANGES" and posted["comments"] == []
+    assert "`stats.py:5`" in posted["body"] and result.conclusion == "failure"
+
+
+async def test_a_commit_already_reviewed_is_not_reviewed_again(repo: GitRepo, tmp_path: Path) -> None:
     # What a replay looks like after a crash between posting the review and checkpointing the step.
-    github = FakeGitHub()
-    github.reviews.append({"commit_sha": HEAD, "event": "REQUEST_CHANGES", "body": "", "comments": [], "author": BOT})
-    await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+    github = FakeGitHub(repo)
+    github.reviews.append(
+        {"commit_sha": repo.head, "event": "REQUEST_CHANGES", "body": "", "comments": [], "author": BOT}
+    )
+    await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
     assert len(github.reviews) == 1
 
 
-async def test_a_push_during_the_review_supersedes_it(tmp_path: Path) -> None:
-    github = FakeGitHub(head_shas=[HEAD, "b" * 40])  # moved on between the start and the post
-    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+async def test_a_push_during_the_review_supersedes_it(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo, head_shas=[repo.head, "b" * 40])  # moved on between the start and the post
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
     assert github.reviews == []
     assert (result.title, result.conclusion) == ("Superseded", "neutral")
 
 
-async def test_huge_prs_are_not_reviewed(tmp_path: Path) -> None:
-    patch = f"@@ -0,0 +1,{MAX_CHANGED_LINES + 1} @@\n" + "\n".join("+x" for _ in range(MAX_CHANGED_LINES + 1))
-    github = FakeGitHub(files=[ChangedFile("big.py", "added", patch)])
-    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+async def test_huge_prs_are_not_reviewed(repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("autoreviewer.review.job.MAX_CHANGED_LINES", 1)
+    github = FakeGitHub(repo)
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
     assert github.reviews == [] and result.title == "Too large to review"
 
 
-async def test_a_crash_becomes_a_result_instead_of_an_exception(tmp_path: Path) -> None:
-    github = FakeGitHub(archive=b"not a tarball")
-    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+async def test_a_crash_becomes_a_result_instead_of_an_exception(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo, head_shas=[repo.head])
+    deps = job_deps(github, tmp_path, [finding(5)])
+
+    async def broken_merge_base(*_: object) -> str:
+        raise RuntimeError("GitHub is down")
+
+    github.merge_base = broken_merge_base  # type: ignore[method-assign]
+    result = await review_and_post(deps, pull(repo))
     assert github.reviews == [] and (result.title, result.conclusion) == ("Review failed", "neutral")

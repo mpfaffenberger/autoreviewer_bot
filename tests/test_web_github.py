@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import AppAuthStrategy, GitHub
 
-from autoreviewer.github import CHECK_NAME, GitHubApp, Repo, ReviewComment
+from autoreviewer.github import CHECK_NAME, GitHubApp, Repo, ReviewComment, ReviewRejected
 
 pytestmark = pytest.mark.anyio
 
@@ -54,6 +54,8 @@ class FakeGitHub:
     def __init__(self, key: rsa.RSAPrivateKey) -> None:
         self._public_key = key.public_key()
         self.writes: list[tuple[str, str, dict[str, Any]]] = []
+        self.token_requests: list[dict[str, Any]] = []
+        self.reject_reviews = False
 
     def handle(self, request: httpx2.Request) -> httpx2.Response:
         scheme, _, credential = request.headers.get("authorization", "").partition(" ")
@@ -61,6 +63,8 @@ class FakeGitHub:
         if method == "POST" and path == f"/app/installations/{REPO.installation_id}/access_tokens":
             claims = jwt.decode(credential, self._public_key, algorithms=["RS256"])  # raises unless signed by our key
             assert scheme.lower() == "bearer" and str(claims["iss"]) == str(APP_ID)
+            if request.content:
+                self.token_requests.append(json.loads(request.content))
             expires = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")  # GitHub's exact format
             body = {
                 "token": "ghs_installation",
@@ -71,23 +75,9 @@ class FakeGitHub:
             return httpx2.Response(201, json=body)
         assert credential == "ghs_installation", f"{method} {path} must use the installation token, not the app JWT"
         base = f"/repos/{REPO.owner}/{REPO.name}"
-        if method == "GET" and path == f"{base}/pulls/7/files":
-            page = int(request.url.params.get("page", "1"))
-            entries = [
-                {"sha": "s", "filename": f"f{page}.py", "status": "modified", "additions": 1, "deletions": 1,
-                 "changes": 2, "blob_url": "https://a", "raw_url": "https://a", "contents_url": "https://a",
-                 "patch": "@@ -1 +1 @@\n-a\n+b"},
-                {"sha": "s", "filename": "logo.png", "status": "added", "additions": 0, "deletions": 0,
-                 "changes": 0, "blob_url": "https://a", "raw_url": "https://a", "contents_url": "https://a"},
-            ] if page <= 2 else []  # fmt: skip
-            headers = (
-                {"link": f'<https://api.github.com{base}/pulls/7/files?page={page + 1}>; rel="next"'}
-                if page < 2
-                else {}
-            )
-            return httpx2.Response(200, json=entries, headers=headers)
-        if method == "GET" and path == f"{base}/tarball/{HEAD}":
-            return httpx2.Response(200, content=b"\x1f\x8btarball-bytes")
+        if method == "GET" and path == f"{base}/compare/{'b' * 40}...{HEAD}":
+            assert request.url.params.get("per_page") == "1"
+            return httpx2.Response(200, json={"merge_base_commit": {"sha": "c" * 40}, "files": []})
         if method == "POST" and path == f"{base}/check-runs":
             self.writes.append(("start_check", path, json.loads(request.content)))
             return httpx2.Response(201, json={"id": 99, "name": CHECK_NAME})
@@ -95,6 +85,10 @@ class FakeGitHub:
             self.writes.append(("finish_check", path, json.loads(request.content)))
             return httpx2.Response(200, json={"id": 99, "name": CHECK_NAME})
         if method == "POST" and path == f"{base}/pulls/7/reviews":
+            if self.reject_reviews:
+                return httpx2.Response(
+                    422, json={"message": "Unprocessable Entity", "errors": ["line must be part of the diff"]}
+                )
             self.writes.append(("create_review", path, json.loads(request.content)))
             return httpx2.Response(200, json={"id": 1})
         return httpx2.Response(404, json={"message": f"unexpected {method} {path}"})
@@ -108,22 +102,24 @@ def fake_and_app(key: rsa.RSAPrivateKey) -> tuple[FakeGitHub, GitHubApp]:
     return fake, GitHubApp(client)
 
 
-async def test_list_files_follows_pagination_and_keeps_missing_patches(
-    fake_and_app: tuple[FakeGitHub, GitHubApp],
-) -> None:
+async def test_merge_base_reads_one_field_from_a_small_compare(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
     _, app = fake_and_app
-    files = await app.list_files(REPO, 7)
-    assert [(f.path, f.patch is None) for f in files] == [
-        ("f1.py", False),
-        ("logo.png", True),
-        ("f2.py", False),
-        ("logo.png", True),
-    ]
+    assert await app.merge_base(REPO, "b" * 40, HEAD) == "c" * 40
 
 
-async def test_download_tarball_returns_the_bytes(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
-    _, app = fake_and_app
-    assert await app.download_tarball(REPO, HEAD) == b"\x1f\x8btarball-bytes"
+async def test_read_tokens_are_scoped_to_one_repo_and_read_only(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
+    fake, app = fake_and_app
+    assert await app.read_token(REPO) == "ghs_installation"
+    assert fake.token_requests == [{"repositories": ["demo"], "permissions": {"contents": "read"}}]
+
+
+async def test_a_422_review_raises_review_rejected(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
+    fake, app = fake_and_app
+    fake.reject_reviews = True
+    with pytest.raises(ReviewRejected):
+        await app.create_review(
+            REPO, 7, commit_sha=HEAD, event="COMMENT", body="b", comments=[ReviewComment("x", 1, "y")]
+        )
 
 
 async def test_check_run_lifecycle_and_review_payloads(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:

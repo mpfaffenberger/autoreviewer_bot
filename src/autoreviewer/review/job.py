@@ -16,24 +16,26 @@ from pathlib import Path
 
 from pydantic_ai import Agent
 
-from autoreviewer.github import Conclusion, PullRequests, PullRequestState, Repo, ReviewComment
-from autoreviewer.review.checkout import extract_async
+from autoreviewer.github import Conclusion, PullRequests, PullRequestState, Repo, ReviewComment, ReviewRejected
 from autoreviewer.review.diff import MAX_CHANGED_LINES, select
 from autoreviewer.review.pipeline import Outcome, PullRequestText, review
 from autoreviewer.review.render import comment_body, review_body
 from autoreviewer.review.schemas import LensReport, Verification
+from autoreviewer.review.workspace import RepoSource, Workspace, read_changes
 from autoreviewer.web.routing import PullRequestUpdated
 
 logger = logging.getLogger("autoreviewer.job")
 
-AgentFactory = Callable[[Path], tuple[Agent[None, LensReport], Agent[None, Verification]]]
+AgentFactory = Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]
 
 
 @dataclass(frozen=True)
 class ReviewDeps:
     github: PullRequests
+    source: RepoSource
+    """Where the code comes from: a git checkout of the PR head plus its merge-base."""
     agents: AgentFactory
-    """Build (lens, verifier) over a checkout directory."""
+    """Build (lens, verifier) over a checkout."""
     work_dir: Path
     bot_login: str
     """Our own GitHub login, e.g. chaos-emerald-reviewer[bot]; used to avoid reviewing a commit twice."""
@@ -83,22 +85,25 @@ async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated) -> CheckRe
 
 async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
     state = await _current(deps, repo, pull)
-    selection = select(await deps.github.list_files(repo, pull.number))
-    if not selection.reviewable:
-        return CheckResult(
-            "Nothing to review", "Only removed, generated, vendored, or binary files changed.", "success"
-        )
-    if selection.changed_lines > MAX_CHANGED_LINES:
-        return CheckResult(
-            "Too large to review",
-            f"{selection.changed_lines} changed lines; the limit is {MAX_CHANGED_LINES}. Smaller PRs get real reviews.",
-            "neutral",
-        )
+    base = await deps.github.merge_base(repo, state.base_sha, pull.head_sha)
 
     with tempfile.TemporaryDirectory(prefix="review-", dir=deps.work_dir) as scratch:
-        root = await extract_async(await deps.github.download_tarball(repo, pull.head_sha), Path(scratch))
-        lens, verifier = deps.agents(root)
-        outcome = await review(PullRequestText(state.title, state.body, selection.reviewable), lens, verifier)
+        workspace = await deps.source.checkout(repo, head=pull.head_sha, base=base, dest=Path(scratch) / "repo")
+        changes, patches = await read_changes(workspace)
+        selection = select(changes)
+        if not selection.reviewable:
+            return CheckResult(
+                "Nothing to review", "Only removed, generated, vendored, or binary files changed.", "success"
+            )
+        if selection.changed_lines > MAX_CHANGED_LINES:
+            return CheckResult(
+                "Too large to review",
+                f"{selection.changed_lines} changed lines; the limit is {MAX_CHANGED_LINES}.",
+                "neutral",
+            )
+        lens, verifier = deps.agents(workspace)
+        pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
+        outcome = await review(pr, lens, verifier)
 
     await _current(deps, repo, pull)  # the review took minutes; don't post against a commit that's gone
     await _post(deps, repo, pull, outcome)
@@ -120,15 +125,31 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
         )
         return
     footer = f"<sub>autoreviewer · {deps.models_note} · `{pull.head_sha[:7]}`</sub>"
-    await deps.github.create_review(
-        repo,
-        pull.number,
-        commit_sha=pull.head_sha,
-        # The verdict is computed, never generated: any confirmed finding blocks the merge.
-        event="REQUEST_CHANGES" if outcome.blocking else "APPROVE",
-        body=review_body(outcome.inline, outcome.general, footer=footer),
-        comments=[ReviewComment(f.path, f.line, comment_body(f)) for f in outcome.inline],
-    )
+    # The verdict is computed, never generated: any confirmed finding blocks the merge.
+    event = "REQUEST_CHANGES" if outcome.blocking else "APPROVE"
+    try:
+        await deps.github.create_review(
+            repo,
+            pull.number,
+            commit_sha=pull.head_sha,
+            event=event,
+            body=review_body(outcome.inline, outcome.general, footer=footer),
+            comments=[ReviewComment(f.path, f.line, comment_body(f)) for f in outcome.inline],
+        )
+    except ReviewRejected:
+        # GitHub's diff view can differ from ours (e.g. files it doesn't render). Keep every finding,
+        # just not inline: same verdict, findings listed in the review body.
+        logger.warning(
+            "inline comments rejected for %s/%s#%d; posting findings in the body", pull.owner, pull.repo, pull.number
+        )
+        await deps.github.create_review(
+            repo,
+            pull.number,
+            commit_sha=pull.head_sha,
+            event=event,
+            body=review_body([], outcome.inline + outcome.general, footer=footer),
+            comments=[],
+        )
 
 
 def _summary(outcome: Outcome) -> CheckResult:

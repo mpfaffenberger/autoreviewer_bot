@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from githubkit import AppAuthStrategy, GitHub
+from githubkit.exception import RequestFailed
 
 CHECK_NAME = "autoreviewer"
 
@@ -19,22 +20,19 @@ class Repo:
     owner: str
     name: str
 
+    @property
+    def clone_url(self) -> str:
+        return f"https://github.com/{self.owner}/{self.name}.git"
+
 
 @dataclass(frozen=True)
 class PullRequestState:
     head_sha: str
+    base_sha: str
     state: str
     draft: bool
     title: str
     body: str
-
-
-@dataclass(frozen=True)
-class ChangedFile:
-    path: str
-    status: str
-    patch: str | None
-    """Unified diff hunks; GitHub omits it for binary files and very large diffs."""
 
 
 @dataclass(frozen=True)
@@ -44,14 +42,16 @@ class ReviewComment:
     body: str
 
 
+class ReviewRejected(Exception):
+    """GitHub refused the review (422), typically because a comment's line isn't in its diff view."""
+
+
 class PullRequests(Protocol):
-    """Everything a review job needs from GitHub."""
+    """Everything a review job needs from GitHub's API. Code itself comes from git (see workspace.py)."""
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState: ...
 
-    async def list_files(self, repo: Repo, number: int) -> list[ChangedFile]: ...
-
-    async def download_tarball(self, repo: Repo, sha: str) -> bytes: ...
+    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str: ...
 
     async def start_check(self, repo: Repo, head_sha: str) -> int: ...
 
@@ -83,27 +83,33 @@ class GitHubApp:
         # reference, so chaining off this temporary lets CPython collect it mid-call (M0 live test).
         return self._github.with_auth(self._github.auth.as_installation(installation_id))
 
+    async def read_token(self, repo: Repo) -> str:
+        """A short-lived token that can only read this one repository's contents (for `git fetch`)."""
+        response = await self._github.rest.apps.async_create_installation_access_token(
+            repo.installation_id, data={"repositories": [repo.name], "permissions": {"contents": "read"}}
+        )
+        return str(response.json()["token"])
+
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
         github = self._as_installation(repo.installation_id)
         pull = (await github.rest.pulls.async_get(repo.owner, repo.name, number)).parsed_data
         return PullRequestState(
-            head_sha=pull.head.sha, state=pull.state, draft=bool(pull.draft), title=pull.title, body=pull.body or ""
+            head_sha=pull.head.sha,
+            base_sha=pull.base.sha,
+            state=pull.state,
+            draft=bool(pull.draft),
+            title=pull.title,
+            body=pull.body or "",
         )
 
-    async def list_files(self, repo: Repo, number: int) -> list[ChangedFile]:
+    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
+        """The commit GitHub diffs a PR against (three-dot), so our diff matches its review view."""
         github = self._as_installation(repo.installation_id)
-        files: list[ChangedFile] = []
-        async for entry in github.rest.paginate(
-            github.rest.pulls.async_list_files, owner=repo.owner, repo=repo.name, pull_number=number, per_page=100
-        ):
-            patch = entry.patch if isinstance(entry.patch, str) else None
-            files.append(ChangedFile(path=entry.filename, status=entry.status, patch=patch))
-        return files
-
-    async def download_tarball(self, repo: Repo, sha: str) -> bytes:
-        github = self._as_installation(repo.installation_id)
-        response = await github.rest.repos.async_download_tarball_archive(repo.owner, repo.name, sha)
-        return response.content
+        # per_page=1 keeps the response small; only merge_base_commit is read.
+        response = await github.rest.repos.async_compare_commits(
+            repo.owner, repo.name, f"{base_sha}...{head_sha}", per_page=1
+        )
+        return str(response.json()["merge_base_commit"]["sha"])
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
         github = self._as_installation(repo.installation_id)
@@ -130,17 +136,22 @@ class GitHubApp:
         self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]
     ) -> None:
         github = self._as_installation(repo.installation_id)
-        await github.rest.pulls.async_create_review(
-            repo.owner,
-            repo.name,
-            number,
-            data={
-                "commit_id": commit_sha,
-                "event": event,
-                "body": body,
-                "comments": [{"path": c.path, "line": c.line, "side": "RIGHT", "body": c.body} for c in comments],
-            },
-        )
+        try:
+            await github.rest.pulls.async_create_review(
+                repo.owner,
+                repo.name,
+                number,
+                data={
+                    "commit_id": commit_sha,
+                    "event": event,
+                    "body": body,
+                    "comments": [{"path": c.path, "line": c.line, "side": "RIGHT", "body": c.body} for c in comments],
+                },
+            )
+        except RequestFailed as error:
+            if error.response.status_code == 422:
+                raise ReviewRejected(str(error)) from error
+            raise
 
     async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
         github = self._as_installation(repo.installation_id)

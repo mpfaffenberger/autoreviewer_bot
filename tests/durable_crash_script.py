@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -22,11 +23,10 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from autoreviewer.review import durable
 from autoreviewer.review.agents import correctness_agent, verifier_agent
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import FakeGitHub, finding, job_deps, verifier_model
+from tests.review_fakes import FakeGitHub, GitRepo, finding, job_deps, make_repo, verifier_model
 
 DIR = Path(sys.argv[1])
 MODE = sys.argv[2]
-PULL = PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha="a" * 40)
 
 
 class PersistentGitHub(FakeGitHub):
@@ -37,8 +37,8 @@ class PersistentGitHub(FakeGitHub):
         (DIR / "github.json").write_text(json.dumps({"checks": self.checks, "reviews": reviews}))
 
     @classmethod
-    def load(cls) -> PersistentGitHub:
-        github = cls()
+    def load(cls, repo: GitRepo) -> PersistentGitHub:
+        github = cls(repo)
         if (state := DIR / "github.json").exists():
             saved = json.loads(state.read_text())
             github.checks, github.reviews = saved["checks"], saved["reviews"]
@@ -64,8 +64,19 @@ def crashing_lens(messages: list[ModelMessage], info: AgentInfo) -> ModelRespons
     return ModelResponse(parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": [finding(5)]})])
 
 
+def origin() -> GitRepo:
+    """The same repository in both processes: created by the first, reopened by the second."""
+    path = DIR / "origin"
+    if not path.exists():
+        return make_repo(path)
+    sha = lambda ref: subprocess.run(["git", "rev-parse", ref], cwd=path, capture_output=True, text=True).stdout.strip()  # noqa: E731
+    return GitRepo(path, sha("HEAD~1"), sha("HEAD"))
+
+
 async def main() -> None:
-    github = PersistentGitHub.load()
+    repo = origin()
+    pull = PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha=repo.head)
+    github = PersistentGitHub.load(repo)
     deps = job_deps(github, DIR)
     deps = type(deps)(**{**deps.__dict__, "agents": lambda root: (
         correctness_agent(FunctionModel(crashing_lens), root), verifier_agent(verifier_model(lambda f: True), root)
@@ -74,12 +85,12 @@ async def main() -> None:
     await durable.launch(deps, concurrency=2)
     try:
         if MODE == "enqueue-and-crash":
-            await (await durable.enqueue(PULL)).get_result()  # never returns: the lens kills the process
+            await (await durable.enqueue(pull)).get_result()  # never returns: the lens kills the process
         else:
             # launch() recovered the interrupted workflow; wait for it by its deterministic id.
             from dbos import DBOS
 
-            handle = await DBOS.retrieve_workflow_async(durable.workflow_id(PULL))
+            handle = await DBOS.retrieve_workflow_async(durable.workflow_id(pull))
             await asyncio.wait_for(handle.get_result(), timeout=60)
     finally:
         durable.shutdown()
