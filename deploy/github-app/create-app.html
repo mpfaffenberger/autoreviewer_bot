@@ -1,0 +1,63 @@
+<!doctype html>
+<!--
+  Registers the autoreviewer GitHub App via GitHub's manifest flow. Open this file in a browser that is
+  logged in to GitHub as mpfaffenberger, review the manifest, and click the button. The textarea below
+  is the single source of truth for the App's settings; there is no JavaScript.
+
+  After you click "Create GitHub App" on github.com, you land on review.chaos-emerald.com, which
+  isn't live yet, so the page fails to load. That's expected: copy the `code` value from the
+  address bar and run deploy/github-app/convert.sh <code> within one hour.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Create the autoreviewer GitHub App</title>
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+    textarea { width: 100%; height: 26rem; font: 13px/1.4 ui-monospace, monospace; }
+    button { font-size: 1.1rem; padding: .6rem 1.2rem; cursor: pointer; }
+    code { background: #f2f2f2; padding: 0 .25rem; }
+  </style>
+</head>
+<body>
+  <h1>Create the autoreviewer GitHub App</h1>
+  <p>
+    This registers a <b>private</b> App on your personal account (only you can install it; it can be made
+    public later). Permissions: Pull requests, Checks write; Contents, Issues, Metadata read.
+    You can still change the <b>name</b> on GitHub's page before creating it.
+  </p>
+  <form action="https://github.com/settings/apps/new" method="post">
+    <textarea name="manifest" readonly>{
+  "name": "chaos-emerald-reviewer",
+  "url": "https://review.chaos-emerald.com",
+  "description": "Reviews pull requests for correctness, DRY, and security. Runs on chaos-emerald's own models.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://review.chaos-emerald.com/webhook",
+    "active": true
+  },
+  "redirect_url": "https://review.chaos-emerald.com/github/app-created",
+  "default_permissions": {
+    "pull_requests": "write",
+    "checks": "write",
+    "contents": "read",
+    "issues": "read",
+    "metadata": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "issue_comment",
+    "check_run"
+  ]
+}</textarea>
+    <p><button type="submit">Create GitHub App on github.com</button></p>
+  </form>
+  <p>
+    Next: GitHub sends you to <code>review.chaos-emerald.com/github/app-created?code=…</code>, which won't
+    load yet. Copy the <code>code</code> from the address bar and hand it over (or run
+    <code>deploy/github-app/convert.sh CODE</code>). It expires after one hour.
+  </p>
+</body>
+</html>

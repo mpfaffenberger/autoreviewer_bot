@@ -1,0 +1,59 @@
+#!/usr/sbin/nft -f
+# Egress for `smolrunner`, the account that runs sandboxd and therefore smolvm's VMM.
+#
+# smolvm's default networking (TSI) opens a guest's connections from the VMM process on the host, so
+# they leave as this uid. smolvm already enforces each sandbox's host allowlist; this table is the
+# backstop if that ever fails: public HTTPS and DNS via systemd-resolved, nothing on the LAN or host.
+
+# Idempotent reload: create-then-delete so the first load doesn't fail, then define from scratch.
+table inet autoreviewer_sandbox
+delete table inet autoreviewer_sandbox
+
+table inet autoreviewer_sandbox {
+	set private4 {
+		type ipv4_addr
+		flags interval
+		# this-net, RFC 1918, CGNAT (smolvm's own gateway lives here), loopback, link-local (cloud
+		# metadata), IETF protocol assignments, benchmarking, multicast and reserved.
+		elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,
+			     192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }
+	}
+
+	set private6 {
+		type ipv6_addr
+		flags interval
+		# unspecified + loopback, IPv4-mapped, NAT64, ULA, link-local, multicast.
+		elements = { ::/127, ::ffff:0.0.0.0/96, 64:ff9b::/96, fc00::/7, fe80::/10, ff00::/8 }
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+
+		# Filter only packets that positively carry smolrunner's uid. Packets with no full socket
+		# (kernel RSTs and ICMP errors, TIME_WAIT segments) have no uid at all: a "skuid != smolrunner
+		# accept" test does NOT match them, so they would fall into the rejects below and break the
+		# host's own connections. (That bug shipped for ~1h on 2026-11-16; see EXECUTION.md.)
+		meta skuid "smolrunner" jump smolrunner
+	}
+
+	chain smolrunner {
+		# DNS. The daemon's own lookups (image pulls) go through resolved's stub, which then asks the
+		# router as its own user. smolvm's in-VMM resolver for guests skips loopback nameservers and
+		# falls back to these public ones (observed 2026-11-16); if that ever changes, guest DNS fails
+		# closed and verify.sh catches it. The router itself stays unreachable.
+		ip daddr 127.0.0.53 meta l4proto { tcp, udp } th dport 53 accept
+		ip daddr { 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4 } meta l4proto { tcp, udp } th dport 53 accept
+
+		# The VMM ("libkrun VM") talks to itself over loopback UDP on an ephemeral port; blocking that
+		# hangs VM creation. Allow loopback UDP into the kernel's ephemeral range only (net.ipv4.
+		# ip_local_port_range, 32768-60999 here): fixed-port loopback services (resolved :53, chronyd
+		# :323) stay unreachable, and without CAP_NET_RAW smolrunner can't spoof its way into another
+		# program's connected UDP socket. Loopback TCP stays blocked (Boodleton, model servers, SMS bridge).
+		ip saddr 127.0.0.1 ip daddr 127.0.0.1 udp dport 32768-60999 accept
+
+		ip daddr @private4 counter reject
+		ip6 daddr @private6 counter reject
+		meta l4proto tcp th dport 443 accept
+		counter reject
+	}
+}

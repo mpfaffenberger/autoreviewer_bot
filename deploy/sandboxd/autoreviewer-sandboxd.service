@@ -1,0 +1,59 @@
+[Unit]
+Description=autoreviewer sandboxd: smolvm microVMs for untrusted PR code
+Documentation=file:///opt/autoreviewer-sandboxd/EXECUTION.md
+# No firewall, no daemon: if the egress backstop isn't loaded, sandboxd must not start.
+Requires=autoreviewer-sandbox-egress.service autoreviewer-sandboxd.socket
+After=autoreviewer-sandbox-egress.service autoreviewer-sandboxd.socket network-online.target
+Wants=network-online.target
+
+[Service]
+User=smolrunner
+Group=smolrunner
+SupplementaryGroups=sandboxd
+# The listening socket comes from autoreviewer-sandboxd.socket (socket activation).
+ExecStart=/opt/autoreviewer-sandboxd/.venv/bin/autoreviewer-sandboxd \
+    --max-sandboxes 2 --max-age 1200 --max-cpus 4 --max-memory-mb 3072 \
+    --permit-host pypi.org --permit-host files.pythonhosted.org \
+    --permit-image python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+Restart=on-failure
+RestartSec=5
+
+# State (VM disks, image cache) and runtime files are private to smolrunner.
+StateDirectory=smolrunner
+StateDirectoryMode=0700
+RuntimeDirectory=autoreviewer-sandbox
+RuntimeDirectoryMode=0700
+Environment=HOME=/var/lib/smolrunner XDG_RUNTIME_DIR=/run/autoreviewer-sandbox
+UMask=0077
+
+# Confinement around the VMM, which smolvm's security model asks for: a guest that escapes the VM
+# lands here, with no capabilities, no view of /var/home, and only /dev/kvm from /dev.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+InaccessiblePaths=-/var/home -/var/roothome
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Not RestrictSUIDSGID: smolvm unpacks guest root filesystems, which contain setuid binaries, and that
+# filter makes the extraction fail. Safe without it: such files are setuid to smolrunner itself,
+# NoNewPrivileges stops setuid from working for anything this service runs, and the state directory
+# is 0700 so no other user can reach them. (Bisected with systemd-run, 2026-11-16.)
+RestrictRealtime=yes
+LockPersonality=yes
+
+# VMs run inside this process, so this caps every sandbox together (2 x 3 GiB + daemon).
+MemoryMax=8G
+TasksMax=512
+
+[Install]
+# Started on demand by the socket; enabling the socket is enough.
+Also=autoreviewer-sandboxd.socket

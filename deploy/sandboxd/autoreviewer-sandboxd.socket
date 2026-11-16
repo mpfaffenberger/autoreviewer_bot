@@ -1,0 +1,14 @@
+[Unit]
+Description=autoreviewer sandboxd socket (group sandboxd may connect)
+
+[Socket]
+# systemd owns the socket: it exists before the daemon starts, connections queue while the daemon starts
+# or restarts, and the daemon is started on first use.
+ListenStream=/run/autoreviewer-sandboxd.sock
+SocketUser=smolrunner
+SocketGroup=sandboxd
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

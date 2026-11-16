@@ -1,0 +1,13 @@
+[Unit]
+Description=Egress firewall for smolrunner, the autoreviewer sandbox account
+Before=autoreviewer-sandboxd.service
+After=nftables.service firewalld.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/autoreviewer-sandboxd/egress.nft
+ExecStop=/usr/sbin/nft delete table inet autoreviewer_sandbox
+
+[Install]
+WantedBy=multi-user.target
