@@ -26,6 +26,8 @@ PATCH = """@@ -1,5 +1,5 @@
 -    return total / len(xs)
 +    return total / len(xs) - 1"""
 
+BOT = "chaos-emerald-reviewer[bot]"
+
 SOURCE = "def average(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total / len(xs) - 1\n"
 
 
@@ -118,4 +120,21 @@ class FakeGitHub:
     async def create_review(
         self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]
     ) -> None:
-        self.reviews.append({"commit_sha": commit_sha, "event": event, "body": body, "comments": comments})
+        self.reviews.append(
+            {"commit_sha": commit_sha, "event": event, "body": body, "comments": comments, "author": BOT}
+        )
+
+    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
+        return any(r["commit_sha"] == commit_sha and r["author"] == author for r in self.reviews)
+
+
+def job_deps(github: object, work_dir: Path, findings: list[dict[str, Any]] | None = None, **kwargs: Any) -> Any:
+    from autoreviewer.review.job import ReviewDeps
+
+    return ReviewDeps(
+        github=github,  # type: ignore[arg-type]
+        agents=agents([] if findings is None else findings, **kwargs),
+        work_dir=work_dir,
+        bot_login=BOT,
+        models_note="test models",
+    )

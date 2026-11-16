@@ -11,12 +11,12 @@ import pytest
 from autoreviewer.github import ChangedFile
 from autoreviewer.review import checkout
 from autoreviewer.review.diff import MAX_CHANGED_LINES, annotate, commentable_lines, select
-from autoreviewer.review.job import ReviewDeps, review_pull_request
+from autoreviewer.review.job import review_and_post
 from autoreviewer.review.pipeline import PullRequestText, review
 from autoreviewer.review.render import comment_body, sanitize
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import PATCH, FakeGitHub, agents, finding, tarball
+from tests.review_fakes import BOT, PATCH, FakeGitHub, agents, finding, job_deps, tarball
 
 pytestmark = pytest.mark.anyio
 
@@ -150,49 +150,49 @@ async def test_duplicate_findings_are_reported_once(tmp_path: Path) -> None:
     assert len((await review(pr_text(), lens, verifier)).inline) == 1
 
 
-# --- job ------------------------------------------------------------------------------------------
+# --- job (the review_and_post phase; composition and recovery are in test_durable.py) --------------
 
 
-def deps(github: FakeGitHub, tmp_path: Path, **agent_kwargs: object) -> ReviewDeps:
-    return ReviewDeps(github=github, agents=agents(**agent_kwargs), work_dir=tmp_path, models_note="test models")  # type: ignore[arg-type]
-
-
-async def test_a_bug_requests_changes_with_an_inline_comment_and_fails_the_check(tmp_path: Path) -> None:
+async def test_a_bug_requests_changes_with_an_inline_comment(tmp_path: Path) -> None:
     github = FakeGitHub()
-    await review_pull_request(deps(github, tmp_path, findings=[finding(5)]), PULL)
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
 
     [posted] = github.reviews
     assert posted["event"] == "REQUEST_CHANGES" and posted["commit_sha"] == HEAD
     assert [(c.path, c.line) for c in posted["comments"]] == [("stats.py", 5)]
-    assert github.checks == [
-        {"status": "completed", "head_sha": HEAD, "conclusion": "failure", "title": "1 correctness issue(s)",
-         "summary": "Changes requested; see the review comments."}
-    ]  # fmt: skip
+    assert (result.conclusion, result.title) == ("failure", "1 correctness issue(s)")
 
 
 async def test_a_clean_pr_is_approved(tmp_path: Path) -> None:
     github = FakeGitHub()
-    await review_pull_request(deps(github, tmp_path, findings=[]), PULL)
+    result = await review_and_post(job_deps(github, tmp_path, []), PULL)
     assert github.reviews[0]["event"] == "APPROVE" and github.reviews[0]["comments"] == []
-    assert github.checks[0]["conclusion"] == "success"
+    assert result.conclusion == "success"
+
+
+async def test_a_commit_already_reviewed_is_not_reviewed_again(tmp_path: Path) -> None:
+    # What a replay looks like after a crash between posting the review and checkpointing the step.
+    github = FakeGitHub()
+    github.reviews.append({"commit_sha": HEAD, "event": "REQUEST_CHANGES", "body": "", "comments": [], "author": BOT})
+    await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+    assert len(github.reviews) == 1
 
 
 async def test_a_push_during_the_review_supersedes_it(tmp_path: Path) -> None:
     github = FakeGitHub(head_shas=[HEAD, "b" * 40])  # moved on between the start and the post
-    await review_pull_request(deps(github, tmp_path, findings=[finding(5)]), PULL)
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
     assert github.reviews == []
-    assert github.checks[0]["title"] == "Superseded" and github.checks[0]["conclusion"] == "neutral"
+    assert (result.title, result.conclusion) == ("Superseded", "neutral")
 
 
 async def test_huge_prs_are_not_reviewed(tmp_path: Path) -> None:
     patch = f"@@ -0,0 +1,{MAX_CHANGED_LINES + 1} @@\n" + "\n".join("+x" for _ in range(MAX_CHANGED_LINES + 1))
     github = FakeGitHub(files=[ChangedFile("big.py", "added", patch)])
-    await review_pull_request(deps(github, tmp_path, findings=[finding(5)]), PULL)
-    assert github.reviews == [] and github.checks[0]["title"] == "Too large to review"
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+    assert github.reviews == [] and result.title == "Too large to review"
 
 
-async def test_a_crash_finishes_the_check_instead_of_leaving_it_running(tmp_path: Path) -> None:
+async def test_a_crash_becomes_a_result_instead_of_an_exception(tmp_path: Path) -> None:
     github = FakeGitHub(archive=b"not a tarball")
-    await review_pull_request(deps(github, tmp_path, findings=[finding(5)]), PULL)
-    assert github.reviews == []
-    assert github.checks[0]["status"] == "completed" and github.checks[0]["title"] == "Review failed"
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), PULL)
+    assert github.reviews == [] and (result.title, result.conclusion) == ("Review failed", "neutral")

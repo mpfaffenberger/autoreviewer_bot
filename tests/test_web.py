@@ -14,7 +14,6 @@ import pytest
 
 from autoreviewer.web.app import create_app
 from autoreviewer.web.config import Settings, parse_repos
-from autoreviewer.web.dispatch import Dispatcher
 from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
 
 pytestmark = pytest.mark.anyio
@@ -53,7 +52,6 @@ class FakeHandler:
 class Receiver:
     client: httpx.AsyncClient
     handler: FakeHandler
-    dispatcher: Dispatcher
 
     async def deliver(
         self,
@@ -78,10 +76,11 @@ async def receiver() -> AsyncIterator[Receiver]:
     settings = Settings(
         app_id=1, app_slug="chaos-emerald-reviewer", webhook_secret=SECRET, private_key="unused", repos=REPOS
     )
-    handler, dispatcher = FakeHandler(), Dispatcher()
-    app = create_app(settings, handler, dispatcher)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        yield Receiver(client, handler, dispatcher)
+    handler = FakeHandler()
+    app = create_app(settings, handler)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)  # see the 500 a failure produces
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield Receiver(client, handler)
 
 
 # --- signatures ---------------------------------------------------------------------------------
@@ -106,7 +105,6 @@ async def test_ping_with_a_valid_signature_pongs(receiver: Receiver) -> None:
 async def test_bad_signatures_are_rejected_before_anything_else(receiver: Receiver, sign: str) -> None:
     response = await receiver.deliver("pull_request", pull_request_payload(), sign=sign)
     assert response.status_code == 401
-    await receiver.dispatcher.drain()
     assert receiver.handler.handled == []
 
 
@@ -125,7 +123,6 @@ async def test_a_sha1_signature_header_alone_is_not_enough(receiver: Receiver) -
 async def test_allowlisted_pull_request_is_handed_to_the_review_job(receiver: Receiver) -> None:
     response = await receiver.deliver("pull_request", pull_request_payload())
     assert response.status_code == 202
-    await receiver.dispatcher.drain()
     assert receiver.handler.handled == [
         PullRequestUpdated(
             installation_id=182623847,
@@ -137,17 +134,14 @@ async def test_allowlisted_pull_request_is_handed_to_the_review_job(receiver: Re
     ]
 
 
-async def test_redelivered_ids_are_processed_once(receiver: Receiver) -> None:
-    first = await receiver.deliver("pull_request", pull_request_payload(), delivery="same")
-    second = await receiver.deliver("pull_request", pull_request_payload(), delivery="same")
-    await receiver.dispatcher.drain()
-    assert (first.status_code, second.json()) == (202, {"status": "duplicate"})
-    assert len(receiver.handler.handled) == 1
+async def test_redeliveries_are_handed_off_again_because_the_workflow_id_dedupes(receiver: Receiver) -> None:
+    for _ in range(2):
+        assert (await receiver.deliver("pull_request", pull_request_payload(), delivery="same")).status_code == 202
+    assert len(receiver.handler.handled) == 2  # one review regardless: see test_durable.py
 
 
 async def test_repos_off_the_allowlist_are_ignored(receiver: Receiver) -> None:
     response = await receiver.deliver("pull_request", pull_request_payload(repo="mpfaffenberger/code_puppy"))
-    await receiver.dispatcher.drain()
     assert response.json() == {"status": "ignored", "reason": "repository is not on the allowlist"}
     assert receiver.handler.handled == []
 
@@ -167,10 +161,10 @@ async def test_missing_event_headers_are_a_client_error(receiver: Receiver) -> N
     assert response.status_code == 400
 
 
-async def test_a_failing_job_does_not_break_the_receiver(receiver: Receiver) -> None:
+async def test_a_failed_enqueue_is_a_500_so_github_can_redeliver(receiver: Receiver) -> None:
     receiver.handler.fail = True
-    assert (await receiver.deliver("pull_request", pull_request_payload(), delivery="a")).status_code == 202
-    await receiver.dispatcher.drain()
+    assert (await receiver.deliver("pull_request", pull_request_payload(), delivery="a")).status_code == 500
+    receiver.handler.fail = False
     assert (await receiver.deliver("ping", {}, delivery="b")).json() == {"status": "pong"}
 
 

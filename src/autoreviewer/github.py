@@ -63,6 +63,10 @@ class PullRequests(Protocol):
         self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]
     ) -> None: ...
 
+    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
+        """Whether `author` already reviewed this exact commit (makes posting safe to replay)."""
+        ...
+
 
 class GitHubApp:
     """Acts as one installation per call; githubkit mints and refreshes the installation tokens."""
@@ -137,3 +141,18 @@ class GitHubApp:
                 "comments": [{"path": c.path, "line": c.line, "side": "RIGHT", "body": c.body} for c in comments],
             },
         )
+
+    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
+        github = self._as_installation(repo.installation_id)
+        page = 1
+        while True:
+            # Raw JSON, not githubkit's models: only two fields matter and the full schema is large.
+            response = await github.rest.pulls.async_list_reviews(
+                repo.owner, repo.name, number, per_page=100, page=page
+            )
+            reviews = response.json()
+            if any((r.get("user") or {}).get("login") == author and r.get("commit_id") == commit_sha for r in reviews):
+                return True
+            if len(reviews) < 100:
+                return False
+            page += 1

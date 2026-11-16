@@ -6,13 +6,13 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.web.config import Settings
-from autoreviewer.web.dispatch import Dispatcher
 from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
 
 logger = logging.getLogger("autoreviewer.web")
@@ -25,15 +25,11 @@ def _reply(status_code: int, **body: str) -> JSONResponse:
 
 
 def create_app(
-    settings: Settings, on_pull_request: PullRequestHandler, dispatcher: Dispatcher | None = None
+    settings: Settings,
+    on_pull_request: PullRequestHandler,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
-    dispatcher = dispatcher or Dispatcher(max_concurrent=settings.max_concurrent_jobs)
-
-    @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        await dispatcher.drain()
-
+    """`on_pull_request` must be quick (it enqueues); `lifespan` starts and stops whatever runs the work."""
     app = FastAPI(title="autoreviewer", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
@@ -52,8 +48,6 @@ def create_app(
         delivery = request.headers.get("x-github-delivery")
         if not event or not delivery:
             return _reply(400, error="missing X-GitHub-Event or X-GitHub-Delivery")
-        if not dispatcher.first_time(delivery):
-            return _reply(200, status="duplicate")
         try:
             decision = route(event, json.loads(body), settings.repos)
         except (ValueError, MalformedPayload) as error:
@@ -67,21 +61,22 @@ def create_app(
             case Ignore(reason=reason):
                 return _reply(200, status="ignored", reason=reason)
             case PullRequestUpdated() as pull:
-                dispatcher.submit(f"review {pull.owner}/{pull.repo}#{pull.number}", lambda: on_pull_request(pull))
+                # Awaited, not fire-and-forget: if enqueueing fails, GitHub sees a 500 and can redeliver.
+                # Duplicate deliveries are harmless; the review workflow's ID makes them no-ops.
+                await on_pull_request(pull)
                 return _reply(202, status="accepted")
 
     return app
 
 
 def main() -> None:
-    import functools
-
     import uvicorn
 
     from autoreviewer import logs
     from autoreviewer.github import GitHubApp
+    from autoreviewer.review import durable
     from autoreviewer.review.agents import boodleton_model, correctness_agent, verifier_agent
-    from autoreviewer.review.job import ReviewDeps, review_pull_request
+    from autoreviewer.review.job import ReviewDeps
 
     logs.configure()
     settings = Settings.from_env()
@@ -98,7 +93,21 @@ def main() -> None:
         github=GitHubApp.from_key(settings.app_id, settings.private_key),
         agents=lambda root: (correctness_agent(lens_model, root), verifier_agent(verifier_model, root)),
         work_dir=settings.work_dir,
+        bot_login=settings.bot_login,
         models_note=f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`",
     )
-    app = create_app(settings, functools.partial(review_pull_request, deps))
+    durable.configure(settings.database)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await durable.launch(deps, concurrency=settings.max_concurrent_jobs)  # also recovers interrupted reviews
+        try:
+            yield
+        finally:
+            durable.shutdown()
+
+    async def enqueue(pull: PullRequestUpdated) -> None:
+        await durable.enqueue(pull)
+
+    app = create_app(settings, enqueue, lifespan)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

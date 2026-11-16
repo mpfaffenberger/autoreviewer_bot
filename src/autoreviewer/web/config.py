@@ -25,6 +25,8 @@ class Settings:
     lens_model: str = "qwen3.8-flash-next"
     verifier_model: str = "deepseek-v4.1-flash"
     work_dir: Path = Path("/var/lib/autoreviewer/work")
+    database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
+    """DBOS system database: queued and in-flight reviews survive restarts here."""
 
     @property
     def bot_login(self) -> str:
@@ -45,6 +47,7 @@ class Settings:
             lens_model=env.get("AUTOREVIEWER_LENS_MODEL", cls.lens_model),
             verifier_model=env.get("AUTOREVIEWER_VERIFIER_MODEL", cls.verifier_model),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
+            database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
         )
 
 

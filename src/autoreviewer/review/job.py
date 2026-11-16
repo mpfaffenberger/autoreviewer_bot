@@ -1,4 +1,10 @@
-"""One PR push, reviewed: check run -> fetch -> review -> stale-head check -> review + verdict -> check run."""
+"""The three phases of reviewing one PR push. `durable.py` runs each as a DBOS step.
+
+    start_check  ->  review_and_post  ->  finish_check
+
+Each phase is safe to replay after a crash: the check run is created once (its step's result is
+checkpointed), and posting skips a commit the bot already reviewed.
+"""
 
 from __future__ import annotations
 
@@ -29,43 +35,61 @@ class ReviewDeps:
     agents: AgentFactory
     """Build (lens, verifier) over a checkout directory."""
     work_dir: Path
+    bot_login: str
+    """Our own GitHub login, e.g. chaos-emerald-reviewer[bot]; used to avoid reviewing a commit twice."""
     models_note: str
     """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    title: str
+    summary: str
+    conclusion: Conclusion
 
 
 class Superseded(Exception):
     """The PR moved on (new push, closed) while we worked; the newer event gets its own review."""
 
 
-async def review_pull_request(deps: ReviewDeps, pull: PullRequestUpdated) -> None:
-    repo = Repo(pull.installation_id, pull.owner, pull.repo)
-    check_id = await deps.github.start_check(repo, pull.head_sha)
-    conclusion: Conclusion
+def repo_of(pull: PullRequestUpdated) -> Repo:
+    return Repo(pull.installation_id, pull.owner, pull.repo)
+
+
+async def start_check(deps: ReviewDeps, pull: PullRequestUpdated) -> int:
+    return await deps.github.start_check(repo_of(pull), pull.head_sha)
+
+
+async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int, result: CheckResult) -> None:
+    await deps.github.finish_check(
+        repo_of(pull), check_id, conclusion=result.conclusion, title=result.title, summary=result.summary
+    )
+
+
+async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated) -> CheckResult:
+    """Never raises: every outcome, including a crash, becomes the check run's result."""
     try:
-        title, summary, conclusion = await _review(deps, repo, pull)
+        return await _review(deps, repo_of(pull), pull)
     except Superseded:
-        title, summary, conclusion = (
-            "Superseded",
-            "A newer push replaced this commit before the review finished.",
-            "neutral",
-        )
+        return CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
     except Exception:
         logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
-        title, summary, conclusion = (
+        return CheckResult(
             "Review failed",
             "The review could not be completed. Push again to retry; the bot's logs have the details.",
             "neutral",
         )
-    await deps.github.finish_check(repo, check_id, conclusion=conclusion, title=title, summary=summary)
 
 
-async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> tuple[str, str, Conclusion]:
+async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
     state = await _current(deps, repo, pull)
     selection = select(await deps.github.list_files(repo, pull.number))
     if not selection.reviewable:
-        return "Nothing to review", "Only removed, generated, vendored, or binary files changed.", "success"
+        return CheckResult(
+            "Nothing to review", "Only removed, generated, vendored, or binary files changed.", "success"
+        )
     if selection.changed_lines > MAX_CHANGED_LINES:
-        return (
+        return CheckResult(
             "Too large to review",
             f"{selection.changed_lines} changed lines; the limit is {MAX_CHANGED_LINES}. Smaller PRs get real reviews.",
             "neutral",
@@ -89,6 +113,12 @@ async def _current(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> Pu
 
 
 async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome: Outcome) -> None:
+    if await deps.github.has_review(repo, pull.number, commit_sha=pull.head_sha, author=deps.bot_login):
+        # A replay after a crash between posting and checkpointing: the review is already there.
+        logger.info(
+            "%s/%s#%d at %s already reviewed; not posting again", pull.owner, pull.repo, pull.number, pull.head_sha[:7]
+        )
+        return
     footer = f"<sub>autoreviewer · {deps.models_note} · `{pull.head_sha[:7]}`</sub>"
     await deps.github.create_review(
         repo,
@@ -101,9 +131,11 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
     )
 
 
-def _summary(outcome: Outcome) -> tuple[str, str, Conclusion]:
+def _summary(outcome: Outcome) -> CheckResult:
     dropped = f" {len(outcome.rejected)} candidate finding(s) were dropped by verification." if outcome.rejected else ""
     if outcome.blocking:
         count = len(outcome.inline) + len(outcome.general)
-        return f"{count} correctness issue(s)", f"Changes requested; see the review comments.{dropped}", "failure"
-    return "No correctness issues", f"Approved.{dropped}", "success"
+        return CheckResult(
+            f"{count} correctness issue(s)", f"Changes requested; see the review comments.{dropped}", "failure"
+        )
+    return CheckResult("No correctness issues", f"Approved.{dropped}", "success")
