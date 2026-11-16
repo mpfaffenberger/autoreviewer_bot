@@ -13,6 +13,7 @@ from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness import FileSystem
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
+from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
 from autoreviewer.review.schemas import LensReport, Verification
 from autoreviewer.review.workspace import Workspace
@@ -40,23 +41,32 @@ def _read_only_repo(root: Path) -> list[LocalWorkspace[None] | FileSystem[None]]
     return [LocalWorkspace(root, read_only=True), FileSystem(read_only=True, tools=sorted(READ_ONLY_TOOL_NAMES))]
 
 
+QWEN_CONTEXT_WINDOW = 262_144
+DEEPSEEK_CONTEXT_WINDOW = 1_048_576
+"""As reported by the serving engines' /v1/models (max_model_len), 2026-11-16."""
+
+
 def _agent[OutputT](
-    model: Model, workspace: Workspace, output_type: type[OutputT], prompt: str
+    model: Model, workspace: Workspace, output_type: type[OutputT], prompt: str, context_window: int
 ) -> Agent[None, OutputT]:
     return Agent(
         model,
         deps_type=type(None),
         output_type=output_type,
         instructions=(PROMPTS / prompt).read_text(),
-        capabilities=_read_only_repo(workspace.root),
+        capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window)],
         toolsets=[git_tools(workspace)],
         retries=RETRIES,
     )
 
 
-def correctness_agent(model: Model, workspace: Workspace) -> Agent[None, LensReport]:
-    return _agent(model, workspace, LensReport, "correctness.md")
+def correctness_agent(
+    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
+) -> Agent[None, LensReport]:
+    return _agent(model, workspace, LensReport, "correctness.md", context_window)
 
 
-def verifier_agent(model: Model, workspace: Workspace) -> Agent[None, Verification]:
-    return _agent(model, workspace, Verification, "verifier.md")
+def verifier_agent(
+    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+) -> Agent[None, Verification]:
+    return _agent(model, workspace, Verification, "verifier.md", context_window)

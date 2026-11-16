@@ -24,6 +24,9 @@ class Settings:
     boodleton_api_key: str = field(default="", repr=False)
     lens_model: str = "qwen3.8-flash-next"
     verifier_model: str = "deepseek-v4.1-flash"
+    lens_context_window: int = 262_144
+    verifier_context_window: int = 1_048_576
+    """Each model's context window in tokens; compaction keeps conversations under 60% of it."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
     """DBOS system database: queued and in-flight reviews survive restarts here."""
@@ -46,6 +49,8 @@ class Settings:
             boodleton_api_key=env["BOODLETON_API_KEY"],
             lens_model=env.get("AUTOREVIEWER_LENS_MODEL", cls.lens_model),
             verifier_model=env.get("AUTOREVIEWER_VERIFIER_MODEL", cls.verifier_model),
+            lens_context_window=int(env.get("AUTOREVIEWER_LENS_CONTEXT_WINDOW", cls.lens_context_window)),
+            verifier_context_window=int(env.get("AUTOREVIEWER_VERIFIER_CONTEXT_WINDOW", cls.verifier_context_window)),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
         )

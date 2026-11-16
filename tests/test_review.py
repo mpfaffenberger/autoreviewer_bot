@@ -20,21 +20,11 @@ from autoreviewer.review.job import review_and_post
 from autoreviewer.review.pipeline import PullRequestText, lens_prompt, review
 from autoreviewer.review.render import comment_body, sanitize
 from autoreviewer.review.schemas import Finding
-from autoreviewer.review.workspace import BASE, HEAD, Workspace, fetch, read_changes, run_git
+from autoreviewer.review.workspace import BASE, HEAD, Workspace, read_changes, run_git
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import BOT, FakeGitHub, GitRepo, agents, finding, job_deps, make_repo
+from tests.review_fakes import BOT, FakeGitHub, GitRepo, agents, finding, job_deps
 
 pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> GitRepo:
-    return make_repo(tmp_path / "origin")
-
-
-@pytest.fixture
-async def workspace(repo: GitRepo, tmp_path: Path) -> Workspace:
-    return await fetch(tmp_path / "checkout", url=repo.url, head=repo.head, base=repo.base)
 
 
 def pull(repo: GitRepo) -> PullRequestUpdated:

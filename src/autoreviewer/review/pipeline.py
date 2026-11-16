@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pydantic_ai import Agent
 
 from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
+from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.schemas import Finding, LensReport, Verification
 
@@ -117,10 +118,14 @@ async def review(pr: PullRequestText, lens: Agent[None, LensReport], verifier: A
             outcome.inline.append(finding)
         else:
             outcome.general.append(finding)
+    compacted = compaction_stats(lens_run.all_messages())
     logger.info(
-        "review: lens made %d requests and %d tool calls; %d found, %d inline, %d general, %d rejected",
+        "review: lens made %d requests and %d tool calls (compaction cleared %d, deduplicated %d results); "
+        "%d found, %d inline, %d general, %d rejected",
         usage.requests,
         usage.tool_calls,
+        compacted["cleared"],
+        compacted["superseded"],
         len(report.findings),
         len(outcome.inline),
         len(outcome.general),
