@@ -50,7 +50,7 @@ def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str]) -> Dec
     if (action := payload["action"]) not in PULL_REQUEST_ACTIONS:
         return Ignore(f"pull_request action {action!r} needs no review")
     repository = payload["repository"]
-    if repository["full_name"].lower() not in repos:
+    if repository["full_name"] not in repos:
         return Ignore("repository is not on the allowlist")
     pull_request = payload["pull_request"]
     if pull_request.get("draft"):
