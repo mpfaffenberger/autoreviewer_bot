@@ -115,9 +115,10 @@ def models_note(settings: Settings) -> str:
 
 
 def main() -> None:
+    import logfire
     import uvicorn
 
-    from autoreviewer import logs
+    from autoreviewer import logs, telemetry
     from autoreviewer.github import GitHubApp, Repo
     from autoreviewer.review import durable
     from autoreviewer.review.agents import lens_version
@@ -126,8 +127,9 @@ def main() -> None:
     from autoreviewer.review.workspace import GitHubSource
     from autoreviewer.web.commands import request_review
 
-    logs.configure()
     settings = Settings.from_env()
+    telemetry.configure(service="autoreviewer", include_content=settings.logfire_include_content)
+    logs.configure(to_logfire=True)
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     logger.info("starting as %s; reviewing the repositories selected on the App installation", settings.bot_login)
 
@@ -162,4 +164,5 @@ def main() -> None:
         memory.forget(conversation_id(repo, closed.number))
 
     app = create_app(settings, durable.enqueue_review, lifespan, forget, review_requested)
+    logfire.instrument_fastapi(app)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

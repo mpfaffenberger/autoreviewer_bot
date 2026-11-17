@@ -17,6 +17,8 @@ dependencies = [
     # Enforces type annotations on PRs (review/lint.py), so it's a runtime dependency. Exact pin: a new
     # ruff release can change what a rule flags, and the bot's verdicts shouldn't change with it.
     "ruff==0.17.5",
+    # Tracing (agent runs, webhooks, logs). Sends nothing until LOGFIRE_TOKEN is set; see telemetry.py.
+    "logfire[fastapi]==5.6.0",
 ]
 
 [project.optional-dependencies]

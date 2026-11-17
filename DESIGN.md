@@ -288,6 +288,7 @@ Contents: R, Metadata: R.** Events: `pull_request`,
   }
   ```
 - **Cloudflare gotcha:** the edge is already 403-ing `minecraft.` with some rule. Make sure WAF / Bot Fight Mode doesn't challenge GitHub's webhook POSTs; add a skip rule for `/webhook`. HMAC (`X-Hub-Signature-256`, constant-time compare) is the real authentication.
+- **Telemetry:** Logfire (`telemetry.py`). Every pydantic-ai agent run (model requests, tool calls, tokens), every webhook request, and every log line, with the same token scrubbing as stdout. Services: `autoreviewer` and `autoreviewer-ondemand`. Off until `LOGFIRE_TOKEN` is in `autoreviewer.env`. Traces include the reviewed code by default; `AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT=false` keeps prompts and tool results out (needed before reviewing other people's private code).
 - **Webhook handler:** verify HMAC, enqueue, return `202` well inside GitHub's 10-second timeout. Never do model work inline.
 - **Quadlet** `homelab-deploy/quadlet/autoreviewer.container`, copying Boodleton's hardening: `ReadOnly=true`, `DropCapability=all`, `NoNewPrivileges=true`, `Network=homelab-public.network`, tmpfs `/tmp` with a size cap (repo tarballs land here), `--memory=2g --pids-limit=256`, data volume `~/.local/share/autoreviewer:/var/lib/autoreviewer:Z`.
 - **Secrets** in `~/.config/homelab/` (0600), following the homelab README convention: `autoreviewer.env` (webhook secret, App ID, Boodleton key) and `autoreviewer.pem` (App private key, mounted read-only).

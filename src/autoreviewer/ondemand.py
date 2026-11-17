@@ -117,7 +117,7 @@ async def review_pr(
 
 
 def run(argv: list[str] | None = None) -> int:
-    from autoreviewer import logs
+    from autoreviewer import logs, telemetry
     from autoreviewer.web.app import build_agent_factory
     from autoreviewer.web.config import Settings
 
@@ -132,6 +132,8 @@ def run(argv: list[str] | None = None) -> int:
     logs.configure()
     try:
         settings = Settings.from_env()
+        telemetry.configure(service="autoreviewer-ondemand", include_content=settings.logfire_include_content)
+        logs.configure(to_logfire=True)
         settings.work_dir.mkdir(parents=True, exist_ok=True)
         token = os.environ.get("GITHUB_TOKEN") or None  # optional: private repos, higher API rate limit
         report = asyncio.run(
