@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from githubkit import AppAuthStrategy, GitHub
+from githubkit import AppAuthStrategy, GitHub, TokenAuthStrategy, UnauthAuthStrategy
 from githubkit.exception import RequestFailed
 
 CHECK_NAME = "autoreviewer"
@@ -46,12 +46,16 @@ class ReviewRejected(Exception):
     """GitHub refused the review (422), typically because a comment's line isn't in its diff view."""
 
 
-class PullRequests(Protocol):
-    """Everything a review job needs from GitHub's API. Code itself comes from git (see workspace.py)."""
+class PullRequestReader(Protocol):
+    """What reviewing a PR needs from GitHub's API: read-only. Code itself comes from git (workspace.py)."""
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState: ...
 
     async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str: ...
+
+
+class PullRequests(PullRequestReader, Protocol):
+    """Everything the bot's review job needs: reading, plus check runs and posting reviews."""
 
     async def start_check(self, repo: Repo, head_sha: str) -> int: ...
 
@@ -66,6 +70,43 @@ class PullRequests(Protocol):
     async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
         """Whether `author` already reviewed this exact commit (makes posting safe to replay)."""
         ...
+
+
+async def _get_pull(github: GitHub, repo: Repo, number: int) -> PullRequestState:
+    pull = (await github.rest.pulls.async_get(repo.owner, repo.name, number)).parsed_data
+    return PullRequestState(
+        head_sha=pull.head.sha,
+        base_sha=pull.base.sha,
+        state=pull.state,
+        draft=bool(pull.draft),
+        title=pull.title,
+        body=pull.body or "",
+    )
+
+
+async def _merge_base(github: GitHub, repo: Repo, base_sha: str, head_sha: str) -> str:
+    """The commit GitHub diffs a PR against (three-dot), so our diff matches its review view."""
+    # per_page=1 keeps the response small; only merge_base_commit is read.
+    response = await github.rest.repos.async_compare_commits(
+        repo.owner, repo.name, f"{base_sha}...{head_sha}", per_page=1
+    )
+    return str(response.json()["merge_base_commit"]["sha"])
+
+
+class PublicGitHub:
+    """Read-only access to any repository you can see: anonymous for public repos, or with a token.
+
+    For on-demand reviews of PRs where the App isn't installed; it can't post anything.
+    """
+
+    def __init__(self, token: str | None = None) -> None:
+        self._github: GitHub = GitHub(TokenAuthStrategy(token) if token else UnauthAuthStrategy())
+
+    async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
+        return await _get_pull(self._github, repo, number)
+
+    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
+        return await _merge_base(self._github, repo, base_sha, head_sha)
 
 
 class GitHubApp:
@@ -92,24 +133,11 @@ class GitHubApp:
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
         github = self._as_installation(repo.installation_id)
-        pull = (await github.rest.pulls.async_get(repo.owner, repo.name, number)).parsed_data
-        return PullRequestState(
-            head_sha=pull.head.sha,
-            base_sha=pull.base.sha,
-            state=pull.state,
-            draft=bool(pull.draft),
-            title=pull.title,
-            body=pull.body or "",
-        )
+        return await _get_pull(github, repo, number)
 
     async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
-        """The commit GitHub diffs a PR against (three-dot), so our diff matches its review view."""
         github = self._as_installation(repo.installation_id)
-        # per_page=1 keeps the response small; only merge_base_commit is read.
-        response = await github.rest.repos.async_compare_commits(
-            repo.owner, repo.name, f"{base_sha}...{head_sha}", per_page=1
-        )
-        return str(response.json()["merge_base_commit"]["sha"])
+        return await _merge_base(github, repo, base_sha, head_sha)
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
         github = self._as_installation(repo.installation_id)

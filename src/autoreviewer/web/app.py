@@ -7,12 +7,18 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.web.config import Settings
+
+if TYPE_CHECKING:
+    from pydantic_ai.models.openai import OpenAIChatModel
+
+    from autoreviewer.review.job import AgentFactory
 from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
 
 logger = logging.getLogger("autoreviewer.web")
@@ -69,13 +75,30 @@ def create_app(
     return app
 
 
+def build_agent_factory(settings: Settings) -> AgentFactory:
+    """(lens, verifier) over a checkout, on the configured Boodleton models: shared by the bot and the CLI."""
+    from autoreviewer.review.agents import boodleton_model, correctness_agent, verifier_agent
+
+    def model(name: str) -> OpenAIChatModel:
+        return boodleton_model(name, base_url=settings.boodleton_base_url, api_key=settings.boodleton_api_key)
+
+    lens_model, verifier_model = model(settings.lens_model), model(settings.verifier_model)
+    return lambda workspace: (
+        correctness_agent(lens_model, workspace, context_window=settings.lens_context_window),
+        verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
+    )
+
+
+def models_note(settings: Settings) -> str:
+    return f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`"
+
+
 def main() -> None:
     import uvicorn
 
     from autoreviewer import logs
     from autoreviewer.github import GitHubApp
     from autoreviewer.review import durable
-    from autoreviewer.review.agents import boodleton_model, correctness_agent, verifier_agent
     from autoreviewer.review.job import ReviewDeps
     from autoreviewer.review.workspace import GitHubSource
 
@@ -86,21 +109,14 @@ def main() -> None:
         "starting as %s; acting on %s", settings.bot_login, ", ".join(sorted(settings.repos)) or "no repositories"
     )
 
-    def model(name: str):
-        return boodleton_model(name, base_url=settings.boodleton_base_url, api_key=settings.boodleton_api_key)
-
-    lens_model, verifier_model = model(settings.lens_model), model(settings.verifier_model)
     github = GitHubApp.from_key(settings.app_id, settings.private_key)
     deps = ReviewDeps(
         github=github,
         source=GitHubSource(github),
-        agents=lambda workspace: (
-            correctness_agent(lens_model, workspace, context_window=settings.lens_context_window),
-            verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
-        ),
+        agents=build_agent_factory(settings),
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
-        models_note=f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`",
+        models_note=models_note(settings),
     )
     durable.configure(settings.database)
 
