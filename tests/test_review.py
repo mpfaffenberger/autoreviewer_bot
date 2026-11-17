@@ -266,3 +266,24 @@ async def test_a_crash_becomes_a_result_instead_of_an_exception(repo: GitRepo, t
     github.merge_base = broken_merge_base  # type: ignore[method-assign]
     result = await review_and_post(deps, pull(repo))
     assert github.reviews == [] and (result.title, result.conclusion) == ("Review failed", "neutral")
+
+
+# --- tool retries ---------------------------------------------------------------------------------
+
+
+async def test_a_few_misses_on_missing_paths_do_not_end_the_review(workspace: Workspace) -> None:
+    """Regression for PR #5: four list_directory calls on a missing path killed an 8-minute review."""
+    from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    from autoreviewer.review.agents import LENS_LIMITS, correctness_agent
+
+    misses = iter(range(6))
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if next(misses, None) is not None:
+            return ModelResponse(parts=[ToolCallPart(tool_name="list_directory", args={"path": ".cache"})])
+        return ModelResponse(parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": []})])
+
+    result = await correctness_agent(FunctionModel(respond), workspace).run("Review.", usage_limits=LENS_LIMITS)
+    assert result.output.findings == []
