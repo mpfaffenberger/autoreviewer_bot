@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai import ModelRetry
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from autoreviewer.review.agents import correctness_agent
 from autoreviewer.review.diff import (
     ChangedPath,
     annotate_git_diff,
@@ -148,7 +151,7 @@ def test_sanitize_redacts_secrets_and_caps_length() -> None:
 
 def test_comment_body_runs_through_sanitize() -> None:
     body = comment_body(Finding.model_validate({**finding(), "explanation": "cc @someone"}))
-    assert "@\u200bsomeone" in body and "(high, correctness)" in body
+    assert "@\u200bsomeone" in body and "**[P1] Mean is off by one** (correctness)" in body
 
 
 # --- pipeline -------------------------------------------------------------------------------------
@@ -204,7 +207,7 @@ async def test_a_bug_requests_changes_with_an_inline_comment(repo: GitRepo, tmp_
     [posted] = github.reviews
     assert posted["event"] == "REQUEST_CHANGES" and posted["commit_sha"] == repo.head
     assert [(c.path, c.line) for c in posted["comments"]] == [("stats.py", 5)]
-    assert (result.conclusion, result.title) == ("failure", "1 correctness issue(s)")
+    assert (result.conclusion, result.title) == ("failure", "1 blocking correctness issue(s)")
 
 
 async def test_a_clean_pr_is_approved(repo: GitRepo, tmp_path: Path) -> None:
@@ -263,8 +266,8 @@ async def test_a_crash_becomes_a_result_instead_of_an_exception(repo: GitRepo, t
 
 async def test_a_few_misses_on_missing_paths_do_not_end_the_review(workspace: Workspace) -> None:
     """Regression for PR #5: four list_directory calls on a missing path killed an 8-minute review."""
-    from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
-    from pydantic_ai.models.function import AgentInfo, FunctionModel
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
 
     from autoreviewer.review.agents import LENS_LIMITS, correctness_agent
 
@@ -273,7 +276,82 @@ async def test_a_few_misses_on_missing_paths_do_not_end_the_review(workspace: Wo
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if next(misses, None) is not None:
             return ModelResponse(parts=[ToolCallPart(tool_name="list_directory", args={"path": ".cache"})])
-        return ModelResponse(parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": []})])
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name, args={"findings": [], "overall_correct": True, "reviewed": []}
+                )
+            ]
+        )
 
     result = await correctness_agent(FunctionModel(respond), workspace).run("Review.", usage_limits=LENS_LIMITS)
     assert result.output.findings == []
+
+
+# --- priorities, confidence, and blocking (lessons from Codex and PR-Agent prompts) ----------------
+
+
+async def test_advisory_findings_are_posted_but_approve(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    result = await review_and_post(job_deps(github, tmp_path, [finding(5, priority=2)]), pull(repo))
+    [posted] = github.reviews
+    assert posted["event"] == "APPROVE" and len(posted["comments"]) == 1
+    assert "(correctness, non-blocking)" in posted["comments"][0].body
+    assert result.conclusion == "success" and "1 advisory (non-blocking) finding(s) posted." in result.summary
+
+
+async def test_the_verifier_can_raise_a_findings_priority(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    deps = job_deps(github, tmp_path, [finding(5, priority=3)], priority=lambda f: 0)
+    await review_and_post(deps, pull(repo))
+    assert github.reviews[0]["event"] == "REQUEST_CHANGES"
+    assert github.reviews[0]["comments"][0].body.startswith("**[P0] ")
+
+
+async def test_low_confidence_findings_never_reach_the_verifier(workspace: Workspace) -> None:
+    asked: list[int] = []
+
+    def confirm(reported: dict[str, object]) -> bool:
+        asked.append(int(reported["line"]))  # type: ignore[arg-type]
+        return True
+
+    lens, verifier = agents([finding(5, confidence=9), finding(3, title="Hunch", confidence=2)], confirm=confirm)(
+        workspace
+    )
+    outcome = await review(await pr_text(workspace), lens, verifier)
+    assert asked == [5]
+    assert [(f.line, reason) for f, reason in outcome.rejected] == [(3, "confidence 2 is below 4")]
+
+
+async def test_dedupe_keeps_the_most_urgent_finding_on_a_line(workspace: Workspace) -> None:
+    lens, verifier = agents([finding(5, priority=2, title="Minor"), finding(5, priority=0, title="Major")])(workspace)
+    outcome = await review(await pr_text(workspace), lens, verifier)
+    assert [(f.priority, f.title) for f in outcome.posted] == [(0, "Major")]
+
+
+@pytest.mark.parametrize(("block_at", "event"), [(1, "APPROVE"), (3, "REQUEST_CHANGES")])
+async def test_block_at_priority_is_configurable(repo: GitRepo, tmp_path: Path, block_at: int, event: str) -> None:
+    from dataclasses import replace
+
+    github = FakeGitHub(repo)
+    deps = replace(job_deps(github, tmp_path, [finding(5, priority=3)]), block_at=block_at)
+    await review_and_post(deps, pull(repo))
+    assert github.reviews[0]["event"] == event
+
+
+async def test_a_report_split_across_two_output_calls_keeps_the_findings(workspace: Workspace) -> None:
+    """Qwen sometimes sends the verdict in one final_result call and the findings in a second one. The
+    first, partial call must not validate on its own, or its empty default would win and drop every bug."""
+
+    def split(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        name = info.output_tools[0].name
+        return ModelResponse(
+            parts=[
+                ToolCallPart(tool_name=name, args={"overall_correct": False, "reviewed": ["stats.py"]}),
+                ToolCallPart(tool_name=name, args={"findings": [finding(5)], "overall_correct": False, "reviewed": []}),
+            ]
+        )
+
+    _, verifier = agents([])(workspace)
+    outcome = await review(await pr_text(workspace), correctness_agent(FunctionModel(split), workspace), verifier)
+    assert [f.line for f in outcome.posted] == [5]

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic_ai import Agent
@@ -27,7 +27,7 @@ from autoreviewer.github import (
 )
 from autoreviewer.review.diff import MAX_CHANGED_LINES, select
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
-from autoreviewer.review.pipeline import Continuation, Outcome, PullRequestText, review
+from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, review
 from autoreviewer.review.render import comment_body, review_body
 from autoreviewer.review.schemas import LensReport, Verification
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
@@ -54,6 +54,8 @@ class ReviewDeps:
     """Where each PR's lens conversation is kept, so a new commit continues the last review."""
     lens_version: str = ""
     """Fingerprint of the lens prompt and model (see agents.lens_version)."""
+    block_at: int = BLOCK_AT_PRIORITY
+    """Confirmed findings at this priority or more urgent block the merge (1: P0 and P1)."""
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,7 @@ async def review_change(
     head_sha: str,
     memory: ReviewMemory | None = None,
     lens_version: str = "",
+    block_at: int = BLOCK_AT_PRIORITY,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -160,6 +163,7 @@ async def review_change(
             continuation=continuation,
             lens_capabilities=[persistence] if persistence else (),
             conversation=conversation,
+            block_at=block_at,
         )
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
@@ -194,7 +198,7 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
         head_sha=head_sha,
         base_sha=base,
         version=version,
-        findings=[{"path": f.path, "line": f.line, "title": f.title} for f in [*outcome.inline, *outcome.general]],
+        findings=[{"path": f.path, "line": f.line, "title": f"[P{f.priority}] {f.title}"} for f in outcome.posted],
         dropped=[
             {"path": f.path, "line": f.line, "title": f.title, "reason": reason} for f, reason in outcome.rejected
         ],
@@ -218,6 +222,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> Che
             head_sha=pull.head_sha,
             memory=deps.memory,
             lens_version=deps.lens_version,
+            block_at=deps.block_at,
         )
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
@@ -266,7 +271,8 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
         )
         return
     footer = f"<sub>autoreviewer · {deps.models_note} · `{pull.head_sha[:7]}`</sub>"
-    # The verdict is computed, never generated: any confirmed finding blocks the merge.
+    # The verdict is computed, never generated: a confirmed finding at the blocking priority blocks the
+    # merge; advisory findings are posted as comments on an approval.
     event = "REQUEST_CHANGES" if outcome.blocking else "APPROVE"
     try:
         await deps.github.create_review(
@@ -274,8 +280,10 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
             pull.number,
             commit_sha=pull.head_sha,
             event=event,
-            body=review_body(outcome.inline, outcome.general, footer=footer),
-            comments=[ReviewComment(f.path, f.line, comment_body(f)) for f in outcome.inline],
+            body=review_body(outcome, footer=footer),
+            comments=[
+                ReviewComment(f.path, f.line, comment_body(f, blocking=outcome.is_blocking(f))) for f in outcome.inline
+            ],
         )
     except ReviewRejected:
         # GitHub's diff view can differ from ours (e.g. files it doesn't render). Keep every finding,
@@ -288,20 +296,23 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
             pull.number,
             commit_sha=pull.head_sha,
             event=event,
-            body=review_body([], outcome.inline + outcome.general, footer=footer),
+            body=review_body(replace(outcome, inline=[], general=outcome.posted), footer=footer),
             comments=[],
         )
 
 
 def _summary(outcome: Outcome) -> CheckResult:
     notes = ""
+    advisory = [f for f in outcome.posted if not outcome.is_blocking(f)]
+    if advisory:
+        notes += f" {len(advisory)} advisory (non-blocking) finding(s) posted."
     if outcome.rejected:
         notes += f" {len(outcome.rejected)} candidate finding(s) were dropped by verification."
     if outcome.unverified:
         notes += f" {len(outcome.unverified)} candidate finding(s) could not be verified and will be checked again."
     if outcome.blocking:
-        count = len(outcome.inline) + len(outcome.general)
+        count = len(outcome.posted) - len(advisory)
         return CheckResult(
-            f"{count} correctness issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
+            f"{count} blocking correctness issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
         )
-    return CheckResult("No correctness issues", f"Approved.{notes}", "success")
+    return CheckResult("No blocking correctness issues", f"Approved.{notes}", "success")

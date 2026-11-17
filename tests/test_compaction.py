@@ -25,7 +25,13 @@ def scripted(calls: list[tuple[str, dict[str, Any]]], summaries: list[str]) -> F
             return ModelResponse(parts=[TextPart("Summary: reviewed stats.py; no bugs confirmed yet.")])
         if (call := next(remaining, None)) is not None:
             return ModelResponse(parts=[ToolCallPart(tool_name=call[0], args=call[1])])
-        return ModelResponse(parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": []})])
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name, args={"findings": [], "overall_correct": True, "reviewed": []}
+                )
+            ]
+        )
 
     return FunctionModel(respond)
 

@@ -51,7 +51,12 @@ class LensSpy:
                 "tools": {t.name for t in info.function_tools},
             })  # fmt: skip
             return ModelResponse(
-                parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": self.findings})]
+                parts=[
+                    ToolCallPart(
+                        tool_name=info.output_tools[0].name,
+                        args={"findings": self.findings, "overall_correct": True, "reviewed": []},
+                    )
+                ]
             )
 
         return FunctionModel(respond)
@@ -86,7 +91,7 @@ async def test_a_new_commit_continues_the_last_review(repo: GitRepo, memory: Rev
     await review_at(github, repo.head, spy, memory, tmp_path)
     first = spy.runs[-1]
     assert "diff_since_last_review" not in first["tools"]
-    assert memory.last(CONVERSATION).findings == [{"path": "stats.py", "line": 5, "title": "Mean is off by one"}]  # type: ignore[union-attr]
+    assert memory.last(CONVERSATION).findings == [{"path": "stats.py", "line": 5, "title": "[P1] Mean is off by one"}]  # type: ignore[union-attr]
 
     new_head = add_commit(repo, {"stats.py": FIXED})
     spy.findings = []
@@ -96,7 +101,7 @@ async def test_a_new_commit_continues_the_last_review(repo: GitRepo, memory: Rev
     assert first["prompts"][0] in second["prompts"]  # the previous conversation came along
     latest = second["prompts"][-1]
     assert f"moved from `{repo.head[:7]}`" in latest and f"to `{new_head[:7]}`" in latest
-    assert "- stats.py:5 Mean is off by one" in latest  # what it posted last time
+    assert "- stats.py:5 [P1] Mean is off by one" in latest  # what it posted last time
     assert "- M stats.py (+1 -1)" in latest  # what changed since
     assert "diff_since_last_review" in second["tools"]
     assert memory.last(CONVERSATION).head_sha == new_head  # type: ignore[union-attr]
@@ -179,7 +184,12 @@ def closing_lens(github: FakeGitHub, *, then: str = "answer") -> LensSpy:
             if then == "crash":
                 raise RuntimeError("model server went away")
             return ModelResponse(
-                parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": [finding(5)]})]
+                parts=[
+                    ToolCallPart(
+                        tool_name=info.output_tools[0].name,
+                        args={"findings": [finding(5)], "overall_correct": True, "reviewed": []},
+                    )
+                ]
             )
 
         return FunctionModel(respond)

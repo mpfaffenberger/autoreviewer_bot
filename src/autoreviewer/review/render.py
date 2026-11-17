@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from autoreviewer.review.pipeline import Outcome
 from autoreviewer.review.schemas import Finding
 
 MAX_TEXT = 3000
@@ -26,20 +27,34 @@ def sanitize(text: str) -> str:
     return text if len(text) <= MAX_TEXT else text[: MAX_TEXT - 1] + "…"
 
 
-def comment_body(finding: Finding) -> str:
-    parts = [f"**{finding.title}** ({finding.severity}, correctness)", finding.explanation]
+def comment_body(finding: Finding, *, blocking: bool = True) -> str:
+    gate = "" if blocking else ", non-blocking"
+    parts = [f"**[P{finding.priority}] {finding.title}** (correctness{gate})", finding.explanation]
     if finding.suggestion:
         parts.append(f"**Suggested fix:** {finding.suggestion}")
     return sanitize("\n\n".join(parts))
 
 
-def review_body(inline: list[Finding], general: list[Finding], *, footer: str) -> str:
-    if not inline and not general:
+def review_body(outcome: Outcome, *, footer: str) -> str:
+    """The review's summary: blocking findings first, advisory ones after, then where they are."""
+    posted = outcome.posted
+    if not posted:
         return f"No correctness issues found.\n\n{footer}"
-    count = len(inline) + len(general)
-    lines = [f"Found {count} correctness issue{'s' if count != 1 else ''} to fix before merging."]
-    if general:
+    blocking = [f for f in posted if outcome.is_blocking(f)]
+    advisory = [f for f in posted if not outcome.is_blocking(f)]
+    lines = []
+    if blocking:
+        lines.append(f"Found {_count(blocking)} to fix before merging.")
+    if advisory:
+        lines.append(f"{_count(advisory, 'advisory')} worth a look (non-blocking).")
+    if outcome.general:
         lines.append("\nOutside the changed lines:")
-        lines.extend(f"- `{f.path}:{f.line}`: {comment_body(f)}" for f in general)
+        lines.extend(
+            f"- `{f.path}:{f.line}`: {comment_body(f, blocking=outcome.is_blocking(f))}" for f in outcome.general
+        )
     lines.append(f"\n{footer}")
     return "\n".join(lines)
+
+
+def _count(findings: list[Finding], kind: str = "correctness") -> str:
+    return f"{len(findings)} {kind} issue{'s' if len(findings) != 1 else ''}"

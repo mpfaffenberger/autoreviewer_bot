@@ -24,7 +24,11 @@ from autoreviewer.review.schemas import Finding, LensReport, Verification
 
 logger = logging.getLogger("autoreviewer.review")
 
-MAX_FINDINGS = 10
+MAX_FINDINGS = 25
+MIN_CONFIDENCE = 4
+"""Findings below this confidence (PR-Agent's "a hunch") aren't worth a verifier call."""
+BLOCK_AT_PRIORITY = 1
+"""Confirmed findings at this priority or more urgent (P0, P1) block the merge; the rest are advisory."""
 MAX_DESCRIPTION_CHARS = 4000
 MAX_LISTED_FILES = 300
 VERIFY_CONCURRENCY = 3
@@ -51,10 +55,21 @@ class Outcome:
     unverified: list[tuple[Finding, str]] = field(default_factory=list[tuple[Finding, str]])
     """The verifier never reached a verdict (e.g. the model server failed). Not posted, but not judged
     either: later reviews must check these again rather than treat them as rejected."""
+    block_at: int = BLOCK_AT_PRIORITY
+    overall_correct: bool = True
+    """The lens's overall verdict on the change (Codex-style), alongside its findings."""
+    reviewed: list[str] = field(default_factory=list[str])
+
+    @property
+    def posted(self) -> list[Finding]:
+        return [*self.inline, *self.general]
+
+    def is_blocking(self, finding: Finding) -> bool:
+        return finding.priority <= self.block_at
 
     @property
     def blocking(self) -> bool:
-        return bool(self.inline or self.general)
+        return any(self.is_blocking(f) for f in self.posted)
 
 
 @dataclass(frozen=True)
@@ -131,11 +146,16 @@ def verifier_prompt(pr: PullRequestText, finding: Finding) -> str:
 def _dedupe(findings: list[Finding]) -> list[Finding]:
     seen: set[tuple[str, int]] = set()
     unique = []
-    for finding in sorted(findings, key=lambda f: f.severity != "high"):  # keep the high one on a tie
+    # Most urgent, then most confident, first: they win ties on a line and survive the cap.
+    for finding in sorted(findings, key=lambda f: (f.priority, -f.confidence)):
         if (key := (finding.path, finding.line)) not in seen:
             seen.add(key)
             unique.append(finding)
     return unique[:MAX_FINDINGS]
+
+
+def _place(outcome: Outcome, finding: Finding, patch: str) -> None:
+    (outcome.inline if finding.line in commentable_lines(patch) else outcome.general).append(finding)
 
 
 async def review(
@@ -146,6 +166,7 @@ async def review(
     continuation: Continuation | None = None,
     lens_capabilities: Sequence[AbstractCapability[None]] = (),
     conversation: str | None = None,
+    block_at: int = BLOCK_AT_PRIORITY,
 ) -> Outcome:
     prompt = continuation_prompt(pr, continuation) if continuation else lens_prompt(pr)
     lens_run = await lens.run(
@@ -158,15 +179,17 @@ async def review(
         usage_limits=LENS_LIMITS,
     )
     report, usage = lens_run.output, lens_run.usage
-    outcome = Outcome()
+    outcome = Outcome(block_at=block_at, overall_correct=report.overall_correct, reviewed=report.reviewed)
     reviewable = {change.path for change in pr.reviewable}
 
     candidates = []
     for finding in _dedupe(report.findings):
-        if finding.path in reviewable:
-            candidates.append(finding)
-        else:  # a path the PR doesn't change: hallucinated or out of scope, not worth a verifier call
+        if finding.path not in reviewable:  # hallucinated or out of scope, not worth a verifier call
             outcome.rejected.append((finding, "path is not among the changed files"))
+        elif finding.confidence < MIN_CONFIDENCE:
+            outcome.rejected.append((finding, f"confidence {finding.confidence} is below {MIN_CONFIDENCE}"))
+        else:
+            candidates.append(finding)
 
     slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
 
@@ -185,10 +208,10 @@ async def review(
             outcome.unverified.append((finding, verdict))
         elif not verdict.confirmed:
             outcome.rejected.append((finding, verdict.reason))
-        elif finding.line in commentable_lines(pr.patches.get(finding.path, "")):
-            outcome.inline.append(finding)
         else:
-            outcome.general.append(finding)
+            if verdict.priority is not None:  # the verifier read the code too; its priority wins
+                finding = finding.model_copy(update={"priority": verdict.priority})
+            _place(outcome, finding, pr.patches.get(finding.path, ""))
     compacted = compaction_stats(lens_run.all_messages())
     logger.info(
         "review: lens made %d requests and %d tool calls (compaction cleared %d, deduplicated %d results); "
