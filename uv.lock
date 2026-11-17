@@ -57,7 +57,7 @@ dependencies = [
     { name = "dbos" },
     { name = "fastapi" },
     { name = "githubkit", extra = ["auth-app"] },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "pydantic-ai-harness" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
     { name = "uvicorn" },
@@ -71,7 +71,6 @@ sandboxd = [
 [package.dev-dependencies]
 dev = [
     { name = "anyio" },
-    { name = "httpx2" },
     { name = "pydantic-ai-harness", extra = ["smol"] },
     { name = "pyright" },
     { name = "pytest" },
@@ -83,7 +82,7 @@ requires-dist = [
     { name = "dbos", specifier = ">=1.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "githubkit", extras = ["auth-app"], specifier = ">=0.12" },
-    { name = "httpx", specifier = ">=0.28" },
+    { name = "httpx2", specifier = ">=2.16.2" },
     { name = "pydantic-ai-harness", specifier = "==0.68.0" },
     { name = "pydantic-ai-harness", extras = ["smol"], marker = "extra == 'sandboxd'", specifier = "==0.68.0" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = "==2.68.0" },
@@ -94,7 +93,6 @@ provides-extras = ["sandboxd"]
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio", specifier = ">=4" },
-    { name = "httpx2", specifier = ">=2.16.2" },
     { name = "pydantic-ai-harness", extras = ["smol"], specifier = "==0.68.0" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8" },

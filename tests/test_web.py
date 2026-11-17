@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from autoreviewer.web.app import create_app
@@ -50,7 +50,7 @@ class FakeHandler:
 
 @dataclass
 class Receiver:
-    client: httpx.AsyncClient
+    client: httpx2.AsyncClient
     handler: FakeHandler
 
     async def deliver(
@@ -61,7 +61,7 @@ class Receiver:
         delivery: str = "d-1",
         sign: str | None = None,
         headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         body = json.dumps(payload).encode()
         sent = {
             "X-GitHub-Event": event,
@@ -78,8 +78,8 @@ async def receiver() -> AsyncIterator[Receiver]:
     )
     handler = FakeHandler()
     app = create_app(settings, handler)
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)  # see the 500 a failure produces
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)  # see the 500 a failure produces
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         yield Receiver(client, handler)
 
 

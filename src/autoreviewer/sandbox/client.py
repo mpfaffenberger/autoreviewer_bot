@@ -10,7 +10,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import Self
 
-import httpx
+import httpx2
 from pydantic_ai.workspaces import CommandResult, WorkspaceCommand, WorkspaceError, WorkspaceRef
 
 from autoreviewer.sandbox.protocol import (
@@ -33,9 +33,9 @@ _TRANSPORT_GRACE_S = 30.0
 class SandboxdClient:
     """Thin typed wrapper over the daemon's HTTP API on a unix socket."""
 
-    def __init__(self, socket_path: str, *, http: httpx.AsyncClient | None = None) -> None:
-        self._http = http or httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(uds=socket_path), base_url="http://sandboxd"
+    def __init__(self, socket_path: str, *, http: httpx2.AsyncClient | None = None) -> None:
+        self._http = http or httpx2.AsyncClient(
+            transport=httpx2.AsyncHTTPTransport(uds=socket_path), base_url="http://sandboxd"
         )
 
     async def __aenter__(self) -> Self:
@@ -69,11 +69,11 @@ class SandboxdClient:
 
     async def _request(
         self, method: str, url: str, *, json: object = None, read_timeout: float | None
-    ) -> httpx.Response:
-        timeout = httpx.Timeout(_CONNECT_TIMEOUT_S, read=read_timeout)
+    ) -> httpx2.Response:
+        timeout = httpx2.Timeout(_CONNECT_TIMEOUT_S, read=read_timeout)
         try:
             response = await self._http.request(method, url, json=json, timeout=timeout)
-        except httpx.TransportError as error:
+        except httpx2.TransportError as error:
             raise WorkspaceError(f"sandboxd is unreachable: {error!r}") from error
         if response.is_success:
             return response
