@@ -92,3 +92,21 @@ async def test_a_pr_adding_untyped_code_gets_a_blocking_types_comment(repo: GitR
     [comment] = review["comments"]
     assert (comment.path, comment.line) == ("scale.py", 1)
     assert comment.body.startswith("**[P1] Add the missing type annotations** (types)")
+
+
+async def test_broken_python_is_not_a_typing_finding(tmp_path: Path) -> None:
+    """ruff reports invalid-syntax whatever is selected; that's the lens's business, not "add annotations"."""
+    assert await type_findings(tmp_path, *new_file(tmp_path, "wip.py", "def scale(xs: list[int]\n")) == []
+
+
+async def test_a_broken_linter_skips_the_type_checks_not_the_review(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(root: Path, paths: list[str]) -> list[lint.Diagnostic]:
+        raise lint.LintError("ruff timed out")
+
+    monkeypatch.setattr(lint, "_ruff", broken)
+    head = add_commit(repo, {"scale.py": UNTYPED})
+    github = FakeGitHub(replace(repo, head=head))
+    await review_and_post(job_deps(github, tmp_path, []), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
+    assert [r["event"] for r in github.reviews] == ["APPROVE"]

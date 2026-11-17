@@ -13,7 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TypedDict
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from ruff.__main__ import find_ruff_bin
 
 from autoreviewer.review.diff import ChangedPath, added_lines
@@ -23,6 +23,8 @@ logger = logging.getLogger("autoreviewer.lint")
 
 PYTHON_SUFFIXES = (".py", ".pyi")
 TYPE_RULES = "ANN0,ANN2,ANN401,PGH003"
+TYPE_RULE_PREFIXES = ("ANN", "PGH003")
+"""ruff also reports `invalid-syntax` whatever is selected: not a typing finding (the lens sees broken code)."""
 """Missing argument and return annotations, `Any`, and `# type: ignore` without an error code."""
 RUFF_OPTIONS = ("lint.flake8-annotations.mypy-init-return = true",)
 """`__init__` with annotated arguments needs no `-> None`, as in mypy."""
@@ -43,7 +45,7 @@ class _Location(TypedDict):
 class Diagnostic(TypedDict):
     """The part of ruff's JSON output we read."""
 
-    code: str
+    code: str | None
     message: str
     filename: str
     location: _Location
@@ -59,6 +61,8 @@ async def type_findings(root: Path, changes: list[ChangedPath], patches: dict[st
         return []
     by_line: defaultdict[tuple[str, int], list[Diagnostic]] = defaultdict(list)
     for diagnostic in await _ruff(root, sorted(path for path, lines in added.items() if lines)):
+        if not (diagnostic["code"] or "").startswith(TYPE_RULE_PREFIXES):
+            continue
         path = Path(diagnostic["filename"]).resolve().relative_to(root.resolve()).as_posix()
         line = diagnostic["location"]["row"]
         if line in added.get(path, ()):
@@ -74,7 +78,7 @@ def _urgency(finding: Finding) -> tuple[int, str, int]:
 
 
 def _finding(path: str, line: int, hits: list[Diagnostic]) -> Finding:
-    codes = {hit["code"] for hit in hits}
+    codes = {hit["code"] or "" for hit in hits}
     blocking = bool(codes - ADVISORY_RULES)
     if blocking:
         title = "Add the missing type annotations"
@@ -108,4 +112,7 @@ async def _ruff(root: Path, paths: list[str]) -> list[Diagnostic]:
         raise LintError(f"ruff timed out after {RUFF_TIMEOUT_S:g}s") from None
     if process.returncode != 0:
         raise LintError(f"ruff failed: {stderr.decode(errors='replace').strip()[:500]}")
-    return _DIAGNOSTICS.validate_json(stdout or b"[]")
+    try:
+        return _DIAGNOSTICS.validate_json(stdout or b"[]")
+    except ValidationError as error:  # a ruff release changed its output format
+        raise LintError(f"unexpected ruff output: {error}") from error

@@ -27,7 +27,7 @@ from autoreviewer.github import (
     ReviewRejected,
 )
 from autoreviewer.review.diff import MAX_CHANGED_LINES, select
-from autoreviewer.review.lint import type_findings
+from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, review
 from autoreviewer.review.render import comment_body, review_body
@@ -156,7 +156,11 @@ async def review_change(
                 changed_since = await read_changes_since_previous(workspace)
                 continuation = Continuation(prior, history, head_sha, changed_since)
         persistence, run_id = memory.persistence(conversation) if memory else (None, "")
-        typed = await type_findings(workspace.root, selection.reviewable, patches)
+        try:
+            typed = await type_findings(workspace.root, selection.reviewable, patches)
+        except LintError:  # a broken linter costs the type checks, never the review
+            logger.exception("%s at %s: type checks skipped", conversation, head_sha[:7])
+            typed = []
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
         outcome = await review(
