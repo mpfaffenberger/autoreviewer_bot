@@ -129,5 +129,15 @@ class GitHubSource:
         return await fetch(dest, url=repo.clone_url, head=head, base=base, token=token)
 
 
+class PublicSource:
+    """Fetches from github.com anonymously (public repos) or with a caller's token (on-demand reviews)."""
+
+    def __init__(self, token: str | None = None) -> None:
+        self._token = token
+
+    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path) -> Workspace:
+        return await fetch(dest, url=repo.clone_url, head=head, base=base, token=self._token)
+
+
 class _TokenSource(Protocol):
     async def read_token(self, repo: Repo) -> str: ...

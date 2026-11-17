@@ -16,7 +16,15 @@ from pathlib import Path
 
 from pydantic_ai import Agent
 
-from autoreviewer.github import Conclusion, PullRequests, PullRequestState, Repo, ReviewComment, ReviewRejected
+from autoreviewer.github import (
+    Conclusion,
+    PullRequestReader,
+    PullRequests,
+    PullRequestState,
+    Repo,
+    ReviewComment,
+    ReviewRejected,
+)
 from autoreviewer.review.diff import MAX_CHANGED_LINES, select
 from autoreviewer.review.pipeline import Outcome, PullRequestText, review
 from autoreviewer.review.render import comment_body, review_body
@@ -83,12 +91,24 @@ async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated) -> CheckRe
         )
 
 
-async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
-    state = await _current(deps, repo, pull)
-    base = await deps.github.merge_base(repo, state.base_sha, pull.head_sha)
+async def review_change(
+    *,
+    reader: PullRequestReader,
+    source: RepoSource,
+    agents: AgentFactory,
+    work_dir: Path,
+    repo: Repo,
+    state: PullRequestState,
+    head_sha: str,
+) -> Outcome | CheckResult:
+    """Review one PR head: check it out, find what changed, run lens and verifier.
 
-    with tempfile.TemporaryDirectory(prefix="review-", dir=deps.work_dir) as scratch:
-        workspace = await deps.source.checkout(repo, head=pull.head_sha, base=base, dest=Path(scratch) / "repo")
+    Returns the findings, or a CheckResult when there is nothing to review or it is too large. Shared
+    by the bot's job (which then posts) and on-demand reviews (which print).
+    """
+    base = await reader.merge_base(repo, state.base_sha, head_sha)
+    with tempfile.TemporaryDirectory(prefix="review-", dir=work_dir) as scratch:
+        workspace = await source.checkout(repo, head=head_sha, base=base, dest=Path(scratch) / "repo")
         changes, patches = await read_changes(workspace)
         selection = select(changes)
         if not selection.reviewable:
@@ -101,13 +121,27 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> Che
                 f"{selection.changed_lines} changed lines; the limit is {MAX_CHANGED_LINES}.",
                 "neutral",
             )
-        lens, verifier = deps.agents(workspace)
+        lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
-        outcome = await review(pr, lens, verifier)
+        return await review(pr, lens, verifier)
 
+
+async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
+    state = await _current(deps, repo, pull)
+    result = await review_change(
+        reader=deps.github,
+        source=deps.source,
+        agents=deps.agents,
+        work_dir=deps.work_dir,
+        repo=repo,
+        state=state,
+        head_sha=pull.head_sha,
+    )
+    if isinstance(result, CheckResult):
+        return result
     await _current(deps, repo, pull)  # the review took minutes; don't post against a commit that's gone
-    await _post(deps, repo, pull, outcome)
-    return _summary(outcome)
+    await _post(deps, repo, pull, result)
+    return _summary(result)
 
 
 async def _current(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> PullRequestState:

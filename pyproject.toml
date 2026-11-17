@@ -21,6 +21,7 @@ sandboxd = ["pydantic-ai-harness[smol]==0.68.0"]
 [project.scripts]
 autoreviewer-sandboxd = "autoreviewer.sandbox.daemon:main"
 autoreviewer-web = "autoreviewer.web.app:main"
+autoreviewer-review-pr = "autoreviewer.ondemand:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "anyio>=4", "ruff>=0.8", "pyright>=1.1.390", "pydantic-ai-harness[smol]==0.68.0", "httpx2>=2.16.2"]
