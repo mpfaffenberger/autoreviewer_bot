@@ -10,7 +10,7 @@ ContainerName=autoreviewer
 Network=homelab-public.network
 # App ID, slug, webhook secret (written by deploy/github-app/convert.sh).
 EnvironmentFile=/home/bazzite/.config/homelab/autoreviewer-app.env
-# AUTOREVIEWER_REPOS and other knobs.
+# Boodleton key and other knobs (which repos to review is chosen on the GitHub App installation page).
 EnvironmentFile=/home/bazzite/.config/homelab/autoreviewer.env
 Volume=/home/bazzite/.config/homelab/autoreviewer-app.pem:/run/secrets/github-app.pem:ro,Z
 Environment=AUTOREVIEWER_PRIVATE_KEY_PATH=/run/secrets/github-app.pem

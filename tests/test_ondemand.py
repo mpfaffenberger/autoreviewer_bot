@@ -126,7 +126,6 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         app_slug="s",
         webhook_secret="x",
         private_key="k",
-        repos=frozenset(),
         boodleton_api_key="test-key",
         work_dir=tmp_path,
     )

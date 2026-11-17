@@ -13,7 +13,7 @@ import httpx2
 import pytest
 
 from autoreviewer.web.app import create_app
-from autoreviewer.web.config import Settings, parse_repos
+from autoreviewer.web.config import Settings
 from autoreviewer.web.routing import (
     Ignore,
     MalformedPayload,
@@ -29,7 +29,6 @@ pytestmark = pytest.mark.anyio
 
 SECRET = "test-webhook-secret"
 REPO = "mpfaffenberger/pydantic-ai-claude-code"
-REPOS = frozenset({REPO})
 SLUG = "chaos-emerald-reviewer"
 
 
@@ -83,9 +82,7 @@ class Receiver:
 
 @pytest.fixture
 async def receiver() -> AsyncIterator[Receiver]:
-    settings = Settings(
-        app_id=1, app_slug="chaos-emerald-reviewer", webhook_secret=SECRET, private_key="unused", repos=REPOS
-    )
+    settings = Settings(app_id=1, app_slug="chaos-emerald-reviewer", webhook_secret=SECRET, private_key="unused")
     handler = FakeHandler()
     app = create_app(settings, handler)
     transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)  # see the 500 a failure produces
@@ -130,7 +127,7 @@ async def test_a_sha1_signature_header_alone_is_not_enough(receiver: Receiver) -
 # --- delivery handling --------------------------------------------------------------------------
 
 
-async def test_allowlisted_pull_request_is_handed_to_the_review_job(receiver: Receiver) -> None:
+async def test_a_pull_request_is_handed_to_the_review_job(receiver: Receiver) -> None:
     response = await receiver.deliver("pull_request", pull_request_payload())
     assert response.status_code == 202
     assert receiver.handler.handled == [
@@ -148,12 +145,6 @@ async def test_redeliveries_are_handed_off_again_because_the_workflow_id_dedupes
     for _ in range(2):
         assert (await receiver.deliver("pull_request", pull_request_payload(), delivery="same")).status_code == 202
     assert len(receiver.handler.handled) == 2  # one review regardless: see test_durable.py
-
-
-async def test_repos_off_the_allowlist_are_ignored(receiver: Receiver) -> None:
-    response = await receiver.deliver("pull_request", pull_request_payload(repo="mpfaffenberger/code_puppy"))
-    assert response.json() == {"status": "ignored", "reason": "repository is not on the allowlist"}
-    assert receiver.handler.handled == []
 
 
 @pytest.mark.parametrize("payload", [b"not json", json.dumps({"action": "opened"}).encode()])
@@ -224,31 +215,25 @@ async def test_healthz(receiver: Receiver) -> None:
             ),
         ),
     ],
-    ids=["ping", "own-check-run-events", "closed", "labeled", "draft", "case-insensitive-allowlist", "push"],
+    ids=["ping", "own-check-run-events", "closed", "labeled", "draft", "mixed-case-repo", "push"],
 )
 def test_route(event: str, payload: dict[str, Any], expected: object) -> None:
-    assert route(event, payload, REPOS, SLUG) == expected
+    assert route(event, payload, SLUG) == expected
 
 
 def test_route_reports_malformed_payloads() -> None:
     with pytest.raises(MalformedPayload, match="repository"):
-        route("pull_request", {"action": "opened"}, REPOS, SLUG)
+        route("pull_request", {"action": "opened"}, SLUG)
 
 
 def test_settings_keep_secrets_out_of_repr() -> None:
-    settings = Settings(app_id=1, app_slug="s", webhook_secret="hunter2", private_key="-----BEGIN", repos=REPOS)
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="hunter2", private_key="-----BEGIN")
     assert "hunter2" not in repr(settings) and "BEGIN" not in repr(settings)
     assert settings.bot_login == "s[bot]"
 
 
-def test_allowlist_entries_must_be_owner_slash_name() -> None:
-    assert parse_repos(" A/b , c/D,, ") == frozenset({"a/b", "c/d"})
-    with pytest.raises(ValueError, match="owner/name"):
-        parse_repos("just-a-name")
-
-
 async def test_a_closed_pull_request_reaches_the_closed_handler() -> None:
-    settings = Settings(app_id=1, app_slug="s", webhook_secret=SECRET, private_key="unused", repos=REPOS)
+    settings = Settings(app_id=1, app_slug="s", webhook_secret=SECRET, private_key="unused")
     closed: list[PullRequestClosed] = []
 
     async def remember_close(event: PullRequestClosed) -> None:
@@ -308,7 +293,6 @@ REQUESTED = ReviewRequested(
         (comment_payload(commenter="chaos-emerald-reviewer[bot]"), Ignore("the bot's own comment")),
         (comment_payload(action="edited"), Ignore("only new comments are read")),
         (comment_payload(on_pull_request=False), Ignore("comment on an issue, not a pull request")),
-        (comment_payload(repo="someone/else"), Ignore("repository is not on the allowlist")),
         (comment_payload("LGTM"), Ignore("no command for the bot")),
     ],
     ids=[
@@ -320,12 +304,11 @@ REQUESTED = ReviewRequested(
         "itself",
         "edit",
         "issue",
-        "allowlist",
         "chat",
     ],
 )
 def test_route_review_commands(payload: dict[str, Any], expected: object) -> None:
-    assert route("issue_comment", payload, REPOS, SLUG) == expected
+    assert route("issue_comment", payload, SLUG) == expected
 
 
 @pytest.mark.parametrize(
@@ -351,7 +334,7 @@ async def test_a_review_command_reaches_its_handler() -> None:
     async def on_request(request: ReviewRequested) -> None:
         requests.append(request)
 
-    settings = Settings(app_id=1, app_slug=SLUG, webhook_secret=SECRET, private_key="unused", repos=REPOS)
+    settings = Settings(app_id=1, app_slug=SLUG, webhook_secret=SECRET, private_key="unused")
     app = create_app(settings, FakeHandler(), on_review_requested=on_request)
     body = json.dumps(comment_payload()).encode()
     headers = {"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "d-9", "X-Hub-Signature-256": signature(body)}

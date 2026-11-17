@@ -60,26 +60,24 @@ class MalformedPayload(ValueError):
     """The payload lacks a field its event always carries."""
 
 
-def route(event: str, payload: Mapping[str, Any], repos: frozenset[str], app_slug: str) -> Decision:
+def route(event: str, payload: Mapping[str, Any], app_slug: str) -> Decision:
     try:
-        return _route(event, payload, repos, app_slug)
+        return _route(event, payload, app_slug)
     except (KeyError, TypeError) as error:
         raise MalformedPayload(f"{event} payload is missing {error}") from error
 
 
-def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str], app_slug: str) -> Decision:
+def _route(event: str, payload: Mapping[str, Any], app_slug: str) -> Decision:
     if event == "ping":
         return Pong()
     if event == "issue_comment":
-        return _comment(payload, repos, app_slug)
+        return _comment(payload, app_slug)
     if event != "pull_request":
         return Ignore(f"event {event!r} is not handled yet")
     action = payload["action"]
     if action not in PULL_REQUEST_ACTIONS and action != "closed":
         return Ignore(f"pull_request action {action!r} needs no review")
     repository = payload["repository"]
-    if not _allowed(repository, repos):
-        return Ignore("repository is not on the allowlist")
     if action == "closed":
         return PullRequestClosed(
             installation_id=payload["installation"]["id"],
@@ -99,18 +97,12 @@ def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str], app_sl
     )
 
 
-def _allowed(repository: Mapping[str, Any], repos: frozenset[str]) -> bool:
-    return repository["full_name"].lower() in repos
-
-
-def _comment(payload: Mapping[str, Any], repos: frozenset[str], app_slug: str) -> Decision:
+def _comment(payload: Mapping[str, Any], app_slug: str) -> Decision:
     if payload["action"] != "created":
         return Ignore("only new comments are read")  # an edit must not re-run a command
     issue, comment, repository = payload["issue"], payload["comment"], payload["repository"]
     if "pull_request" not in issue:
         return Ignore("comment on an issue, not a pull request")
-    if not _allowed(repository, repos):
-        return Ignore("repository is not on the allowlist")
     author = comment["user"]["login"]
     if author.lower() == f"{app_slug}[bot]".lower():
         return Ignore("the bot's own comment")

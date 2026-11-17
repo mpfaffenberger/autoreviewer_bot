@@ -67,7 +67,7 @@ def create_app(
         if not event or not delivery:
             return _reply(400, error="missing X-GitHub-Event or X-GitHub-Delivery")
         try:
-            decision = route(event, json.loads(body), settings.repos, settings.app_slug)
+            decision = route(event, json.loads(body), settings.app_slug)
         except (ValueError, MalformedPayload) as error:
             logger.warning("delivery %s: malformed %s payload: %s", delivery, event, error)
             return _reply(400, error="malformed payload")
@@ -129,9 +129,7 @@ def main() -> None:
     logs.configure()
     settings = Settings.from_env()
     settings.work_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(
-        "starting as %s; acting on %s", settings.bot_login, ", ".join(sorted(settings.repos)) or "no repositories"
-    )
+    logger.info("starting as %s; reviewing the repositories selected on the App installation", settings.bot_login)
 
     github = GitHubApp.from_key(settings.app_id, settings.private_key)
     memory = ReviewMemory(settings.steps_dir)

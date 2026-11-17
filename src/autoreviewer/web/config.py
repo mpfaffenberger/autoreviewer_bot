@@ -12,12 +12,13 @@ DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
 
 @dataclass(frozen=True)
 class Settings:
+    """Which repos the bot reviews is decided in one place only: the App installation's repository
+    selection on GitHub. The App is private, so only its owner can install it."""
+
     app_id: int
     app_slug: str
     webhook_secret: str = field(repr=False)
     private_key: str = field(repr=False)
-    repos: frozenset[str]
-    """`owner/name` (lowercase) the bot acts on. Everything else is ignored: deny by default."""
     block_at_priority: int = 1
     """Confirmed findings at this priority or more urgent (0 = P0 ... 3 = P3) block the merge; 3 blocks on all."""
     max_concurrent_jobs: int = 2
@@ -31,9 +32,9 @@ class Settings:
     """Each model's context window in tokens; compaction keeps conversations under 60% of it."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
+    """DBOS system database: queued and in-flight reviews survive restarts here."""
     steps_dir: Path = Path("/var/lib/autoreviewer/steps")
     """Per-PR lens conversations, so a new commit continues the last review (see review/memory.py)."""
-    """DBOS system database: queued and in-flight reviews survive restarts here."""
 
     @property
     def bot_login(self) -> str:
@@ -47,7 +48,6 @@ class Settings:
             app_slug=env["GITHUB_APP_SLUG"],
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
-            repos=parse_repos(env.get("AUTOREVIEWER_REPOS", "")),
             max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", "2")),
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
@@ -60,10 +60,3 @@ class Settings:
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
             steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
         )
-
-
-def parse_repos(value: str) -> frozenset[str]:
-    repos = frozenset(item.strip().lower() for item in value.split(",") if item.strip())
-    if malformed := sorted(repo for repo in repos if repo.count("/") != 1):
-        raise ValueError(f"AUTOREVIEWER_REPOS entries must be owner/name: {malformed}")
-    return repos
