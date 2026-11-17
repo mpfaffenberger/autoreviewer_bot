@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
-from autoreviewer.review.pipeline import Outcome
 from autoreviewer.review.schemas import Finding
+
+if TYPE_CHECKING:  # pipeline imports progress, which imports this module
+    from autoreviewer.review.pipeline import Outcome
 
 MAX_TEXT = 3000
 
@@ -19,12 +22,12 @@ _SECRETS = (
 )
 
 
-def sanitize(text: str) -> str:
+def sanitize(text: str, *, limit: int = MAX_TEXT) -> str:
     """Make model text safe to post: no pings, no secrets echoed back, bounded length."""
     for pattern in _SECRETS:
         text = pattern.sub("[redacted]", text)
     text = _MENTION.sub("@\u200b", text)  # a zero-width space after "@" stops GitHub notifying anyone
-    return text if len(text) <= MAX_TEXT else text[: MAX_TEXT - 1] + "…"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def comment_body(finding: Finding, *, blocking: bool = True) -> str:

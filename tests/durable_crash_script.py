@@ -50,9 +50,9 @@ class PersistentGitHub(FakeGitHub):
         return check_id
 
     async def finish_check(
-        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str
+        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str, text: str = ""
     ) -> None:
-        await super().finish_check(repo, check_id, conclusion=conclusion, title=title, summary=summary)
+        await super().finish_check(repo, check_id, conclusion=conclusion, title=title, summary=summary, text=text)
         self._save()
 
     async def create_review(

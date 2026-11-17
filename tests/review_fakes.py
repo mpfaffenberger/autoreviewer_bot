@@ -171,6 +171,8 @@ class FakeGitHub:
     reviews: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     checks: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
+    check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    fail_check_updates: bool = False
     fail_reactions: bool = False
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
@@ -200,10 +202,17 @@ class FakeGitHub:
         self.checks.append({"status": "in_progress", "head_sha": head_sha})
         return len(self.checks)
 
+    async def update_check(self, repo: Repo, check_id: int, *, title: str, summary: str, text: str) -> None:
+        if self.fail_check_updates:
+            raise RuntimeError("secondary rate limit")
+        self.check_updates.append({"check_id": check_id, "title": title, "summary": summary, "text": text})
+
     async def finish_check(
-        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str
+        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str, text: str = ""
     ) -> None:
-        self.checks[check_id - 1].update(status="completed", conclusion=conclusion, title=title, summary=summary)
+        self.checks[check_id - 1].update(
+            status="completed", conclusion=conclusion, title=title, summary=summary, text=text
+        )
 
     async def create_review(
         self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]

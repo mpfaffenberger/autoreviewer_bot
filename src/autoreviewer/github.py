@@ -80,8 +80,12 @@ class PullRequests(PullRequestReader, Protocol):
 
     async def start_check(self, repo: Repo, head_sha: str) -> int: ...
 
+    async def update_check(self, repo: Repo, check_id: int, *, title: str, summary: str, text: str) -> None:
+        """Show progress on a check run that's still in progress."""
+        ...
+
     async def finish_check(
-        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str
+        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str, text: str = ""
     ) -> None: ...
 
     async def create_review(
@@ -176,15 +180,25 @@ class GitHubApp:
         # Only the id is needed; validating the whole check-run schema would only add brittleness.
         return int(response.json()["id"])
 
+    async def update_check(self, repo: Repo, check_id: int, *, title: str, summary: str, text: str) -> None:
+        github = self._as_installation(repo.installation_id)
+        await github.rest.checks.async_update(
+            repo.owner, repo.name, check_id, data={"output": {"title": title, "summary": summary, "text": text}}
+        )
+
     async def finish_check(
-        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str
+        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str, text: str = ""
     ) -> None:
         github = self._as_installation(repo.installation_id)
         await github.rest.checks.async_update(
             repo.owner,
             repo.name,
             check_id,
-            data={"status": "completed", "conclusion": conclusion, "output": {"title": title, "summary": summary}},
+            data={
+                "status": "completed",
+                "conclusion": conclusion,
+                "output": {"title": title, "summary": summary, "text": text},
+            },
         )
 
     async def create_review(
