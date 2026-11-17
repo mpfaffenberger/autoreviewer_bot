@@ -88,9 +88,10 @@ async def review_pr(
         agents=agents,
         work_dir=work_dir,
         repo=repo,
+        number=ref.number,
         state=state,
         head_sha=state.head_sha,
-    )
+    )  # no memory: on-demand reviews always start fresh
     return Report(ref, state.head_sha, state.title, result)
 
 

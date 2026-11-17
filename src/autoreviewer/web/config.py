@@ -29,6 +29,8 @@ class Settings:
     """Each model's context window in tokens; compaction keeps conversations under 60% of it."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
+    steps_dir: Path = Path("/var/lib/autoreviewer/steps")
+    """Per-PR lens conversations, so a new commit continues the last review (see review/memory.py)."""
     """DBOS system database: queued and in-flight reviews survive restarts here."""
 
     @property
@@ -53,6 +55,7 @@ class Settings:
             verifier_context_window=int(env.get("AUTOREVIEWER_VERIFIER_CONTEXT_WINDOW", cls.verifier_context_window)),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
+            steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
         )
 
 

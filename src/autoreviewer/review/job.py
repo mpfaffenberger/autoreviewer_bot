@@ -26,10 +26,11 @@ from autoreviewer.github import (
     ReviewRejected,
 )
 from autoreviewer.review.diff import MAX_CHANGED_LINES, select
-from autoreviewer.review.pipeline import Outcome, PullRequestText, review
+from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
+from autoreviewer.review.pipeline import Continuation, Outcome, PullRequestText, review
 from autoreviewer.review.render import comment_body, review_body
 from autoreviewer.review.schemas import LensReport, Verification
-from autoreviewer.review.workspace import RepoSource, Workspace, read_changes
+from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated
 
 logger = logging.getLogger("autoreviewer.job")
@@ -49,6 +50,10 @@ class ReviewDeps:
     """Our own GitHub login, e.g. chaos-emerald-reviewer[bot]; used to avoid reviewing a commit twice."""
     models_note: str
     """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
+    memory: ReviewMemory | None = None
+    """Where each PR's lens conversation is kept, so a new commit continues the last review."""
+    lens_version: str = ""
+    """Fingerprint of the lens prompt and model (see agents.lens_version)."""
 
 
 @dataclass(frozen=True)
@@ -98,17 +103,27 @@ async def review_change(
     agents: AgentFactory,
     work_dir: Path,
     repo: Repo,
+    number: int,
     state: PullRequestState,
     head_sha: str,
+    memory: ReviewMemory | None = None,
+    lens_version: str = "",
 ) -> Outcome | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
-    Returns the findings, or a CheckResult when there is nothing to review or it is too large. Shared
-    by the bot's job (which then posts) and on-demand reviews (which print).
+    With `memory`, a head that adds commits on top of the last reviewed one continues that review's
+    conversation; anything else (first review, force-push, moved merge-base, changed prompt or model)
+    starts fresh. Returns the findings, or a CheckResult when there is nothing to review or it is too
+    large. Shared by the bot's job (which then posts) and on-demand reviews (which print).
     """
-    base = await reader.merge_base(repo, state.base_sha, head_sha)
+    base = (await reader.compare(repo, state.base_sha, head_sha)).merge_base
+    conversation = conversation_id(repo, number)
+    prior = await _resumable(memory, reader, repo, conversation, base=base, head_sha=head_sha, version=lens_version)
+
     with tempfile.TemporaryDirectory(prefix="review-", dir=work_dir) as scratch:
-        workspace = await source.checkout(repo, head=head_sha, base=base, dest=Path(scratch) / "repo")
+        workspace = await source.checkout(
+            repo, head=head_sha, base=base, dest=Path(scratch) / "repo", previous=prior.head_sha if prior else None
+        )
         changes, patches = await read_changes(workspace)
         selection = select(changes)
         if not selection.reviewable:
@@ -121,9 +136,62 @@ async def review_change(
                 f"{selection.changed_lines} changed lines; the limit is {MAX_CHANGED_LINES}.",
                 "neutral",
             )
+        continuation = None
+        if prior is not None and memory is not None:
+            history = await memory.history(conversation, prior)
+            if history:
+                changed_since = await read_changes_since_previous(workspace)
+                continuation = Continuation(prior, history, head_sha, changed_since)
+        persistence, run_id = memory.persistence(conversation) if memory else (None, "")
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
-        return await review(pr, lens, verifier)
+        outcome = await review(
+            pr,
+            lens,
+            verifier,
+            continuation=continuation,
+            lens_capabilities=[persistence] if persistence else (),
+            conversation=conversation,
+        )
+    if memory is not None:
+        memory.remember(conversation, _prior_review(run_id, head_sha, base, lens_version, outcome))
+    logger.info(
+        "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
+    )
+    return outcome
+
+
+async def _resumable(
+    memory: ReviewMemory | None,
+    reader: PullRequestReader,
+    repo: Repo,
+    conversation: str,
+    *,
+    base: str,
+    head_sha: str,
+    version: str,
+) -> PriorReview | None:
+    """The last review, if this head simply adds commits on top of what it saw. Otherwise None."""
+    if memory is None or (prior := memory.last(conversation)) is None:
+        return None
+    if prior.version != version or prior.base_sha != base or prior.head_sha == head_sha:
+        return None  # another prompt/model, a moved merge-base, or the same head again: start fresh
+    if (await reader.compare(repo, prior.head_sha, head_sha)).status != "ahead":
+        return None  # force-push, rebase, or reset: the old conversation describes code that's gone
+    return prior
+
+
+def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: Outcome) -> PriorReview:
+    return PriorReview(
+        run_id=run_id,
+        head_sha=head_sha,
+        base_sha=base,
+        version=version,
+        findings=[{"path": f.path, "line": f.line, "title": f.title} for f in [*outcome.inline, *outcome.general]],
+        dropped=[
+            {"path": f.path, "line": f.line, "title": f.title, "reason": reason} for f, reason in outcome.rejected
+        ],
+    )
 
 
 async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
@@ -134,8 +202,11 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> Che
         agents=deps.agents,
         work_dir=deps.work_dir,
         repo=repo,
+        number=pull.number,
         state=state,
         head_sha=pull.head_sha,
+        memory=deps.memory,
+        lens_version=deps.lens_version,
     )
     if isinstance(result, CheckResult):
         return result

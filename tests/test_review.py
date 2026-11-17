@@ -250,10 +250,10 @@ async def test_a_crash_becomes_a_result_instead_of_an_exception(repo: GitRepo, t
     github = FakeGitHub(repo, head_shas=[repo.head])
     deps = job_deps(github, tmp_path, [finding(5)])
 
-    async def broken_merge_base(*_: object) -> str:
+    async def broken_compare(*_: object) -> object:
         raise RuntimeError("GitHub is down")
 
-    github.merge_base = broken_merge_base  # type: ignore[method-assign]
+    github.compare = broken_compare  # type: ignore[method-assign]
     result = await review_and_post(deps, pull(repo))
     assert github.reviews == [] and (result.title, result.conclusion) == ("Review failed", "neutral")
 

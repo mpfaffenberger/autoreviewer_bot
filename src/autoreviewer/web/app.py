@@ -19,11 +19,12 @@ if TYPE_CHECKING:
     from pydantic_ai.models.openai import OpenAIChatModel
 
     from autoreviewer.review.job import AgentFactory
-from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
+from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestClosed, PullRequestUpdated, route
 
 logger = logging.getLogger("autoreviewer.web")
 
 PullRequestHandler = Callable[[PullRequestUpdated], Awaitable[None]]
+ClosedHandler = Callable[[PullRequestClosed], Awaitable[None]]
 
 
 def _reply(status_code: int, **body: str) -> JSONResponse:
@@ -34,6 +35,7 @@ def create_app(
     settings: Settings,
     on_pull_request: PullRequestHandler,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
+    on_pull_request_closed: ClosedHandler | None = None,
 ) -> FastAPI:
     """`on_pull_request` must be quick (it enqueues); `lifespan` starts and stops whatever runs the work."""
     app = FastAPI(title="autoreviewer", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -71,6 +73,10 @@ def create_app(
                 # Duplicate deliveries are harmless; the review workflow's ID makes them no-ops.
                 await on_pull_request(pull)
                 return _reply(202, status="accepted")
+            case PullRequestClosed() as closed:
+                if on_pull_request_closed is not None:
+                    await on_pull_request_closed(closed)
+                return _reply(200, status="closed")
 
     return app
 
@@ -97,9 +103,11 @@ def main() -> None:
     import uvicorn
 
     from autoreviewer import logs
-    from autoreviewer.github import GitHubApp
+    from autoreviewer.github import GitHubApp, Repo
     from autoreviewer.review import durable
+    from autoreviewer.review.agents import lens_version
     from autoreviewer.review.job import ReviewDeps
+    from autoreviewer.review.memory import ReviewMemory, conversation_id
     from autoreviewer.review.workspace import GitHubSource
 
     logs.configure()
@@ -110,6 +118,7 @@ def main() -> None:
     )
 
     github = GitHubApp.from_key(settings.app_id, settings.private_key)
+    memory = ReviewMemory(settings.steps_dir)
     deps = ReviewDeps(
         github=github,
         source=GitHubSource(github),
@@ -117,6 +126,8 @@ def main() -> None:
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
         models_note=models_note(settings),
+        memory=memory,
+        lens_version=lens_version(settings.lens_model),
     )
     durable.configure(settings.database)
 
@@ -131,5 +142,9 @@ def main() -> None:
     async def enqueue(pull: PullRequestUpdated) -> None:
         await durable.enqueue(pull)
 
-    app = create_app(settings, enqueue, lifespan)
+    async def forget(closed: PullRequestClosed) -> None:
+        repo = Repo(closed.installation_id, closed.owner, closed.repo)
+        memory.forget(conversation_id(repo, closed.number))
+
+    app = create_app(settings, enqueue, lifespan, forget)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import AppAuthStrategy, GitHub
 
-from autoreviewer.github import CHECK_NAME, GitHubApp, Repo, ReviewComment, ReviewRejected
+from autoreviewer.github import CHECK_NAME, Comparison, GitHubApp, Repo, ReviewComment, ReviewRejected
 
 pytestmark = pytest.mark.anyio
 
@@ -77,7 +77,7 @@ class FakeGitHub:
         base = f"/repos/{REPO.owner}/{REPO.name}"
         if method == "GET" and path == f"{base}/compare/{'b' * 40}...{HEAD}":
             assert request.url.params.get("per_page") == "1"
-            return httpx2.Response(200, json={"merge_base_commit": {"sha": "c" * 40}, "files": []})
+            return httpx2.Response(200, json={"merge_base_commit": {"sha": "c" * 40}, "status": "ahead", "files": []})
         if method == "POST" and path == f"{base}/check-runs":
             self.writes.append(("start_check", path, json.loads(request.content)))
             return httpx2.Response(201, json={"id": 99, "name": CHECK_NAME})
@@ -102,9 +102,11 @@ def fake_and_app(key: rsa.RSAPrivateKey) -> tuple[FakeGitHub, GitHubApp]:
     return fake, GitHubApp(client)
 
 
-async def test_merge_base_reads_one_field_from_a_small_compare(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
+async def test_compare_reads_merge_base_and_status_from_a_small_compare(
+    fake_and_app: tuple[FakeGitHub, GitHubApp],
+) -> None:
     _, app = fake_and_app
-    assert await app.merge_base(REPO, "b" * 40, HEAD) == "c" * 40
+    assert await app.compare(REPO, "b" * 40, HEAD) == Comparison(merge_base="c" * 40, status="ahead")
 
 
 async def test_read_tokens_are_scoped_to_one_repo_and_read_only(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:

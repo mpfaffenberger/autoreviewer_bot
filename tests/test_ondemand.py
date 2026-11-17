@@ -96,11 +96,11 @@ async def test_public_github_sends_credentials_only_when_given_a_token(
 
     def handle(request: httpx2.Request) -> httpx2.Response:
         seen.append(request.headers.get("authorization"))
-        return httpx2.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
+        return httpx2.Response(200, json={"merge_base_commit": {"sha": "c" * 40}, "status": "ahead"})
 
     github = PublicGitHub(token)
     github._github = type(github._github)(github._github.auth, async_transport=httpx2.MockTransport(handle))
-    assert await github.merge_base(Repo(0, "someone", "elsewhere"), "b" * 40, "a" * 40) == "c" * 40
+    assert (await github.compare(Repo(0, "someone", "elsewhere"), "b" * 40, "a" * 40)).merge_base == "c" * 40
     assert [value.lower() if value else None for value in seen] == [expected_auth.lower() if expected_auth else None]
 
 
