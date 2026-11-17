@@ -31,7 +31,7 @@ from autoreviewer.review.diff import select
 from autoreviewer.review.pipeline import PullRequestText
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import Finding
-from autoreviewer.review.simplify import Simplifier, SimplifierFactory, suggest
+from autoreviewer.review.simplify import Simplifier, SimplifierFactory, simplify
 from autoreviewer.review.workspace import Workspace, read_changes
 from evals.cases import Case
 from evals.run import RESULTS, ROOT, build_repo, models_from_env
@@ -71,15 +71,13 @@ async def run_case(case: Case, simplifier: SimplifierFactory, work: Path) -> Res
             changes, patches = await read_changes(workspace)
             selection = select(changes)
             pr = PullRequestText(case.title, "", selection.reviewable, selection.skipped, patches)
-            progress = Progress()
-            found = await suggest(pr, simplifier(workspace), workspace.root, progress)
+            run = await simplify(pr, simplifier(workspace), workspace.root, Progress())
+            found = run.posted
             tests_pass = _apply_and_test(workspace.root, found) if found else None
         except Exception as error:  # a crashed case is reported, not fatal to the run
             seconds = time.monotonic() - started
             return Result(case.name, case.clean, 0, 0, 0, 0, 0, planted, None, seconds, [], repr(error)[:300])
-    notes = list(progress.activity)
-    dropped_by_code = sum(note.startswith("dropped suggestion") for note in notes)
-    dropped_by_checker = sum(note.startswith("dropped simplification") for note in notes)
+    dropped_by_code, dropped_by_checker = len(run.dropped_by_code), len(run.dropped_by_checker)
     return Result(
         name=case.name,
         clean=case.clean,

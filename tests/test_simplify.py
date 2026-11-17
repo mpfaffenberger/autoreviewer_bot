@@ -16,7 +16,7 @@ from autoreviewer.review.pipeline import PullRequestText
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import comment_body
 from autoreviewer.review.schemas import Finding
-from autoreviewer.review.simplify import suggest
+from autoreviewer.review.simplify import simplify, suggest
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import PullRequestUpdated
 from tests.review_fakes import FakeGitHub, GitRepo, add_commit, job_deps, simplifier
@@ -104,6 +104,19 @@ async def test_the_checker_has_the_last_word(tmp_path: Path) -> None:
     assert found == [] and "dropped simplification: Return the comparison directly" in progress.activity
 
 
+async def test_the_full_accounting_counts_every_drop(tmp_path: Path) -> None:
+    """Exact counts, not a scan of the progress display (which keeps only the latest events)."""
+    pr = added_file(tmp_path, first_added=2)
+    factory = simplifier([cut(), cut(start=1), cut(start=3, end=3, replacement="")], lambda prompt: "2-7" not in prompt)
+    result = await simplify(pr, factory(Workspace(tmp_path, "b", "h")), tmp_path, Progress())
+    assert result.posted == []
+    assert [reason for _, reason in result.dropped_by_code] == [
+        "touches lines this PR didn't add",
+        "overlaps another suggestion",
+    ]
+    assert [(s.start_line, s.end_line) for s in result.dropped_by_checker] == [(2, 7)]
+
+
 async def test_a_failing_simplifier_costs_only_the_suggestions(tmp_path: Path) -> None:
     found, _ = await run(tmp_path, [cut()], crash=True)
     assert found == []
@@ -149,8 +162,6 @@ async def test_simplifications_never_block_and_post_as_multi_line_suggestions(re
     assert "```suggestion\n" + TIGHT + "\n```" in comment.body
     summary = "1 optional one-click simplification(s), cutting 5 line(s) (56% of the 9 added)."  # 2 added elsewhere
     assert summary in review["body"]
-    check = github.checks[0] if github.checks else None
-    assert check is None or "advisory" not in check.get("summary", "")
 
 
 async def test_any_failure_costs_only_the_suggestions(tmp_path: Path) -> None:

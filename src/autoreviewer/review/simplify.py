@@ -12,7 +12,7 @@ import ast
 import asyncio
 import logging
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pydantic_ai import Agent
@@ -40,6 +40,15 @@ class Simplifier:
 SimplifierFactory = Callable[[Workspace], Simplifier]
 
 
+@dataclass
+class SimplifyRun:
+    """Everything one pass produced: what gets posted, and what was dropped and why."""
+
+    posted: list[Finding] = field(default_factory=list[Finding])
+    dropped_by_code: list[tuple[Suggestion, str]] = field(default_factory=list[tuple[Suggestion, str]])
+    dropped_by_checker: list[Suggestion] = field(default_factory=list[Suggestion])
+
+
 async def suggest(
     pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, *, paths: Collection[str] | None = None
 ) -> list[Finding]:
@@ -47,18 +56,20 @@ async def suggest(
     the last review, so each push doesn't repeat the same suggestions). Never raises: suggestions are
     optional, so any failure here costs only them, never the review."""
     try:
-        return await _suggest(pr, simplifier, root, progress, paths)
+        return (await simplify(pr, simplifier, root, progress, paths=paths)).posted
     except Exception:
         logger.warning("simplifications failed; posting none", exc_info=True)
         return []
 
 
-async def _suggest(
-    pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, paths: Collection[str] | None
-) -> list[Finding]:
+async def simplify(
+    pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, *, paths: Collection[str] | None = None
+) -> SimplifyRun:
+    """One unguarded pass with its full accounting (the eval reads it; the bot uses `suggest`)."""
+    result = SimplifyRun()
     scoped = [change for change in pr.reviewable if paths is None or change.path in paths]
     if not scoped:
-        return []
+        return result
     run = await simplifier.propose.run(
         lens_prompt(replace(pr, reviewable=scoped)),
         usage_limits=LENS_LIMITS,
@@ -69,6 +80,7 @@ async def _suggest(
     accepted: list[Suggestion] = []
     for suggestion in run.output.suggestions:
         if reason := _invalid(suggestion, pr, root, allowed, accepted):
+            result.dropped_by_code.append((suggestion, reason))
             progress.note(f"dropped suggestion {suggestion.path}:{suggestion.start_line}: {reason}")
         else:
             accepted.append(suggestion)
@@ -94,7 +106,12 @@ async def _suggest(
             return verdict.confirmed
 
     verdicts = await asyncio.gather(*(confirmed(suggestion) for suggestion in accepted))
-    return [_finding(suggestion) for suggestion, ok in zip(accepted, verdicts, strict=True) if ok]
+    for suggestion, ok in zip(accepted, verdicts, strict=True):
+        if ok:
+            result.posted.append(_finding(suggestion))
+        else:
+            result.dropped_by_checker.append(suggestion)
+    return result
 
 
 def _invalid(
