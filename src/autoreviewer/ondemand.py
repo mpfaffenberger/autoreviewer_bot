@@ -70,6 +70,10 @@ class Report:
         lines = [header, f"**Verdict: {verdict}** (nothing was posted to GitHub)\n"]
         for finding in [*outcome.inline, *outcome.general]:
             lines.append(f"## `{finding.path}:{finding.line}`\n\n{comment_body(finding)}\n")
+        if outcome.unverified:
+            lines.append(f"**{len(outcome.unverified)} candidate(s) could not be verified** (the verifier failed):\n")
+            lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.unverified)
+            lines.append("")
         if outcome.rejected:
             lines.append(f"<details><summary>{len(outcome.rejected)} candidate(s) dropped by verification</summary>\n")
             lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.rejected)

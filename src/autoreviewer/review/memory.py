@@ -42,7 +42,9 @@ class PriorReview:
     findings: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
     """Confirmed findings it posted (path, line, title)."""
     dropped: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
-    """Candidates the verifier rejected (path, line, title, reason)."""
+    """Candidates the verifier judged not to be bugs (path, line, title, reason)."""
+    unverified: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+    """Candidates the verifier never judged (it failed): the next review checks them again."""
 
 
 class ReviewMemory:

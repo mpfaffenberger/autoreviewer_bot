@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -224,3 +225,56 @@ async def test_a_newer_head_keeps_the_memory_but_posts_nothing(
 
     assert github.reviews == [] and result.title == "Superseded"
     assert memory.last(CONVERSATION).head_sha == repo.head  # type: ignore[union-attr]  # the next review continues from it
+
+
+# --- a verifier failure is no verdict (found by the bot reviewing PR #9) ------------------------------
+
+
+def flaky_verifier(github: FakeGitHub) -> LensSpy:
+    """A verifier that crashes on the finding at line 5, like a model-server timeout."""
+    spy = LensSpy([finding(5), finding(3, title="Loop is wrong")])
+
+    def confirm(reported: dict[str, Any]) -> bool:
+        if reported["line"] == 5:
+            raise RuntimeError("model server timed out")
+        return False
+
+    spy.agents = lambda ws: (correctness_agent(spy.model(), ws), verifier_agent(verifier_model(confirm), ws))  # type: ignore[method-assign]
+    return spy
+
+
+async def test_unverified_candidates_are_checked_again_never_treated_as_rejected(
+    repo: GitRepo, memory: ReviewMemory, tmp_path: Path
+) -> None:
+    github = FakeGitHub(repo)
+    outcome = await review_at(github, repo.head, flaky_verifier(github), memory, tmp_path)
+    assert [(f.line, reason) for f, reason in outcome.unverified] == [(5, "verification failed: RuntimeError")]
+    assert [f.line for f, _ in outcome.rejected] == [3]
+
+    prior = memory.last(CONVERSATION)
+    assert prior is not None
+    assert [f["line"] for f in prior.unverified] == [5] and [f["line"] for f in prior.dropped] == [3]
+
+    spy = LensSpy([])
+    await review_at(github, add_commit(repo, {"stats.py": FIXED}), spy, memory, tmp_path)
+    prompt = spy.runs[-1]["prompts"][-1]
+    check_again, rejected = prompt.split("# Candidates the verifier rejected", 1)
+    assert "could not be verified last time (check them again)" in check_again and "stats.py:5" in check_again
+    assert "stats.py:5" not in rejected and "stats.py:3 Loop is wrong" in rejected
+
+
+def test_the_check_summary_reports_unverified_candidates() -> None:
+    from autoreviewer.review.job import _summary
+    from autoreviewer.review.schemas import Finding
+
+    outcome = Outcome(unverified=[(Finding.model_validate(finding(5)), "verification failed: RuntimeError")])
+    assert "1 candidate finding(s) could not be verified and will be checked again." in _summary(outcome).summary
+
+
+def test_an_index_from_before_unverified_existed_still_loads(memory: ReviewMemory, tmp_path: Path) -> None:
+    memory.remember(CONVERSATION, PriorReview("r", "h", "b", "v"))
+    index = next((tmp_path / "steps").glob("*/index.json"))
+    data = json.loads(index.read_text())
+    del data["unverified"]
+    index.write_text(json.dumps(data))
+    assert memory.last(CONVERSATION) == PriorReview("r", "h", "b", "v")

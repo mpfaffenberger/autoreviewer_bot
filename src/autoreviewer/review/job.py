@@ -198,6 +198,8 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
         dropped=[
             {"path": f.path, "line": f.line, "title": f.title, "reason": reason} for f, reason in outcome.rejected
         ],
+        # Never as "dropped": a verifier failure is no verdict, and the next review must look again.
+        unverified=[{"path": f.path, "line": f.line, "title": f.title} for f, _ in outcome.unverified],
     )
 
 
@@ -292,10 +294,14 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
 
 
 def _summary(outcome: Outcome) -> CheckResult:
-    dropped = f" {len(outcome.rejected)} candidate finding(s) were dropped by verification." if outcome.rejected else ""
+    notes = ""
+    if outcome.rejected:
+        notes += f" {len(outcome.rejected)} candidate finding(s) were dropped by verification."
+    if outcome.unverified:
+        notes += f" {len(outcome.unverified)} candidate finding(s) could not be verified and will be checked again."
     if outcome.blocking:
         count = len(outcome.inline) + len(outcome.general)
         return CheckResult(
-            f"{count} correctness issue(s)", f"Changes requested; see the review comments.{dropped}", "failure"
+            f"{count} correctness issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
         )
-    return CheckResult("No correctness issues", f"Approved.{dropped}", "success")
+    return CheckResult("No correctness issues", f"Approved.{notes}", "success")
