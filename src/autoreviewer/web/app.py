@@ -19,12 +19,21 @@ if TYPE_CHECKING:
     from pydantic_ai.models.openai import OpenAIChatModel
 
     from autoreviewer.review.job import AgentFactory
-from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestClosed, PullRequestUpdated, route
+from autoreviewer.web.routing import (
+    Ignore,
+    MalformedPayload,
+    Pong,
+    PullRequestClosed,
+    PullRequestUpdated,
+    ReviewRequested,
+    route,
+)
 
 logger = logging.getLogger("autoreviewer.web")
 
-PullRequestHandler = Callable[[PullRequestUpdated], Awaitable[None]]
+PullRequestHandler = Callable[[PullRequestUpdated], Awaitable[object]]
 ClosedHandler = Callable[[PullRequestClosed], Awaitable[None]]
+RequestHandler = Callable[[ReviewRequested], Awaitable[object]]
 
 
 def _reply(status_code: int, **body: str) -> JSONResponse:
@@ -36,6 +45,7 @@ def create_app(
     on_pull_request: PullRequestHandler,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
     on_pull_request_closed: ClosedHandler | None = None,
+    on_review_requested: RequestHandler | None = None,
 ) -> FastAPI:
     """`on_pull_request` must be quick (it enqueues); `lifespan` starts and stops whatever runs the work."""
     app = FastAPI(title="autoreviewer", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -57,7 +67,7 @@ def create_app(
         if not event or not delivery:
             return _reply(400, error="missing X-GitHub-Event or X-GitHub-Delivery")
         try:
-            decision = route(event, json.loads(body), settings.repos)
+            decision = route(event, json.loads(body), settings.repos, settings.app_slug)
         except (ValueError, MalformedPayload) as error:
             logger.warning("delivery %s: malformed %s payload: %s", delivery, event, error)
             return _reply(400, error="malformed payload")
@@ -77,6 +87,11 @@ def create_app(
                 if on_pull_request_closed is not None:
                     await on_pull_request_closed(closed)
                 return _reply(200, status="closed")
+            case ReviewRequested() as command:
+                if on_review_requested is None:
+                    return _reply(200, status="ignored", reason="commands are not enabled")
+                await on_review_requested(command)  # a failure is a 500, so GitHub's redelivery can retry it
+                return _reply(202, status="accepted")
 
     return app
 
@@ -109,6 +124,7 @@ def main() -> None:
     from autoreviewer.review.job import ReviewDeps
     from autoreviewer.review.memory import ReviewMemory, conversation_id
     from autoreviewer.review.workspace import GitHubSource
+    from autoreviewer.web.commands import request_review
 
     logs.configure()
     settings = Settings.from_env()
@@ -140,12 +156,12 @@ def main() -> None:
         finally:
             durable.shutdown()
 
-    async def enqueue(pull: PullRequestUpdated) -> None:
-        await durable.enqueue(pull)
+    async def review_requested(request: ReviewRequested) -> None:
+        await request_review(github, request, durable.enqueue_review)
 
     async def forget(closed: PullRequestClosed) -> None:
         repo = Repo(closed.installation_id, closed.owner, closed.repo)
         memory.forget(conversation_id(repo, closed.number))
 
-    app = create_app(settings, enqueue, lifespan, forget)
+    app = create_app(settings, durable.enqueue_review, lifespan, forget, review_requested)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

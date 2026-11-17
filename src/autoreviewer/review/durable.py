@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync
+from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync, WorkflowStatusString
 
 from autoreviewer.review import job
 from autoreviewer.web.routing import PullRequestUpdated
@@ -101,6 +101,12 @@ async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResu
         raise RuntimeError("the review queue is not registered; call durable.launch() first")
     with SetWorkflowID(workflow_id(pull)):
         return await queue.enqueue_async(review_workflow, pull)
+
+
+async def enqueue_review(pull: PullRequestUpdated) -> bool:
+    """Queue a review of this head (a no-op if one exists); True if it had already finished."""
+    handle = await enqueue(pull)
+    return (await handle.get_status()).status == WorkflowStatusString.SUCCESS.value
 
 
 def shutdown() -> None:

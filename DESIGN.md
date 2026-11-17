@@ -11,7 +11,7 @@ Status: **draft for Mike to review**. The open questions are in §12.
 
 | Behaviour | Rule |
 |---|---|
-| Trigger | PR `opened`, `reopened`, `ready_for_review`, `synchronize` (push), or `@autoreviewer review` |
+| Trigger | PR `opened`, `reopened`, `ready_for_review`, `synchronize` (push), or a `@chaos-emerald-reviewer review` comment (e.g. PRs opened before the bot was installed; open PRs are never backfilled in bulk) |
 | Lenses | **Correctness**, **DRY / don't-reinvent-the-wheel**, **Security** |
 | Output | One GitHub review: a summary plus inline comments anchored to diff lines |
 | Verdict | **Any open P0/P1 finding → `REQUEST_CHANGES`.** Otherwise `APPROVE` (P2/P3 findings are posted as non-blocking comments). `AUTOREVIEWER_BLOCK_AT_PRIORITY=3` makes every finding block |
@@ -152,7 +152,17 @@ also redacts anything that looks like a credential before posting.
 ## 5. Conversations (bots replying to the bot)
 
 Events: `pull_request_review_comment` (thread replies) and `issue_comment`
-(PR-level `@autoreviewer …`).
+(PR-level `@chaos-emerald-reviewer …`).
+
+**Built so far: `@chaos-emerald-reviewer review`** (`web/routing.py` → `web/commands.py`).
+
+- Accepted from the PR's author (human or bot) and from OWNER / MEMBER / COLLABORATOR; anyone else is
+  ignored. The bot's own comments, edits, and quoted (`>`) lines never count as commands.
+- It looks up the PR's current head and enqueues **the push path's review**, with the same workflow ID.
+  Asking about a commit twice is a no-op, so the command can't be used to burn the GPU. Drafts are
+  reviewed too, because the request is explicit.
+- It acknowledges with a reaction: 👀 means a review is queued or running, 👍 means that commit's review
+  already finished. Reactions are cosmetic, so if one fails the delivery doesn't.
 
 ```
 reply arrives in a thread whose root comment is ours

@@ -65,6 +65,15 @@ async def test_duplicate_events_for_one_head_produce_one_review(launch: Launch) 
     assert len(github.checks) == 1 and len(github.reviews) == 1
 
 
+async def test_enqueue_review_says_whether_the_head_was_already_reviewed(launch: Launch) -> None:
+    github = await launch([])
+    pull = pull_for(github.repo)
+    assert await durable.enqueue_review(pull) is False  # queued: a new review runs
+    await (await durable.enqueue(pull)).get_result()
+    assert await durable.enqueue_review(pull) is True  # finished: asking again runs nothing
+    assert len(github.reviews) == 1
+
+
 def test_workflow_ids_are_per_head_and_case_insensitive() -> None:
     other_head = PullRequestUpdated(1, "mpfaffenberger", "demo", 7, "b" * 40)
     shouted = PullRequestUpdated(1, "MPFAFFENBERGER", "Demo", 7, HEAD)

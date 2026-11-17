@@ -14,13 +14,23 @@ import pytest
 
 from autoreviewer.web.app import create_app
 from autoreviewer.web.config import Settings, parse_repos
-from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestClosed, PullRequestUpdated, route
+from autoreviewer.web.routing import (
+    Ignore,
+    MalformedPayload,
+    Pong,
+    PullRequestClosed,
+    PullRequestUpdated,
+    ReviewRequested,
+    is_review_command,
+    route,
+)
 
 pytestmark = pytest.mark.anyio
 
 SECRET = "test-webhook-secret"
 REPO = "mpfaffenberger/pydantic-ai-claude-code"
 REPOS = frozenset({REPO})
+SLUG = "chaos-emerald-reviewer"
 
 
 def pull_request_payload(*, action: str = "opened", repo: str = REPO, draft: bool = False) -> dict[str, Any]:
@@ -217,12 +227,12 @@ async def test_healthz(receiver: Receiver) -> None:
     ids=["ping", "own-check-run-events", "closed", "labeled", "draft", "case-insensitive-allowlist", "push"],
 )
 def test_route(event: str, payload: dict[str, Any], expected: object) -> None:
-    assert route(event, payload, REPOS) == expected
+    assert route(event, payload, REPOS, SLUG) == expected
 
 
 def test_route_reports_malformed_payloads() -> None:
     with pytest.raises(MalformedPayload, match="repository"):
-        route("pull_request", {"action": "opened"}, REPOS)
+        route("pull_request", {"action": "opened"}, REPOS, SLUG)
 
 
 def test_settings_keep_secrets_out_of_repr() -> None:
@@ -251,3 +261,100 @@ async def test_a_closed_pull_request_reaches_the_closed_handler() -> None:
         response = await client.post("/webhook", content=body, headers=headers)
     assert response.json() == {"status": "closed"}
     assert closed == [PullRequestClosed(182623847, "mpfaffenberger", "pydantic-ai-claude-code", 7)]
+
+
+# --- `@chaos-emerald-reviewer review` comments ------------------------------------------------------
+
+
+def comment_payload(
+    body: str = "@chaos-emerald-reviewer review",
+    *,
+    commenter: str = "someone",
+    association: str = "NONE",
+    pr_author: str = "someone",
+    action: str = "created",
+    on_pull_request: bool = True,
+    repo: str = REPO,
+) -> dict[str, Any]:
+    owner, name = repo.split("/")
+    issue: dict[str, Any] = {"number": 7, "user": {"login": pr_author}}
+    if on_pull_request:
+        issue["pull_request"] = {"url": "https://api.github.com/..."}
+    return {
+        "action": action,
+        "installation": {"id": 182623847},
+        "repository": {"full_name": repo, "name": name, "owner": {"login": owner}},
+        "issue": issue,
+        "comment": {"id": 99, "body": body, "user": {"login": commenter}, "author_association": association},
+    }
+
+
+REQUESTED = ReviewRequested(
+    installation_id=182623847, owner="mpfaffenberger", repo="pydantic-ai-claude-code", number=7, comment_id=99
+)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (comment_payload(), REQUESTED),
+        (comment_payload(commenter="dependabot[bot]", pr_author="dependabot[bot]"), REQUESTED),
+        (comment_payload(commenter="mike", association="COLLABORATOR", pr_author="someone-else"), REQUESTED),
+        (comment_payload(commenter="mike", association="OWNER", pr_author="someone-else"), REQUESTED),
+        (
+            comment_payload(commenter="drive-by", association="CONTRIBUTOR", pr_author="someone-else"),
+            Ignore("drive-by may not command the bot on someone else's pull request"),
+        ),
+        (comment_payload(commenter="chaos-emerald-reviewer[bot]"), Ignore("the bot's own comment")),
+        (comment_payload(action="edited"), Ignore("only new comments are read")),
+        (comment_payload(on_pull_request=False), Ignore("comment on an issue, not a pull request")),
+        (comment_payload(repo="someone/else"), Ignore("repository is not on the allowlist")),
+        (comment_payload("LGTM"), Ignore("no command for the bot")),
+    ],
+    ids=[
+        "pr-author",
+        "bot-pr-author",
+        "collaborator",
+        "owner",
+        "stranger",
+        "itself",
+        "edit",
+        "issue",
+        "allowlist",
+        "chat",
+    ],
+)
+def test_route_review_commands(payload: dict[str, Any], expected: object) -> None:
+    assert route("issue_comment", payload, REPOS, SLUG) == expected
+
+
+@pytest.mark.parametrize(
+    ("body", "command"),
+    [
+        ("@chaos-emerald-reviewer review", True),
+        ("Thanks! @Chaos-Emerald-Reviewer REVIEW please", True),
+        ("first line\n  @chaos-emerald-reviewer   review\n", True),
+        ("> @chaos-emerald-reviewer review\nquoting the instructions", False),
+        ("@chaos-emerald-reviewer reviewed this already", False),
+        ("@chaos-emerald-reviewer-two review", False),
+        ("me@chaos-emerald-reviewer review", False),
+        ("@chaos-emerald-reviewer what do you think?", False),
+    ],
+)
+def test_what_counts_as_a_review_command(body: str, command: bool) -> None:
+    assert is_review_command(body, SLUG) is command
+
+
+async def test_a_review_command_reaches_its_handler() -> None:
+    requests: list[ReviewRequested] = []
+
+    async def on_request(request: ReviewRequested) -> None:
+        requests.append(request)
+
+    settings = Settings(app_id=1, app_slug=SLUG, webhook_secret=SECRET, private_key="unused", repos=REPOS)
+    app = create_app(settings, FakeHandler(), on_review_requested=on_request)
+    body = json.dumps(comment_payload()).encode()
+    headers = {"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "d-9", "X-Hub-Signature-256": signature(body)}
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/webhook", content=body, headers=headers)
+    assert response.status_code == 202 and requests == [REQUESTED]
