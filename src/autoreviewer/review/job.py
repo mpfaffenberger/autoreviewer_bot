@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,7 +28,6 @@ from autoreviewer.github import (
     ReviewComment,
     ReviewRejected,
 )
-from autoreviewer.review.agents import security_references
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
@@ -39,11 +38,11 @@ from autoreviewer.review.pipeline import (
     PullRequestText,
     place,
     review,
-    review_security,
+    review_lens,
 )
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import comment_body, review_body
-from autoreviewer.review.schemas import LensReport, Verification
+from autoreviewer.review.schemas import LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated
@@ -54,6 +53,23 @@ PROGRESS_INTERVAL_S = 30.0
 """How often a running review updates its check run, at most (GitHub rate-limits App writes)."""
 
 AgentFactory = Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]
+
+
+@dataclass(frozen=True)
+class Lens:
+    """A lens beside correctness: reviews the PR fresh each time, with its own verifier."""
+
+    kind: LensKind
+    agents: AgentFactory
+    instructions: Callable[[Sequence[str]], str] | None = None
+    """Run instructions from the paths it reviews (e.g. the security lens's language references)."""
+    whole_pr: bool = True
+    """On a continued review: the whole PR again (required for a lens that blocks, or a finding from an
+    earlier commit would quietly stop blocking), or only files changed since the last review."""
+
+
+def _only(pr: PullRequestText, paths: set[str]) -> PullRequestText:
+    return replace(pr, reviewable=[change for change in pr.reviewable if change.path in paths])
 
 
 @dataclass(frozen=True)
@@ -76,8 +92,8 @@ class ReviewDeps:
     """Confirmed findings at this priority or more urgent block the merge (1: P0 and P1)."""
     simplifier: SimplifierFactory | None = None
     """Optional one-click simplifications (see simplify.py); None skips them."""
-    security: AgentFactory | None = None
-    """(security lens, security verifier) over a checkout; None skips the security review."""
+    lenses: tuple[Lens, ...] = ()
+    """Extra lenses (security, DRY) beside correctness."""
 
 
 @dataclass(frozen=True)
@@ -195,7 +211,7 @@ async def review_change(
     block_at: int = BLOCK_AT_PRIORITY,
     progress: Progress | None = None,
     simplifier: SimplifierFactory | None = None,
-    security: AgentFactory | None = None,
+    lenses: Sequence[Lens] = (),
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -244,8 +260,8 @@ async def review_change(
         scope = {change.path for change in continuation.changed_since} if continuation else None
         # A TaskGroup, not gather: if one lens fails, the others are cancelled instead of burning GPU on a
         # review that has already failed.
-        async with asyncio.TaskGroup() as lenses:
-            correctness = lenses.create_task(
+        async with asyncio.TaskGroup() as lenses_group:
+            correctness = lenses_group.create_task(
                 review(
                     pr,
                     lens,
@@ -258,27 +274,34 @@ async def review_change(
                     progress=progress,
                 )
             )
-            security_task = None
-            if security is not None:
-                security_lens, security_verifier = security(workspace)
-                security_task = lenses.create_task(
-                    review_security(
-                        pr,
-                        security_lens,
-                        security_verifier,
-                        instructions=security_references(change.path for change in pr.reviewable),
-                        progress=progress,
-                        block_at=block_at,
+            extra = []
+            for spec in lenses:
+                target = pr if spec.whole_pr or scope is None else _only(pr, scope)
+                if not target.reviewable:
+                    continue
+                extra_lens, extra_verifier = spec.agents(workspace)
+                paths = [change.path for change in target.reviewable]
+                extra.append(
+                    lenses_group.create_task(
+                        review_lens(
+                            target,
+                            extra_lens,
+                            extra_verifier,
+                            kind=spec.kind,
+                            instructions=spec.instructions(paths) if spec.instructions else None,
+                            progress=progress,
+                            block_at=block_at,
+                        )
                     )
                 )
             simplify_task = None
             if simplifier is not None:
-                simplify_task = lenses.create_task(
+                simplify_task = lenses_group.create_task(
                     suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope)
                 )
         outcome = correctness.result()
-        if security_task is not None:
-            outcome.absorb(security_task.result())
+        for task in extra:
+            outcome.absorb(task.result())
         suggestions = simplify_task.result() if simplify_task is not None else []
         outcome.added_lines = sum(len(added_lines(patches.get(change.path, ""))) for change in pr.reviewable)
         for suggestion in suggestions:
@@ -356,7 +379,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
             block_at=deps.block_at,
             progress=progress,
             simplifier=deps.simplifier,
-            security=deps.security,
+            lenses=deps.lenses,
         )
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close

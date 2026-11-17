@@ -18,7 +18,8 @@ from autoreviewer.web.config import Settings
 if TYPE_CHECKING:
     from pydantic_ai.models.openai import OpenAIChatModel
 
-    from autoreviewer.review.job import AgentFactory
+    from autoreviewer.review.job import AgentFactory, Lens
+    from autoreviewer.review.schemas import LensKind
     from autoreviewer.review.simplify import SimplifierFactory
 from autoreviewer.web.routing import (
     Ignore,
@@ -118,17 +119,30 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
     )
 
 
-def build_security_factory(settings: Settings) -> AgentFactory | None:
-    """(security lens, security verifier) on the same models as correctness; None when it's off."""
-    from autoreviewer.review.agents import security_agent, security_verifier_agent
+def build_lenses(settings: Settings) -> tuple[Lens, ...]:
+    """The enabled lenses beside correctness, on the same models. Security reviews the whole PR every time
+    (it can block); DRY findings are advice, so a continued review only looks at what changed."""
+    from autoreviewer.review.agents import lens_pair, security_references
+    from autoreviewer.review.job import Lens
 
-    if not settings.security:
-        return None
     lens_model, verifier_model = _models(settings)
-    return lambda workspace: (
-        security_agent(lens_model, workspace, context_window=settings.lens_context_window),
-        security_verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
-    )
+
+    def agents(kind: LensKind) -> AgentFactory:
+        return lambda workspace: lens_pair(
+            kind,
+            lens_model,
+            verifier_model,
+            workspace,
+            lens_window=settings.lens_context_window,
+            verifier_window=settings.verifier_context_window,
+        )
+
+    lenses = []
+    if settings.security:
+        lenses.append(Lens("security", agents("security"), instructions=security_references))
+    if settings.dry:
+        lenses.append(Lens("dry", agents("dry"), whole_pr=False))
+    return tuple(lenses)
 
 
 def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
@@ -146,7 +160,8 @@ def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
 
 
 def models_note(settings: Settings) -> str:
-    lenses = "correctness and security" if settings.security else "correctness"
+    kinds = ["correctness", *(name for name, on in (("security", settings.security), ("DRY", settings.dry)) if on)]
+    lenses = ", ".join(kinds[:-1]) + f" and {kinds[-1]}" if len(kinds) > 1 else kinds[0]
     return f"{lenses} by `{settings.lens_model}`, verified by `{settings.verifier_model}`"
 
 
@@ -182,7 +197,7 @@ def main() -> None:
         lens_version=lens_version(settings.lens_model),
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
-        security=build_security_factory(settings),
+        lenses=build_lenses(settings),
     )
     durable.configure(settings.database)
 

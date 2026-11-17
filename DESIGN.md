@@ -134,7 +134,7 @@ calibrated **confidence** (0-10, from Qodo PR-Agent). Lessons taken from publish
 
 ### Security
 
-`review_security` in `review/pipeline.py`, run alongside correctness, always on the **whole PR**: a
+`review_lens(kind="security")` in `review/pipeline.py`, run alongside correctness, always on the **whole PR**: a
 continued review must re-check every vulnerability, or one found on an earlier commit would quietly stop
 blocking. If it fails, the review fails (no verdict); approving without it would be a fail-open default.
 
@@ -154,6 +154,19 @@ blocking. If it fails, the review fails (no verdict); approving without it would
   filter.
 - Findings share the P0-P3 gate. When both lenses report one line, the more urgent finding is posted.
   `AUTOREVIEWER_SECURITY=false` turns it off.
+
+### DRY (advisory)
+
+`prompts/dry.md`: new code that re-implements an existing helper in the repo, the standard library, a
+dependency the project already declares, or other code in the same PR. Not new dependencies, not
+look-alikes that behave differently, not a second copy with no helper yet (the rule of three).
+`prompts/dry_verifier.md` checks the existing thing is real and covers this use, edge cases included.
+DRY findings never block (`ADVISORY_KINDS`), and a continued review only looks at files changed since
+the last one. `AUTOREVIEWER_DRY=false` turns it off.
+
+Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
+`agents.lens_pair()`, optional run instructions, and whether a continued review re-reads the whole PR.
+Adding a lens is a prompt pair plus one line in `web/app.py: build_lenses`.
 
 ### Simplify (optional, one-click)
 

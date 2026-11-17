@@ -24,6 +24,12 @@ CONFIDENCE_HELP = (
 )
 
 
+LensKind = Literal["security", "dry"]
+"""Lenses beyond correctness: each reviews the PR fresh and has its own verifier."""
+ADVISORY_KINDS = frozenset({"simplify", "dry"})
+"""Findings of these kinds are suggestions: they never block a merge, at any priority."""
+
+
 class Finding(BaseModel):
     path: str = Field(description="File path in the repository, e.g. src/app/util.py")
     line: int = Field(description="New-file line number, as printed by the diff tools, on or next to the faulty code")
@@ -35,7 +41,7 @@ class Finding(BaseModel):
         "wrong. Matter-of-fact; don't overstate."
     )
     suggestion: str | None = Field(default=None, description="A concrete fix, if there is an obvious one")
-    kind: SkipJsonSchema[Literal["correctness", "security", "types", "simplify"]] = "correctness"
+    kind: SkipJsonSchema[Literal["correctness", "types", "simplify"] | LensKind] = "correctness"
     """Which check found it. Not in the lens's schema: the lens only ever produces correctness findings."""
     start_line: SkipJsonSchema[int | None] = None
     """With `replacement`: the first line of a one-click GitHub suggestion that ends at `line`."""
