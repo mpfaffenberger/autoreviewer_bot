@@ -14,8 +14,8 @@ Status: **draft for Mike to review**. The open questions are in §12.
 | Trigger | PR `opened`, `reopened`, `ready_for_review`, `synchronize` (push), or `@autoreviewer review` |
 | Lenses | **Correctness**, **DRY / don't-reinvent-the-wheel**, **Security** |
 | Output | One GitHub review: a summary plus inline comments anchored to diff lines |
-| Verdict | **Any comment → `REQUEST_CHANGES`.** No open findings → `APPROVE` |
-| Noise policy | Every comment blocks the merge, so **no nits**. If it isn't worth blocking, it isn't worth posting |
+| Verdict | **Any open P0/P1 finding → `REQUEST_CHANGES`.** Otherwise `APPROVE` (P2/P3 findings are posted as non-blocking comments). `AUTOREVIEWER_BLOCK_AT_PRIORITY=3` makes every finding block |
+| Noise policy | The lens is thorough and scores its own confidence; the verifier and code filter. Still **no nits**: style, naming, and taste are never findings |
 | Conversation | Anyone (humans *and* bots) can reply in a finding's thread. The reviewer answers, holds its position, or withdraws the finding |
 | Follow-up pushes | Re-checks open findings. Fixed ones get a "fixed in `abc123`" reply and the thread is resolved. Then it reviews only the new commits |
 | Merge gate | Also publishes a **check run** (`autoreviewer`) that repos can mark as required |
@@ -102,13 +102,13 @@ Not used, on purpose (YAGNI):
    - the diff: `pulls/{n}/files`, or `compare/{last_reviewed_sha}...{head}` for incremental runs (fall back to the full diff after a force-push);
    - the repo snapshot: `GET /repos/{o}/{r}/tarball/{head_sha}` into a size-capped tmpfs dir. No git binary, and no token in a remote URL.
 3. **Filter.** Drop lockfiles, vendored, generated, and binary files. If the total changed lines exceed `MAX_DIFF_LINES` (≈3000), post one "split this PR" comment and set the check to `neutral`.
-4. **Lenses** (in parallel). One factory, three instruction files. Each returns `list[Finding]`.
-5. **Verify.** A *different* model re-reads the cited code for each candidate and returns `confirmed | rejected` with a reason. Unconfirmed findings are dropped. Using a second model means the two models' mistakes are less likely to line up, and this step does most of the work on precision.
+4. **Lenses** (in parallel). One factory, three instruction files. Each returns a report: every qualifying finding (not just the first), an overall verdict, and the files it inspected. A finding below confidence 4 is dropped without a verifier call.
+5. **Verify.** A *different* model re-reads the cited code for each candidate and judges it against a fixed rubric (introduced by this PR, reachable trigger, no unstated assumptions, not intentional, actionable). It returns `confirmed | rejected` with a reason, and may correct the priority. Unconfirmed findings are dropped. Using a second model means the two models' mistakes are less likely to line up, and this step does most of the work on precision.
 6. **Prove** (optional, see [EXECUTION.md](EXECUTION.md)). For confirmed high-severity findings, a repro test runs on head and on base in a throwaway sandbox. Findings that don't reproduce are dropped; bugs already present on base become non-blocking FYIs.
 7. **Dedupe.** Each finding gets a fingerprint, `sha256(lens, path, normalised_snippet, title)`, so the same issue is never posted twice, across lenses or across pushes.
 8. **Anchor.** GitHub rejects review comments on lines outside the diff hunks (HTTP 422). Findings that can be anchored become inline comments. Findings on unchanged code (common for DRY: "this already exists in `utils/x.py`") are anchored to the *new* code that duplicates it. Anything that still can't be anchored goes into the review body.
 9. **Stale check.** If the PR head moved while we were thinking, drop the result. The newer push has its own workflow.
-10. **Post** (code): one review (`REQUEST_CHANGES` if any finding is open, else `APPROVE`), the check run, and the store update.
+10. **Post** (code): one review (`REQUEST_CHANGES` if any blocking finding is open, else `APPROVE`), the check run, and the store update.
 
 ### The lenses
 
@@ -119,8 +119,29 @@ Not used, on purpose (YAGNI):
 | Security | injection (SQL, shell, path, template), authn/z gaps, SSRF, unsafe deserialisation, secrets in code, weak crypto, missing input validation at trust boundaries | theoretical issues with no reachable input |
 
 Every lens must cite `path:line` evidence, and the verifier checks those
-citations. Severity is `high | medium`; `low` doesn't exist because nits
-don't exist.
+citations. Each finding carries a **priority** (P0-P3, from OpenAI Codex's review rubric) and a
+calibrated **confidence** (0-10, from Qodo PR-Agent). Lessons taken from published reviewer prompts
+(Codex, PR-Agent, Anthropic's security review, Gemini CLI):
+
+- **Be thorough during review; filter afterwards.** The lens reports every finding with an honest
+  confidence rather than suppressing doubtful ones, because a separate verifier and code-side
+  thresholds do the filtering. Telling one model to both search and self-censor produced "approves
+  everything".
+- **A checklist and a method**, not just "find bugs": understand the change, read callers and the
+  base version, then walk a list of bug classes for every changed line.
+- **Explicit acceptance criteria** in the verifier, so precision is a rubric, not a mood.
+- **Comments state the trigger first**, then the consequence. No praise, no "please verify".
+
+### Measuring it
+
+`evals/` runs the real reviewer over seeded bugs in this repo's own code, with no GitHub calls:
+
+    set -a; . ~/.config/homelab/autoreviewer.env; set +a
+    BOODLETON_BASE_URL=http://127.0.0.1:8484/v1 uv run python -m evals.run --label NAME
+
+Isolated cases put one bug in a tiny PR. Buried cases plant one bug inside a real feature commit of
+several hundred lines, which is what reviews actually face. Clean cases (refactors, and real commits
+left untouched) measure noise. Any prompt or pipeline change should be measured before and after.
 
 **Secret-handling rule:** if the security lens finds a committed secret, the
 comment names the file and line but **never quotes the value**. The poster

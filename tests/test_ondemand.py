@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
+from autoreviewer import ondemand
 from autoreviewer.github import PublicGitHub, Repo
 from autoreviewer.ondemand import PullRef, parse_pr_ref, review_pr
 from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, agents, finding
@@ -54,7 +55,7 @@ async def test_a_buggy_pr_reports_request_changes_and_writes_nothing(repo: GitRe
         REF, reader=github, source=LocalSource(repo), agents=agents([finding(5)]), work_dir=tmp_path
     )
 
-    assert report.would_block and report.head_sha == repo.head
+    assert report.exit_code == ondemand.EXIT_REQUEST_CHANGES and report.head_sha == repo.head
     text = report.render()
     assert "**Verdict: REQUEST CHANGES** (nothing was posted to GitHub)" in text
     assert "## `stats.py:5`" in text and "Mean is off by one" in text
@@ -65,7 +66,7 @@ async def test_a_clean_pr_reports_approve(repo: GitRepo, tmp_path: Path) -> None
     report = await review_pr(
         REF, reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents([]), work_dir=tmp_path
     )
-    assert not report.would_block and "**Verdict: APPROVE**" in report.render()
+    assert report.exit_code == ondemand.EXIT_APPROVE and "**Verdict: APPROVE**" in report.render()
 
 
 async def test_dropped_candidates_are_listed_with_the_verifiers_reason(repo: GitRepo, tmp_path: Path) -> None:
@@ -85,7 +86,16 @@ async def test_too_large_prs_say_so(repo: GitRepo, tmp_path: Path, monkeypatch: 
     report = await review_pr(
         REF, reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents([]), work_dir=tmp_path
     )
-    assert not report.would_block and "**Too large to review**" in report.render()
+    assert report.exit_code == ondemand.EXIT_NOT_REVIEWED and "**Too large to review**" in report.render()
+
+
+@pytest.mark.parametrize(("block_at", "exit_code"), [(1, ondemand.EXIT_APPROVE), (3, ondemand.EXIT_REQUEST_CHANGES)])
+async def test_the_cli_verdict_honours_block_at(repo: GitRepo, tmp_path: Path, block_at: int, exit_code: int) -> None:
+    report = await review_pr(
+        REF, reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents([finding(5, priority=3)]),
+        work_dir=tmp_path, block_at=block_at,
+    )  # fmt: skip
+    assert report.exit_code == exit_code
 
 
 @pytest.mark.parametrize(("token", "expected_auth"), [(None, None), ("ghp_example", "token ghp_example")])

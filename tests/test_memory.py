@@ -51,7 +51,12 @@ class LensSpy:
                 "tools": {t.name for t in info.function_tools},
             })  # fmt: skip
             return ModelResponse(
-                parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": self.findings})]
+                parts=[
+                    ToolCallPart(
+                        tool_name=info.output_tools[0].name,
+                        args={"findings": self.findings, "overall_correct": True, "reviewed": []},
+                    )
+                ]
             )
 
         return FunctionModel(respond)
@@ -86,7 +91,7 @@ async def test_a_new_commit_continues_the_last_review(repo: GitRepo, memory: Rev
     await review_at(github, repo.head, spy, memory, tmp_path)
     first = spy.runs[-1]
     assert "diff_since_last_review" not in first["tools"]
-    assert memory.last(CONVERSATION).findings == [{"path": "stats.py", "line": 5, "title": "Mean is off by one"}]  # type: ignore[union-attr]
+    assert memory.last(CONVERSATION).findings == [{"path": "stats.py", "line": 5, "title": "[P1] Mean is off by one"}]  # type: ignore[union-attr]
 
     new_head = add_commit(repo, {"stats.py": FIXED})
     spy.findings = []
@@ -96,7 +101,7 @@ async def test_a_new_commit_continues_the_last_review(repo: GitRepo, memory: Rev
     assert first["prompts"][0] in second["prompts"]  # the previous conversation came along
     latest = second["prompts"][-1]
     assert f"moved from `{repo.head[:7]}`" in latest and f"to `{new_head[:7]}`" in latest
-    assert "- stats.py:5 Mean is off by one" in latest  # what it posted last time
+    assert "- stats.py:5 [P1] Mean is off by one" in latest  # what it posted last time
     assert "- M stats.py (+1 -1)" in latest  # what changed since
     assert "diff_since_last_review" in second["tools"]
     assert memory.last(CONVERSATION).head_sha == new_head  # type: ignore[union-attr]
@@ -143,6 +148,17 @@ async def test_a_moved_merge_base_starts_fresh(repo: GitRepo, memory: ReviewMemo
     assert len(spy.runs[-1]["prompts"]) == 1
 
 
+async def test_a_vanished_previous_head_starts_fresh(repo: GitRepo, memory: ReviewMemory, tmp_path: Path) -> None:
+    """GitHub answers 404 for a head garbage-collected after a force-push: review afresh, don't fail."""
+    github, spy = FakeGitHub(repo), LensSpy([])
+    await review_at(github, repo.head, spy, memory, tmp_path)
+    prior = memory.last(CONVERSATION)
+    assert prior is not None
+    memory.remember(CONVERSATION, PriorReview(**{**prior.__dict__, "head_sha": "e" * 40}))
+    await review_at(github, add_commit(repo, {"stats.py": FIXED}), spy, memory, tmp_path)
+    assert len(spy.runs[-1]["prompts"]) == 1 and "New commits" not in spy.runs[-1]["prompts"][0]
+
+
 def test_a_corrupt_index_means_no_prior_review(memory: ReviewMemory, tmp_path: Path) -> None:
     memory.remember(CONVERSATION, PriorReview("r", "h", "b", "v"))
     index = next((tmp_path / "steps").glob("*/index.json"))
@@ -179,7 +195,12 @@ def closing_lens(github: FakeGitHub, *, then: str = "answer") -> LensSpy:
             if then == "crash":
                 raise RuntimeError("model server went away")
             return ModelResponse(
-                parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": [finding(5)]})]
+                parts=[
+                    ToolCallPart(
+                        tool_name=info.output_tools[0].name,
+                        args={"findings": [finding(5)], "overall_correct": True, "reviewed": []},
+                    )
+                ]
             )
 
         return FunctionModel(respond)
@@ -241,6 +262,17 @@ def flaky_verifier(github: FakeGitHub) -> LensSpy:
 
     spy.agents = lambda ws: (correctness_agent(spy.model(), ws), verifier_agent(verifier_model(confirm), ws))  # type: ignore[method-assign]
     return spy
+
+
+async def test_low_confidence_candidates_are_never_remembered_as_rejected(
+    repo: GitRepo, memory: ReviewMemory, tmp_path: Path
+) -> None:
+    """Nobody judged them, so the next review mustn't be told they were checked and found wrong."""
+    github = FakeGitHub(repo)
+    outcome = await review_at(github, repo.head, LensSpy([finding(5, confidence=2)]), memory, tmp_path)
+    assert [f.line for f in outcome.low_confidence] == [5]
+    prior = memory.last(CONVERSATION)
+    assert prior is not None and prior.dropped == [] and prior.findings == []
 
 
 async def test_unverified_candidates_are_checked_again_never_treated_as_rejected(

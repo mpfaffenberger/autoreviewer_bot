@@ -50,6 +50,10 @@ class ReviewComment:
     body: str
 
 
+class CommitNotFound(Exception):
+    """GitHub doesn't know one of the commits, e.g. an old head garbage-collected after a force-push."""
+
+
 class ReviewRejected(Exception):
     """GitHub refused the review (422), typically because a comment's line isn't in its diff view."""
 
@@ -95,9 +99,14 @@ async def _get_pull(github: GitHub, repo: Repo, number: int) -> PullRequestState
 async def _compare(github: GitHub, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
     """Merge base (what GitHub diffs a PR against) and how head relates to base, in one call."""
     # per_page=1 keeps the response small; only two fields are read.
-    response = await github.rest.repos.async_compare_commits(
-        repo.owner, repo.name, f"{base_sha}...{head_sha}", per_page=1
-    )
+    try:
+        response = await github.rest.repos.async_compare_commits(
+            repo.owner, repo.name, f"{base_sha}...{head_sha}", per_page=1
+        )
+    except RequestFailed as error:
+        if error.response.status_code == 404:
+            raise CommitNotFound(f"{repo.owner}/{repo.name}: {base_sha[:7]}...{head_sha[:7]}") from error
+        raise
     data = response.json()
     return Comparison(merge_base=str(data["merge_base_commit"]["sha"]), status=str(data["status"]))
 

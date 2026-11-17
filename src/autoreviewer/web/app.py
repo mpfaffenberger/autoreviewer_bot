@@ -128,6 +128,7 @@ def main() -> None:
         models_note=models_note(settings),
         memory=memory,
         lens_version=lens_version(settings.lens_model),
+        block_at=settings.block_at_priority,
     )
     durable.configure(settings.database)
 

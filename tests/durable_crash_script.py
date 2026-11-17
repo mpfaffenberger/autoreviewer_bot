@@ -61,7 +61,14 @@ class PersistentGitHub(FakeGitHub):
 def crashing_lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     if MODE == "enqueue-and-crash":
         os._exit(9)  # a hard crash in the middle of the review: no cleanup, no exception handling
-    return ModelResponse(parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": [finding(5)]})])
+    return ModelResponse(
+        parts=[
+            ToolCallPart(
+                tool_name=info.output_tools[0].name,
+                args={"findings": [finding(5)], "overall_correct": True, "reviewed": []},
+            )
+        ]
+    )
 
 
 def origin() -> GitRepo:

@@ -14,6 +14,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Tool
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import (
+    CommitNotFound,
     Comparison,
     Conclusion,
     PullRequestState,
@@ -92,11 +93,14 @@ class LocalSource:
         return await fetch(dest, url=self._repo.url, head=head, base=base, previous=previous)
 
 
-def finding(line: int = 5, *, path: str = "stats.py", title: str = "Mean is off by one") -> dict[str, Any]:
+def finding(
+    line: int = 5, *, path: str = "stats.py", title: str = "Mean is off by one", priority: int = 1, confidence: int = 9
+) -> dict[str, Any]:
     return {
         "path": path,
         "line": line,
-        "severity": "high",
+        "priority": priority,
+        "confidence": confidence,
         "title": title,
         "explanation": "average([2, 4]) returns 2 instead of 3 because of the trailing `- 1`.",
         "suggestion": "Drop the `- 1`.",
@@ -118,22 +122,39 @@ def _prompt(messages: list[ModelMessage]) -> str:
 
 
 def lens_model(findings: list[dict[str, Any]]) -> FunctionModel:
-    return FunctionModel(lambda messages, info: _final(info, {"findings": findings}))
+    return FunctionModel(
+        lambda messages, info: _final(info, {"findings": findings, "overall_correct": not findings, "reviewed": []})
+    )
 
 
-def verifier_model(confirm: Callable[[dict[str, Any]], bool]) -> FunctionModel:
+def verifier_model(
+    confirm: Callable[[dict[str, Any]], bool],
+    priority: Callable[[dict[str, Any]], int | None] = lambda f: None,
+    explanation: Callable[[dict[str, Any]], str | None] = lambda f: None,
+) -> FunctionModel:
     def decide(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         reported = json.loads(_prompt(messages).split("```json\n", 1)[1].split("\n```", 1)[0])
         ok = confirm(reported)
-        return _final(info, {"confirmed": ok, "reason": "checked the code" if ok else "not a real bug"})
+        verdict = {"confirmed": ok, "reason": "checked the code" if ok else "not a real bug"}
+        if ok and (adjusted := priority(reported)) is not None:
+            verdict["priority"] = adjusted
+        if ok and (corrected := explanation(reported)) is not None:
+            verdict["explanation"] = corrected
+        return _final(info, verdict)
 
     return FunctionModel(decide)
 
 
 def agents(
-    findings: list[dict[str, Any]], confirm: Callable[[dict[str, Any]], bool] = lambda f: True
+    findings: list[dict[str, Any]],
+    confirm: Callable[[dict[str, Any]], bool] = lambda f: True,
+    priority: Callable[[dict[str, Any]], int | None] = lambda f: None,
+    explanation: Callable[[dict[str, Any]], str | None] = lambda f: None,
 ) -> Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]:
-    return lambda ws: (correctness_agent(lens_model(findings), ws), verifier_agent(verifier_model(confirm), ws))
+    return lambda ws: (
+        correctness_agent(lens_model(findings), ws),
+        verifier_agent(verifier_model(confirm, priority, explanation), ws),
+    )
 
 
 @dataclass
@@ -157,8 +178,11 @@ class FakeGitHub:
         )
 
     async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
-        """Real git ancestry on the fixture repo, like GitHub's compare API."""
-        merge_base = git(self.repo.path, "merge-base", base_sha, head_sha)
+        """Real git ancestry on the fixture repo, like GitHub's compare API (a 404 for unknown commits)."""
+        try:
+            merge_base = git(self.repo.path, "merge-base", base_sha, head_sha)
+        except subprocess.CalledProcessError as error:
+            raise CommitNotFound(f"{base_sha[:7]}...{head_sha[:7]}") from error
         if base_sha == head_sha:
             status = "identical"
         elif merge_base == base_sha:
