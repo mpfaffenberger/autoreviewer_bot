@@ -260,6 +260,12 @@ the model names in reviewer config. Prefer the allowlist.
 A **GitHub App** install *is* the subscription unit. The user installs it on an
 account or org and picks repos, and GitHub handles the consent UI.
 
+**Today:** the App is private, so only its owner can install it, and the installation's repository
+selection on GitHub is the *only* list of reviewed repos. (There used to be a second, bot-side
+`AUTOREVIEWER_REPOS` allowlist; it drifted from the installation and silently ignored repos, so it was
+removed.) **Before the App is made public, the `pending` approval gate below must exist**, or any
+installer gets free GPU time.
+
 - `installation` / `installation_repositories` webhooks → upsert `installations`.
 - New installs start as `pending`, which stops randoms eating your GPU. You approve them, either from a tiny admin page or by plugging into **Boodleton's existing GitHub-OAuth access-request flow** (`access_control.py`). Reuse that rather than building a second user system.
 - Uninstall → `deleted` event → purge that tenant's findings and histories.
