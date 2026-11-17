@@ -355,3 +355,11 @@ async def test_a_report_split_across_two_output_calls_keeps_the_findings(workspa
     _, verifier = agents([])(workspace)
     outcome = await review(await pr_text(workspace), correctness_agent(FunctionModel(split), workspace), verifier)
     assert [f.line for f in outcome.posted] == [5]
+
+
+async def test_the_verifier_corrects_a_wrong_detail_instead_of_dropping_a_real_bug(workspace: Workspace) -> None:
+    lens, verifier = agents([finding(5)], explanation=lambda f: "Corrected: the existing test does catch it.")(
+        workspace
+    )
+    outcome = await review(await pr_text(workspace), lens, verifier)
+    assert [f.explanation for f in outcome.posted] == ["Corrected: the existing test does catch it."]

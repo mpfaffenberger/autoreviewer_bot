@@ -209,8 +209,9 @@ async def review(
         elif not verdict.confirmed:
             outcome.rejected.append((finding, verdict.reason))
         else:
-            if verdict.priority is not None:  # the verifier read the code too; its priority wins
-                finding = finding.model_copy(update={"priority": verdict.priority})
+            # The verifier read the code too: its corrections win.
+            corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
+            finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
             _place(outcome, finding, pr.patches.get(finding.path, ""))
     compacted = compaction_stats(lens_run.all_messages())
     logger.info(

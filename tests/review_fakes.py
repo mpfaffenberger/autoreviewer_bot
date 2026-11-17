@@ -127,7 +127,9 @@ def lens_model(findings: list[dict[str, Any]]) -> FunctionModel:
 
 
 def verifier_model(
-    confirm: Callable[[dict[str, Any]], bool], priority: Callable[[dict[str, Any]], int | None] = lambda f: None
+    confirm: Callable[[dict[str, Any]], bool],
+    priority: Callable[[dict[str, Any]], int | None] = lambda f: None,
+    explanation: Callable[[dict[str, Any]], str | None] = lambda f: None,
 ) -> FunctionModel:
     def decide(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         reported = json.loads(_prompt(messages).split("```json\n", 1)[1].split("\n```", 1)[0])
@@ -135,6 +137,8 @@ def verifier_model(
         verdict = {"confirmed": ok, "reason": "checked the code" if ok else "not a real bug"}
         if ok and (adjusted := priority(reported)) is not None:
             verdict["priority"] = adjusted
+        if ok and (corrected := explanation(reported)) is not None:
+            verdict["explanation"] = corrected
         return _final(info, verdict)
 
     return FunctionModel(decide)
@@ -144,10 +148,11 @@ def agents(
     findings: list[dict[str, Any]],
     confirm: Callable[[dict[str, Any]], bool] = lambda f: True,
     priority: Callable[[dict[str, Any]], int | None] = lambda f: None,
+    explanation: Callable[[dict[str, Any]], str | None] = lambda f: None,
 ) -> Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]:
     return lambda ws: (
         correctness_agent(lens_model(findings), ws),
-        verifier_agent(verifier_model(confirm, priority), ws),
+        verifier_agent(verifier_model(confirm, priority, explanation), ws),
     )
 
 

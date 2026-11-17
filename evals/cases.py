@@ -117,7 +117,7 @@ CASES: list[Case] = [
         "src/autoreviewer/review/workspace.py",
         "        process.kill()\n        await process.wait()\n",
         "        process.kill()\n",
-        "Don't block on a timed-out git process",
+        "Tidy git timeout handling",
     ),
     Case(
         "clean_rename",

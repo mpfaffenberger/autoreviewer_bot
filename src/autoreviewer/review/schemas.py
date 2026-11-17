@@ -59,3 +59,8 @@ class Verification(BaseModel):
         le=3,
         description="If confirmed and the reported priority is wrong, the right one (same scale). Otherwise omit.",
     )
+    explanation: str | None = Field(
+        default=None,
+        description="If confirmed but the report gets a supporting detail wrong, a corrected explanation in the same "
+        "style (the trigger first, then what goes wrong). Otherwise omit.",
+    )

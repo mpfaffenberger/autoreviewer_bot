@@ -16,7 +16,9 @@ if every one of these holds:
 5. It isn't an obviously intentional behaviour change described by the PR.
 6. The author would fix it if told: it is discrete, actionable, and not style, naming, or taste.
 
-Reject if any of those fails, if the report is wrong about what the code does, or if it is already
+Judge the defect, not the write-up. If the defect itself is real but a supporting detail in the report
+is wrong (a test it cites, a caller it names, how it is noticed), confirm it and give a corrected
+`explanation`. Reject when one of the checks above fails for the defect itself, or when it is already
 handled elsewhere. Say in `reason` which check failed, or what you verified.
 
 If you confirm it but the reported priority is wrong, set `priority` on the same scale (0 most
