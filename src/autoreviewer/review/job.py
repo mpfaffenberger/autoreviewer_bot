@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic_ai import Agent
 
 from autoreviewer.github import (
+    CommitNotFound,
     Conclusion,
     PullRequestReader,
     PullRequests,
@@ -187,7 +188,11 @@ async def _resumable(
         return None
     if prior.version != version or prior.base_sha != base or prior.head_sha == head_sha:
         return None  # another prompt/model, a moved merge-base, or the same head again: start fresh
-    if (await reader.compare(repo, prior.head_sha, head_sha)).status != "ahead":
+    try:
+        comparison = await reader.compare(repo, prior.head_sha, head_sha)
+    except CommitNotFound:
+        return None  # the reviewed head is gone (force-pushed away, then garbage-collected)
+    if comparison.status != "ahead":
         return None  # force-push, rebase, or reset: the old conversation describes code that's gone
     return prior
 

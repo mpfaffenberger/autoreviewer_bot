@@ -14,6 +14,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Tool
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import (
+    CommitNotFound,
     Comparison,
     Conclusion,
     PullRequestState,
@@ -177,8 +178,11 @@ class FakeGitHub:
         )
 
     async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
-        """Real git ancestry on the fixture repo, like GitHub's compare API."""
-        merge_base = git(self.repo.path, "merge-base", base_sha, head_sha)
+        """Real git ancestry on the fixture repo, like GitHub's compare API (a 404 for unknown commits)."""
+        try:
+            merge_base = git(self.repo.path, "merge-base", base_sha, head_sha)
+        except subprocess.CalledProcessError as error:
+            raise CommitNotFound(f"{base_sha[:7]}...{head_sha[:7]}") from error
         if base_sha == head_sha:
             status = "identical"
         elif merge_base == base_sha:

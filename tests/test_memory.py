@@ -148,6 +148,17 @@ async def test_a_moved_merge_base_starts_fresh(repo: GitRepo, memory: ReviewMemo
     assert len(spy.runs[-1]["prompts"]) == 1
 
 
+async def test_a_vanished_previous_head_starts_fresh(repo: GitRepo, memory: ReviewMemory, tmp_path: Path) -> None:
+    """GitHub answers 404 for a head garbage-collected after a force-push: review afresh, don't fail."""
+    github, spy = FakeGitHub(repo), LensSpy([])
+    await review_at(github, repo.head, spy, memory, tmp_path)
+    prior = memory.last(CONVERSATION)
+    assert prior is not None
+    memory.remember(CONVERSATION, PriorReview(**{**prior.__dict__, "head_sha": "e" * 40}))
+    await review_at(github, add_commit(repo, {"stats.py": FIXED}), spy, memory, tmp_path)
+    assert len(spy.runs[-1]["prompts"]) == 1 and "New commits" not in spy.runs[-1]["prompts"][0]
+
+
 def test_a_corrupt_index_means_no_prior_review(memory: ReviewMemory, tmp_path: Path) -> None:
     memory.remember(CONVERSATION, PriorReview("r", "h", "b", "v"))
     index = next((tmp_path / "steps").glob("*/index.json"))

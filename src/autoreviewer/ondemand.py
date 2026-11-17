@@ -6,8 +6,9 @@
 Runs the bot's own pipeline (git workspace, lens, verifier, compaction, limits) inside the bot's
 hardened container, and prints the verdict the bot would give.
 
-Exit codes: 0 would approve (or nothing to review), 1 would request changes, 2 error. Errors never
-exit 1, so a crash can't be mistaken for a blocking verdict (caught by the bot reviewing this file).
+Exit codes: 0 would approve (or nothing to review), 1 would request changes, 2 error, 3 not reviewed
+(e.g. too large). Errors never exit 1, so a crash can't be mistaken for a blocking verdict (caught by the
+bot reviewing this file), and a refusal never exits 0, so it can't be mistaken for an approval.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from autoreviewer.review.render import comment_body
 from autoreviewer.review.workspace import PublicSource, RepoSource
 
 logger = logging.getLogger("autoreviewer.ondemand")
+
+EXIT_APPROVE, EXIT_REQUEST_CHANGES, EXIT_ERROR, EXIT_NOT_REVIEWED = 0, 1, 2, 3
 
 _NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})"
 _URL = re.compile(rf"^https://github\.com/({_NAME})/({_NAME})/pull/(\d+)(?:/[A-Za-z0-9/_-]*)?(?:[?#].*)?$")
@@ -58,8 +61,10 @@ class Report:
     result: Outcome | CheckResult
 
     @property
-    def would_block(self) -> bool:
-        return isinstance(self.result, Outcome) and self.result.blocking
+    def exit_code(self) -> int:
+        if isinstance(self.result, CheckResult):  # no review ran; "success" means there was nothing to review
+            return EXIT_APPROVE if self.result.conclusion == "success" else EXIT_NOT_REVIEWED
+        return EXIT_REQUEST_CHANGES if self.result.blocking else EXIT_APPROVE
 
     def render(self) -> str:
         header = f"# {self.ref.owner}/{self.ref.repo}#{self.ref.number} at {self.head_sha[:7]}: {self.title}\n"
@@ -68,8 +73,9 @@ class Report:
         outcome = self.result
         verdict = "REQUEST CHANGES" if outcome.blocking else "APPROVE"
         lines = [header, f"**Verdict: {verdict}** (nothing was posted to GitHub)\n"]
-        for finding in [*outcome.inline, *outcome.general]:
-            lines.append(f"## `{finding.path}:{finding.line}`\n\n{comment_body(finding)}\n")
+        for finding in outcome.posted:
+            body = comment_body(finding, blocking=outcome.is_blocking(finding))
+            lines.append(f"## `{finding.path}:{finding.line}`\n\n{body}\n")
         if outcome.unverified:
             lines.append(f"**{len(outcome.unverified)} candidate(s) could not be verified** (the verifier failed):\n")
             lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.unverified)
@@ -97,9 +103,6 @@ async def review_pr(
         head_sha=state.head_sha,
     )  # no memory: on-demand reviews always start fresh
     return Report(ref, state.head_sha, state.title, result.outcome if isinstance(result, Reviewed) else result)
-
-
-EXIT_APPROVE, EXIT_REQUEST_CHANGES, EXIT_ERROR = 0, 1, 2
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -134,7 +137,7 @@ def run(argv: list[str] | None = None) -> int:
         print(f"error: could not review {args.pr}: {type(error).__name__}: {error}", file=sys.stderr)
         return EXIT_ERROR
     print(report.render())
-    return EXIT_REQUEST_CHANGES if report.would_block else EXIT_APPROVE
+    return report.exit_code
 
 
 def main() -> None:
