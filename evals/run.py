@@ -118,11 +118,12 @@ async def run_case(case: Case, agents: object, work: Path) -> Result:
     assert isinstance(result, Reviewed)
     outcome = result.outcome
     posted = [*outcome.inline, *outcome.general]
-    raw = [*posted, *(f for f, _ in outcome.rejected), *(f for f, _ in outcome.unverified)]
+    low_confidence = getattr(outcome, "low_confidence", [])  # the baseline has none
+    raw = [*posted, *(f for f, _ in outcome.rejected), *(f for f, _ in outcome.unverified), *low_confidence]
     posted_hit = hits(posted, case, lines)
     blocks = getattr(outcome, "is_blocking", lambda finding: True)  # the baseline blocks on every finding
     false_alarms = len(posted) if case.clean else len(posted) - (1 if posted_hit else 0)
-    dropped = [*outcome.rejected, *outcome.unverified]
+    dropped = [*outcome.rejected, *outcome.unverified, *((f, "low confidence") for f in low_confidence)]
     fates = [(f, "posted" if blocks(f) else "advisory") for f in posted] + [
         (f, f"dropped: {why}") for f, why in dropped
     ]

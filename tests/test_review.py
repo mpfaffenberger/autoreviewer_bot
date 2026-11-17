@@ -19,7 +19,7 @@ from autoreviewer.review.diff import (
     split_git_diff,
 )
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.job import review_and_post
+from autoreviewer.review.job import _summary, review_and_post
 from autoreviewer.review.pipeline import PullRequestText, lens_prompt, review
 from autoreviewer.review.render import comment_body, sanitize
 from autoreviewer.review.schemas import Finding
@@ -320,7 +320,8 @@ async def test_low_confidence_findings_never_reach_the_verifier(workspace: Works
     )
     outcome = await review(await pr_text(workspace), lens, verifier)
     assert asked == [5]
-    assert [(f.line, reason) for f, reason in outcome.rejected] == [(3, "confidence 2 is below 4")]
+    assert [f.line for f in outcome.low_confidence] == [3] and not outcome.rejected
+    assert "dropped by verification" not in _summary(outcome).summary
 
 
 async def test_dedupe_keeps_the_most_urgent_finding_on_a_line(workspace: Workspace) -> None:

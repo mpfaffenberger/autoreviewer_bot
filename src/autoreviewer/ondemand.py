@@ -24,7 +24,7 @@ from pathlib import Path
 
 from autoreviewer.github import PublicGitHub, PullRequestReader, Repo
 from autoreviewer.review.job import AgentFactory, CheckResult, Reviewed, review_change
-from autoreviewer.review.pipeline import Outcome
+from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Outcome
 from autoreviewer.review.render import comment_body
 from autoreviewer.review.workspace import PublicSource, RepoSource
 
@@ -80,6 +80,10 @@ class Report:
             lines.append(f"**{len(outcome.unverified)} candidate(s) could not be verified** (the verifier failed):\n")
             lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.unverified)
             lines.append("")
+        if outcome.low_confidence:
+            lines.append(f"{len(outcome.low_confidence)} low-confidence candidate(s) were not verified:\n")
+            lines.extend(f"- `{f.path}:{f.line}` {f.title} (confidence {f.confidence})" for f in outcome.low_confidence)
+            lines.append("")
         if outcome.rejected:
             lines.append(f"<details><summary>{len(outcome.rejected)} candidate(s) dropped by verification</summary>\n")
             lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.rejected)
@@ -88,7 +92,13 @@ class Report:
 
 
 async def review_pr(
-    ref: PullRef, *, reader: PullRequestReader, source: RepoSource, agents: AgentFactory, work_dir: Path
+    ref: PullRef,
+    *,
+    reader: PullRequestReader,
+    source: RepoSource,
+    agents: AgentFactory,
+    work_dir: Path,
+    block_at: int = BLOCK_AT_PRIORITY,
 ) -> Report:
     repo = Repo(installation_id=0, owner=ref.owner, name=ref.repo)  # no App installation involved
     state = await reader.get_pull(repo, ref.number)
@@ -101,6 +111,7 @@ async def review_pr(
         number=ref.number,
         state=state,
         head_sha=state.head_sha,
+        block_at=block_at,
     )  # no memory: on-demand reviews always start fresh
     return Report(ref, state.head_sha, state.title, result.outcome if isinstance(result, Reviewed) else result)
 
@@ -130,6 +141,7 @@ def run(argv: list[str] | None = None) -> int:
                 source=PublicSource(token),
                 agents=build_agent_factory(settings),
                 work_dir=settings.work_dir,
+                block_at=settings.block_at_priority,
             )
         )
     except Exception as error:  # any failure is an error, never a verdict

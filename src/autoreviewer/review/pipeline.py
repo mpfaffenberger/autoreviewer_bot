@@ -55,6 +55,9 @@ class Outcome:
     unverified: list[tuple[Finding, str]] = field(default_factory=list[tuple[Finding, str]])
     """The verifier never reached a verdict (e.g. the model server failed). Not posted, but not judged
     either: later reviews must check these again rather than treat them as rejected."""
+    low_confidence: list[Finding] = field(default_factory=list[Finding])
+    """Below MIN_CONFIDENCE, so never sent to the verifier. Not judged, so never remembered as rejected:
+    a later review is free to report them again with more confidence."""
     block_at: int = BLOCK_AT_PRIORITY
     overall_correct: bool = True
     """The lens's overall verdict on the change (Codex-style), alongside its findings."""
@@ -187,7 +190,7 @@ async def review(
         if finding.path not in reviewable:  # hallucinated or out of scope, not worth a verifier call
             outcome.rejected.append((finding, "path is not among the changed files"))
         elif finding.confidence < MIN_CONFIDENCE:
-            outcome.rejected.append((finding, f"confidence {finding.confidence} is below {MIN_CONFIDENCE}"))
+            outcome.low_confidence.append(finding)
         else:
             candidates.append(finding)
 
@@ -216,7 +219,7 @@ async def review(
     compacted = compaction_stats(lens_run.all_messages())
     logger.info(
         "review: lens made %d requests and %d tool calls (compaction cleared %d, deduplicated %d results); "
-        "%d found, %d inline, %d general, %d rejected, %d unverified",
+        "%d found, %d inline, %d general, %d rejected, %d unverified, %d low-confidence",
         usage.requests,
         usage.tool_calls,
         compacted["cleared"],
@@ -226,5 +229,6 @@ async def review(
         len(outcome.general),
         len(outcome.rejected),
         len(outcome.unverified),
+        len(outcome.low_confidence),
     )
     return outcome

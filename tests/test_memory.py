@@ -264,6 +264,17 @@ def flaky_verifier(github: FakeGitHub) -> LensSpy:
     return spy
 
 
+async def test_low_confidence_candidates_are_never_remembered_as_rejected(
+    repo: GitRepo, memory: ReviewMemory, tmp_path: Path
+) -> None:
+    """Nobody judged them, so the next review mustn't be told they were checked and found wrong."""
+    github = FakeGitHub(repo)
+    outcome = await review_at(github, repo.head, LensSpy([finding(5, confidence=2)]), memory, tmp_path)
+    assert [f.line for f in outcome.low_confidence] == [5]
+    prior = memory.last(CONVERSATION)
+    assert prior is not None and prior.dropped == [] and prior.findings == []
+
+
 async def test_unverified_candidates_are_checked_again_never_treated_as_rejected(
     repo: GitRepo, memory: ReviewMemory, tmp_path: Path
 ) -> None:

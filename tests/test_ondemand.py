@@ -89,6 +89,15 @@ async def test_too_large_prs_say_so(repo: GitRepo, tmp_path: Path, monkeypatch: 
     assert report.exit_code == ondemand.EXIT_NOT_REVIEWED and "**Too large to review**" in report.render()
 
 
+@pytest.mark.parametrize(("block_at", "exit_code"), [(1, ondemand.EXIT_APPROVE), (3, ondemand.EXIT_REQUEST_CHANGES)])
+async def test_the_cli_verdict_honours_block_at(repo: GitRepo, tmp_path: Path, block_at: int, exit_code: int) -> None:
+    report = await review_pr(
+        REF, reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents([finding(5, priority=3)]),
+        work_dir=tmp_path, block_at=block_at,
+    )  # fmt: skip
+    assert report.exit_code == exit_code
+
+
 @pytest.mark.parametrize(("token", "expected_auth"), [(None, None), ("ghp_example", "token ghp_example")])
 async def test_public_github_sends_credentials_only_when_given_a_token(
     token: str | None, expected_auth: str | None
