@@ -85,6 +85,7 @@ async def test_a_checked_simplification_becomes_a_one_click_suggestion(tmp_path:
         (cut(replacement="    return 'ghp_" + "a" * 36 + "'"), "contains something that looks like a secret"),
         (cut(path="elsewhere.py"), "not one of the files in scope"),
         (cut(start=5, end=3), "bad line range"),
+        (cut(start=2, end=2, replacement="    #\n    #"), "adds lines"),  # fewer characters, more lines
     ],
 )
 async def test_code_rules_out_what_it_can_prove_wrong(tmp_path: Path, suggestion: dict[str, Any], reason: str) -> None:
@@ -146,6 +147,27 @@ async def test_simplifications_never_block_and_post_as_multi_line_suggestions(re
     [comment] = review["comments"]
     assert (comment.path, comment.start_line, comment.line) == ("parity.py", 2, 7)
     assert "```suggestion\n" + TIGHT + "\n```" in comment.body
-    assert (
-        "1 optional one-click simplification(s), cutting 5 line(s) (56% of the 9 added)."
-    )  # 2 lines elsewhere in review["body"]
+    summary = "1 optional one-click simplification(s), cutting 5 line(s) (56% of the 9 added)."  # 2 added elsewhere
+    assert summary in review["body"]
+    check = github.checks[0] if github.checks else None
+    assert check is None or "advisory" not in check.get("summary", "")
+
+
+async def test_any_failure_costs_only_the_suggestions(tmp_path: Path) -> None:
+    """E.g. a file the model may target that isn't readable in the checkout (a mangled non-UTF-8 name)."""
+    pr = added_file(tmp_path)
+    (tmp_path / "parity.py").unlink()
+    found, _ = await run(tmp_path, [cut()], pr=pr)
+    assert found == []
+
+
+def test_the_check_summary_counts_simplifications_separately() -> None:
+    from autoreviewer.review.job import _summary
+    from autoreviewer.review.pipeline import Outcome
+
+    simplification = Finding(
+        path="a.py", line=3, start_line=2, replacement="x", priority=3, confidence=10, title="t", explanation="e",
+        kind="simplify",
+    )  # fmt: skip
+    result = _summary(Outcome(inline=[simplification]))
+    assert (result.conclusion, result.summary) == ("success", "Approved. 1 optional simplification(s) suggested.")

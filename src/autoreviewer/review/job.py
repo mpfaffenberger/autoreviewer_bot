@@ -401,16 +401,19 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
 
 def _summary(outcome: Outcome) -> CheckResult:
     notes = ""
-    advisory = [f for f in outcome.posted if not outcome.is_blocking(f)]
+    blocking = [f for f in outcome.posted if outcome.is_blocking(f)]
+    advisory = [f for f in outcome.posted if not outcome.is_blocking(f) and f.kind != "simplify"]
+    simplify = [f for f in outcome.posted if f.kind == "simplify"]
     if advisory:
         notes += f" {len(advisory)} advisory (non-blocking) finding(s) posted."
+    if simplify:
+        notes += f" {len(simplify)} optional simplification(s) suggested."
     if outcome.rejected:
         notes += f" {len(outcome.rejected)} candidate finding(s) were dropped by verification."
     if outcome.unverified:
         notes += f" {len(outcome.unverified)} candidate finding(s) could not be verified and will be checked again."
-    if outcome.blocking:
-        count = len(outcome.posted) - len(advisory)
+    if blocking:
         return CheckResult(
-            f"{count} blocking issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
+            f"{len(blocking)} blocking issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
         )
     return CheckResult("No blocking issues", f"Approved.{notes}", "success")

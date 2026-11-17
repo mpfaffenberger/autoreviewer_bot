@@ -44,19 +44,26 @@ async def suggest(
     pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, *, paths: Collection[str] | None = None
 ) -> list[Finding]:
     """Checked suggestions for the PR's added lines, limited to `paths` if given (e.g. what changed since
-    the last review, so each push doesn't repeat the same suggestions)."""
+    the last review, so each push doesn't repeat the same suggestions). Never raises: suggestions are
+    optional, so any failure here costs only them, never the review."""
+    try:
+        return await _suggest(pr, simplifier, root, progress, paths)
+    except Exception:
+        logger.warning("simplifications failed; posting none", exc_info=True)
+        return []
+
+
+async def _suggest(
+    pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, paths: Collection[str] | None
+) -> list[Finding]:
     scoped = [change for change in pr.reviewable if paths is None or change.path in paths]
     if not scoped:
         return []
-    try:
-        run = await simplifier.propose.run(
-            lens_prompt(replace(pr, reviewable=scoped)),
-            usage_limits=LENS_LIMITS,
-            capabilities=[progress.watch("simplifier")],
-        )
-    except Exception:
-        logger.warning("simplify proposals failed; posting none", exc_info=True)
-        return []
+    run = await simplifier.propose.run(
+        lens_prompt(replace(pr, reviewable=scoped)),
+        usage_limits=LENS_LIMITS,
+        capabilities=[progress.watch("simplifier")],
+    )
 
     allowed = {change.path for change in scoped}
     accepted: list[Suggestion] = []
@@ -109,6 +116,8 @@ def _invalid(
     original = "\n".join(lines[start - 1 : end])
     if _weight(suggestion.replacement) >= _weight(original):
         return "not shorter"
+    if len(suggestion.replacement.splitlines()) > end - start + 1:
+        return "adds lines"
     if suggestion.path.endswith(".py"):
         patched = [*lines[: start - 1], *suggestion.replacement.splitlines(), *lines[end:]]
         if _parses("\n".join(lines)) and not _parses("\n".join(patched)):
