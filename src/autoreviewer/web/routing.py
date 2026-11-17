@@ -28,7 +28,17 @@ class PullRequestUpdated:
     head_sha: str
 
 
-Decision = Ignore | Pong | PullRequestUpdated
+@dataclass(frozen=True)
+class PullRequestClosed:
+    """Closed or merged: whatever the bot remembers about the PR can go."""
+
+    installation_id: int
+    owner: str
+    repo: str
+    number: int
+
+
+Decision = Ignore | Pong | PullRequestUpdated | PullRequestClosed
 
 
 class MalformedPayload(ValueError):
@@ -47,11 +57,19 @@ def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str]) -> Dec
         return Pong()
     if event != "pull_request":
         return Ignore(f"event {event!r} is not handled yet")
-    if (action := payload["action"]) not in PULL_REQUEST_ACTIONS:
+    action = payload["action"]
+    if action not in PULL_REQUEST_ACTIONS and action != "closed":
         return Ignore(f"pull_request action {action!r} needs no review")
     repository = payload["repository"]
     if repository["full_name"].lower() not in repos:
         return Ignore("repository is not on the allowlist")
+    if action == "closed":
+        return PullRequestClosed(
+            installation_id=payload["installation"]["id"],
+            owner=repository["owner"]["login"],
+            repo=repository["name"],
+            number=payload["pull_request"]["number"],
+        )
     pull_request = payload["pull_request"]
     if pull_request.get("draft"):
         return Ignore("draft pull request")

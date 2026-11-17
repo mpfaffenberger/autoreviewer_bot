@@ -36,6 +36,14 @@ class PullRequestState:
 
 
 @dataclass(frozen=True)
+class Comparison:
+    merge_base: str
+    status: str
+    """GitHub's compare status of head against base: "ahead" (head adds commits on top of base),
+    "identical", "behind", or "diverged" (e.g. after a force-push or rebase)."""
+
+
+@dataclass(frozen=True)
 class ReviewComment:
     path: str
     line: int
@@ -51,7 +59,7 @@ class PullRequestReader(Protocol):
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState: ...
 
-    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str: ...
+    async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison: ...
 
 
 class PullRequests(PullRequestReader, Protocol):
@@ -84,13 +92,14 @@ async def _get_pull(github: GitHub, repo: Repo, number: int) -> PullRequestState
     )
 
 
-async def _merge_base(github: GitHub, repo: Repo, base_sha: str, head_sha: str) -> str:
-    """The commit GitHub diffs a PR against (three-dot), so our diff matches its review view."""
-    # per_page=1 keeps the response small; only merge_base_commit is read.
+async def _compare(github: GitHub, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
+    """Merge base (what GitHub diffs a PR against) and how head relates to base, in one call."""
+    # per_page=1 keeps the response small; only two fields are read.
     response = await github.rest.repos.async_compare_commits(
         repo.owner, repo.name, f"{base_sha}...{head_sha}", per_page=1
     )
-    return str(response.json()["merge_base_commit"]["sha"])
+    data = response.json()
+    return Comparison(merge_base=str(data["merge_base_commit"]["sha"]), status=str(data["status"]))
 
 
 class PublicGitHub:
@@ -105,8 +114,8 @@ class PublicGitHub:
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
         return await _get_pull(self._github, repo, number)
 
-    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
-        return await _merge_base(self._github, repo, base_sha, head_sha)
+    async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
+        return await _compare(self._github, repo, base_sha, head_sha)
 
 
 class GitHubApp:
@@ -135,9 +144,9 @@ class GitHubApp:
         github = self._as_installation(repo.installation_id)
         return await _get_pull(github, repo, number)
 
-    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
+    async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
         github = self._as_installation(repo.installation_id)
-        return await _merge_base(github, repo, base_sha, head_sha)
+        return await _compare(github, repo, base_sha, head_sha)
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
         github = self._as_installation(repo.installation_id)

@@ -14,7 +14,7 @@ from pydantic_ai import ModelRetry
 from pydantic_ai.toolsets import FunctionToolset
 
 from autoreviewer.review.diff import annotate_git_diff, parse_changes
-from autoreviewer.review.workspace import BASE, DIFF_ARGS, HEAD, GitError, Workspace, run_git
+from autoreviewer.review.workspace import BASE, DIFF_ARGS, HEAD, PREVIOUS, GitError, Workspace, run_git
 
 PAGE_LINES = 400
 MAX_PAGE_LINES = 1000
@@ -79,5 +79,19 @@ def git_tools(workspace: Workspace) -> FunctionToolset[None]:
             return f"{path} does not exist at {ref}"
         numbered = "\n".join(f"{n:>6}  {line}" for n, line in enumerate(text.splitlines(), start=1))
         return _page(numbered, offset, limit, f"{path} at {ref}")
+
+    if workspace.previous is not None:
+
+        @toolset.tool_plain
+        async def diff_since_last_review(path: str | None = None, offset: int = 0, limit: int = PAGE_LINES) -> str:
+            """Show what changed since your last review of this PR (previous head -> head), a page at a time.
+
+            Lines that exist in the new file start with their new line number.
+            """
+            args = ["diff", "-U3", *DIFF_ARGS, PREVIOUS, HEAD]
+            if path is not None:
+                args += ["--", _safe_path(path)]
+            what = f"changes since last review in {path or '(all files)'}"
+            return _page(annotate_git_diff(await run_git(root, *args)), offset, limit, what)
 
     return toolset

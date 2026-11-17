@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 from pydantic_ai import Agent, AgentRetries
@@ -58,6 +60,19 @@ def _agent[OutputT](
         toolsets=[git_tools(workspace)],
         retries=RETRIES,
     )
+
+
+def lens_version(model_name: str) -> str:
+    """Fingerprint of what shapes a lens conversation; a saved one is only continued if it matches."""
+    material = "\n".join(
+        [
+            (PROMPTS / "correctness.md").read_text(),
+            model_name,
+            json.dumps(LensReport.model_json_schema(), sort_keys=True),
+            ",".join(sorted(READ_ONLY_TOOL_NAMES)),
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
 def correctness_agent(

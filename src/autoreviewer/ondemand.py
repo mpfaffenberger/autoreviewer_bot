@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from autoreviewer.github import PublicGitHub, PullRequestReader, Repo
-from autoreviewer.review.job import AgentFactory, CheckResult, review_change
+from autoreviewer.review.job import AgentFactory, CheckResult, Reviewed, review_change
 from autoreviewer.review.pipeline import Outcome
 from autoreviewer.review.render import comment_body
 from autoreviewer.review.workspace import PublicSource, RepoSource
@@ -70,6 +70,10 @@ class Report:
         lines = [header, f"**Verdict: {verdict}** (nothing was posted to GitHub)\n"]
         for finding in [*outcome.inline, *outcome.general]:
             lines.append(f"## `{finding.path}:{finding.line}`\n\n{comment_body(finding)}\n")
+        if outcome.unverified:
+            lines.append(f"**{len(outcome.unverified)} candidate(s) could not be verified** (the verifier failed):\n")
+            lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.unverified)
+            lines.append("")
         if outcome.rejected:
             lines.append(f"<details><summary>{len(outcome.rejected)} candidate(s) dropped by verification</summary>\n")
             lines.extend(f"- `{f.path}:{f.line}` {f.title}: {reason}" for f, reason in outcome.rejected)
@@ -88,10 +92,11 @@ async def review_pr(
         agents=agents,
         work_dir=work_dir,
         repo=repo,
+        number=ref.number,
         state=state,
         head_sha=state.head_sha,
-    )
-    return Report(ref, state.head_sha, state.title, result)
+    )  # no memory: on-demand reviews always start fresh
+    return Report(ref, state.head_sha, state.title, result.outcome if isinstance(result, Reviewed) else result)
 
 
 EXIT_APPROVE, EXIT_REQUEST_CHANGES, EXIT_ERROR = 0, 1, 2

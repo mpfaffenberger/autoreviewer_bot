@@ -13,7 +13,15 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from autoreviewer.github import Conclusion, PullRequestState, Repo, ReviewComment, ReviewEvent, ReviewRejected
+from autoreviewer.github import (
+    Comparison,
+    Conclusion,
+    PullRequestState,
+    Repo,
+    ReviewComment,
+    ReviewEvent,
+    ReviewRejected,
+)
 from autoreviewer.review.agents import correctness_agent, verifier_agent
 from autoreviewer.review.job import ReviewDeps
 from autoreviewer.review.schemas import LensReport, Verification
@@ -36,7 +44,7 @@ class GitRepo:
         return f"file://{self.path}"
 
 
-def _git(cwd: Path, *args: str) -> str:
+def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -45,20 +53,33 @@ def _git(cwd: Path, *args: str) -> str:
 def make_repo(path: Path) -> GitRepo:
     """base: stats.py + uv.lock + a symlink. head: the seeded bug, a lockfile bump, a new file."""
     path.mkdir(parents=True)
-    _git(path, "init", "-q", "-b", "main")
-    _git(path, "config", "uploadpack.allowAnySHA1InWant", "true")  # GitHub serves any SHA; mimic it
+    git(path, "init", "-q", "-b", "main")
+    git(path, "config", "uploadpack.allowAnySHA1InWant", "true")  # GitHub serves any SHA; mimic it
     (path / "stats.py").write_text(BASE_SOURCE)
     (path / "uv.lock").write_text("version = 1\n")
     (path / "secrets").symlink_to("/etc/passwd")
-    _git(path, "add", "-A")
-    _git(path, "commit", "-qm", "base")
-    base = _git(path, "rev-parse", "HEAD")
+    git(path, "add", "-A")
+    git(path, "commit", "-qm", "base")
+    base = git(path, "rev-parse", "HEAD")
     (path / "stats.py").write_text(HEAD_SOURCE)
     (path / "uv.lock").write_text("version = 2\n")
     (path / "notes.py").write_text("GREETING = 'hi'\n")
-    _git(path, "add", "-A")
-    _git(path, "commit", "-qm", "head")
-    return GitRepo(path, base, _git(path, "rev-parse", "HEAD"))
+    git(path, "add", "-A")
+    git(path, "commit", "-qm", "head")
+    return GitRepo(path, base, git(path, "rev-parse", "HEAD"))
+
+
+def add_commit(repo: GitRepo, files: dict[str, str], *, branch_from: str | None = None) -> str:
+    """Commit `files` on top of main (or on a new branch from `branch_from`, for a diverged history)."""
+    if branch_from is not None:
+        git(repo.path, "checkout", "-q", "-B", f"side-{branch_from[:7]}", branch_from)
+    for name, content in files.items():
+        (repo.path / name).write_text(content)
+    git(repo.path, "add", "-A")
+    git(repo.path, "commit", "-qm", "more")
+    sha = git(repo.path, "rev-parse", "HEAD")
+    git(repo.path, "checkout", "-q", "main")
+    return sha
 
 
 class LocalSource:
@@ -67,8 +88,8 @@ class LocalSource:
     def __init__(self, repo: GitRepo) -> None:
         self._repo = repo
 
-    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path) -> Workspace:
-        return await fetch(dest, url=self._repo.url, head=head, base=base)
+    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path, previous: str | None = None) -> Workspace:
+        return await fetch(dest, url=self._repo.url, head=head, base=base, previous=previous)
 
 
 def finding(line: int = 5, *, path: str = "stats.py", title: str = "Mean is off by one") -> dict[str, Any]:
@@ -135,8 +156,18 @@ class FakeGitHub:
             head_sha=head, base_sha=self.repo.base, state=self.pr_state, draft=False, title="Add average()", body=""
         )
 
-    async def merge_base(self, repo: Repo, base_sha: str, head_sha: str) -> str:
-        return self.repo.base
+    async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison:
+        """Real git ancestry on the fixture repo, like GitHub's compare API."""
+        merge_base = git(self.repo.path, "merge-base", base_sha, head_sha)
+        if base_sha == head_sha:
+            status = "identical"
+        elif merge_base == base_sha:
+            status = "ahead"
+        elif merge_base == head_sha:
+            status = "behind"
+        else:
+            status = "diverged"
+        return Comparison(merge_base=merge_base, status=status)
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
         self.checks.append({"status": "in_progress", "head_sha": head_sha})

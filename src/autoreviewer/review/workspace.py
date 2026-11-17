@@ -20,8 +20,9 @@ from typing import Protocol
 from autoreviewer.github import Repo
 from autoreviewer.review.diff import ChangedPath, parse_changes, split_git_diff
 
-BASE, HEAD = "base", "head"
-"""Branch names the reviewers use: `git diff base head` is exactly the PR's change."""
+BASE, HEAD, PREVIOUS = "base", "head", "previous"
+"""Branch names the reviewers use: `git diff base head` is exactly the PR's change, and
+`git diff previous head` is what changed since the last review (when resuming one)."""
 
 GIT_TIMEOUT_S = 300.0
 MAX_GIT_OUTPUT = 8 * 1024 * 1024
@@ -47,10 +48,14 @@ class Workspace:
     root: Path
     base: str
     head: str
+    previous: str | None = None
+    """The head the last review saw, when this review continues it."""
 
 
 class RepoSource(Protocol):
-    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path) -> Workspace: ...
+    async def checkout(
+        self, repo: Repo, *, head: str, base: str, dest: Path, previous: str | None = None
+    ) -> Workspace: ...
 
 
 def _env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -86,8 +91,10 @@ async def run_git(root: Path, *args: str, env: Mapping[str, str] | None = None) 
     return stdout[:MAX_GIT_OUTPUT].decode(errors="replace")
 
 
-async def fetch(dest: Path, *, url: str, head: str, base: str, token: str | None = None) -> Workspace:
-    """Init `dest`, fetch both commits, check out the head, and name them `base`/`head`."""
+async def fetch(
+    dest: Path, *, url: str, head: str, base: str, token: str | None = None, previous: str | None = None
+) -> Workspace:
+    """Init `dest`, fetch the commits, check out the head, and name them `base`/`head` (and `previous`)."""
     dest.mkdir(parents=True, exist_ok=True)
     await run_git(dest, "init", "-q", ".")
     auth: dict[str, str] = {}
@@ -98,12 +105,14 @@ async def fetch(dest: Path, *, url: str, head: str, base: str, token: str | None
             "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
             "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {header}",
         }
-    commits = [head] if base == head else [head, base]
+    commits = list(dict.fromkeys(c for c in (head, base, previous) if c))  # unique, order kept
     await run_git(dest, "fetch", "-q", "--depth=1", "--no-tags", url, *commits, env=auth)
     await run_git(dest, "checkout", "-q", "--detach", head)
     await run_git(dest, "branch", "-q", "-f", BASE, base)
     await run_git(dest, "branch", "-q", "-f", HEAD, head)
-    return Workspace(root=dest, base=base, head=head)
+    if previous:
+        await run_git(dest, "branch", "-q", "-f", PREVIOUS, previous)
+    return Workspace(root=dest, base=base, head=head, previous=previous)
 
 
 DIFF_ARGS = ("--no-color", "--no-ext-diff", "--no-textconv", "-M")
@@ -118,15 +127,25 @@ async def read_changes(workspace: Workspace) -> tuple[list[ChangedPath], dict[st
     return parse_changes(name_status, numstat), patches
 
 
+async def read_changes_since_previous(workspace: Workspace) -> list[ChangedPath]:
+    """What changed between the last reviewed head and this one (empty if not resuming)."""
+    if workspace.previous is None:
+        return []
+    root = workspace.root
+    name_status = await run_git(root, "diff", "--name-status", "-z", *DIFF_ARGS, PREVIOUS, HEAD)
+    numstat = await run_git(root, "diff", "--numstat", "-z", *DIFF_ARGS, PREVIOUS, HEAD)
+    return parse_changes(name_status, numstat)
+
+
 class GitHubSource:
     """Fetches from github.com with a single-repo, read-only installation token."""
 
     def __init__(self, tokens: _TokenSource) -> None:
         self._tokens = tokens
 
-    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path) -> Workspace:
+    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path, previous: str | None = None) -> Workspace:
         token = await self._tokens.read_token(repo)
-        return await fetch(dest, url=repo.clone_url, head=head, base=base, token=token)
+        return await fetch(dest, url=repo.clone_url, head=head, base=base, token=token, previous=previous)
 
 
 class PublicSource:
@@ -135,8 +154,8 @@ class PublicSource:
     def __init__(self, token: str | None = None) -> None:
         self._token = token
 
-    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path) -> Workspace:
-        return await fetch(dest, url=repo.clone_url, head=head, base=base, token=self._token)
+    async def checkout(self, repo: Repo, *, head: str, base: str, dest: Path, previous: str | None = None) -> Workspace:
+        return await fetch(dest, url=repo.clone_url, head=head, base=base, token=self._token, previous=previous)
 
 
 class _TokenSource(Protocol):

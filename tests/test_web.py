@@ -14,7 +14,7 @@ import pytest
 
 from autoreviewer.web.app import create_app
 from autoreviewer.web.config import Settings, parse_repos
-from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestUpdated, route
+from autoreviewer.web.routing import Ignore, MalformedPayload, Pong, PullRequestClosed, PullRequestUpdated, route
 
 pytestmark = pytest.mark.anyio
 
@@ -180,7 +180,16 @@ async def test_healthz(receiver: Receiver) -> None:
     [
         ("ping", {}, Pong()),
         ("check_run", {"action": "created"}, Ignore("event 'check_run' is not handled yet")),
-        ("pull_request", pull_request_payload(action="closed"), Ignore("pull_request action 'closed' needs no review")),
+        (
+            "pull_request",
+            pull_request_payload(action="closed"),
+            PullRequestClosed(182623847, "mpfaffenberger", "pydantic-ai-claude-code", 7),
+        ),
+        (
+            "pull_request",
+            pull_request_payload(action="labeled"),
+            Ignore("pull_request action 'labeled' needs no review"),
+        ),
         ("pull_request", pull_request_payload(draft=True), Ignore("draft pull request")),
         (
             "pull_request",
@@ -205,7 +214,7 @@ async def test_healthz(receiver: Receiver) -> None:
             ),
         ),
     ],
-    ids=["ping", "own-check-run-events", "closed", "draft", "case-insensitive-allowlist", "push"],
+    ids=["ping", "own-check-run-events", "closed", "labeled", "draft", "case-insensitive-allowlist", "push"],
 )
 def test_route(event: str, payload: dict[str, Any], expected: object) -> None:
     assert route(event, payload, REPOS) == expected
@@ -226,3 +235,19 @@ def test_allowlist_entries_must_be_owner_slash_name() -> None:
     assert parse_repos(" A/b , c/D,, ") == frozenset({"a/b", "c/d"})
     with pytest.raises(ValueError, match="owner/name"):
         parse_repos("just-a-name")
+
+
+async def test_a_closed_pull_request_reaches_the_closed_handler() -> None:
+    settings = Settings(app_id=1, app_slug="s", webhook_secret=SECRET, private_key="unused", repos=REPOS)
+    closed: list[PullRequestClosed] = []
+
+    async def remember_close(event: PullRequestClosed) -> None:
+        closed.append(event)
+
+    app = create_app(settings, FakeHandler(), on_pull_request_closed=remember_close)
+    body = json.dumps(pull_request_payload(action="closed")).encode()
+    headers = {"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": "c", "X-Hub-Signature-256": signature(body)}
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/webhook", content=body, headers=headers)
+    assert response.json() == {"status": "closed"}
+    assert closed == [PullRequestClosed(182623847, "mpfaffenberger", "pydantic-ai-claude-code", 7)]
