@@ -9,7 +9,9 @@ dependencies = [
     "pydantic-ai-slim[openai]==2.68.0",
     "fastapi>=0.115",
     "uvicorn>=0.32",
-    "httpx>=0.28",
+    # The same HTTP client githubkit uses; plain httpx stays only as a transitive dependency
+    # (the openai SDK behind pydantic-ai's OpenAI provider requires it).
+    "httpx2>=2.16.2",
     "githubkit[auth-app]>=0.12",
     "dbos>=1.0",
 ]
@@ -24,7 +26,7 @@ autoreviewer-web = "autoreviewer.web.app:main"
 autoreviewer-review-pr = "autoreviewer.ondemand:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "anyio>=4", "ruff>=0.8", "pyright>=1.1.390", "pydantic-ai-harness[smol]==0.68.0", "httpx2>=2.16.2"]
+dev = ["pytest>=8", "anyio>=4", "ruff>=0.8", "pyright>=1.1.390", "pydantic-ai-harness[smol]==0.68.0"]
 
 [build-system]
 requires = ["hatchling"]
