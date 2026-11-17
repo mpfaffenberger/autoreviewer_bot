@@ -131,8 +131,14 @@ async def test_check_run_lifecycle_and_review_payloads(fake_and_app: tuple[FakeG
     assert first == check_id
     await app.update_check(REPO, check_id, title="Reviewing", summary="3 tool calls", text="```text\nlog\n```")
     await app.finish_check(REPO, check_id, conclusion="failure", title="1 issue", summary="see review", text="trail")
+    suggestion = ReviewComment("f1.py", 7, "```suggestion\nx\n```", start_line=4)
     await app.create_review(
-        REPO, 7, commit_sha=HEAD, event="REQUEST_CHANGES", body="body", comments=[ReviewComment("f1.py", 1, "bug")]
+        REPO,
+        7,
+        commit_sha=HEAD,
+        event="REQUEST_CHANGES",
+        body="body",
+        comments=[ReviewComment("f1.py", 1, "bug"), suggestion],
     )
 
     assert check_id == 99
@@ -150,5 +156,15 @@ async def test_check_run_lifecycle_and_review_payloads(fake_and_app: tuple[FakeG
         "commit_id": HEAD,
         "event": "REQUEST_CHANGES",
         "body": "body",
-        "comments": [{"path": "f1.py", "line": 1, "side": "RIGHT", "body": "bug"}],
+        "comments": [
+            {"path": "f1.py", "line": 1, "side": "RIGHT", "body": "bug"},
+            {  # a multi-line suggestion: GitHub's one-click "apply" replaces lines 4-7
+                "path": "f1.py",
+                "line": 7,
+                "side": "RIGHT",
+                "body": "```suggestion\nx\n```",
+                "start_line": 4,
+                "start_side": "RIGHT",
+            },
+        ],
     }

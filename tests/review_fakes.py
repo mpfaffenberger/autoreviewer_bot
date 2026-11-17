@@ -25,9 +25,10 @@ from autoreviewer.github import (
     ReviewEvent,
     ReviewRejected,
 )
-from autoreviewer.review.agents import correctness_agent, verifier_agent
+from autoreviewer.review.agents import correctness_agent, simplify_agent, simplify_checker_agent, verifier_agent
 from autoreviewer.review.job import ReviewDeps
 from autoreviewer.review.schemas import LensReport, Verification
+from autoreviewer.review.simplify import Simplifier, SimplifierFactory
 from autoreviewer.review.workspace import Workspace, fetch
 
 BOT = "chaos-emerald-reviewer[bot]"
@@ -250,4 +251,29 @@ def job_deps(
         work_dir=work_dir,
         bot_login=BOT,
         models_note="test models",
+    )
+
+
+def simplifier(
+    suggestions: list[dict[str, Any]],
+    confirm: Callable[[str], bool] = lambda prompt: True,
+    *,
+    crash: bool = False,
+    prompts: list[str] | None = None,
+) -> SimplifierFactory:
+    """Proposes `suggestions`; the checker confirms when `confirm(its prompt)` says so."""
+
+    def propose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if crash:
+            raise RuntimeError("model server down")
+        if prompts is not None:
+            prompts.append(_prompt(messages))
+        return _final(info, {"suggestions": suggestions})
+
+    def check(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        ok = confirm(_prompt(messages))
+        return _final(info, {"confirmed": ok, "reason": "same behaviour" if ok else "changes behaviour"})
+
+    return lambda ws: Simplifier(
+        simplify_agent(FunctionModel(propose), ws), simplify_checker_agent(FunctionModel(check), ws)
     )

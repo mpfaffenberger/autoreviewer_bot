@@ -17,10 +17,11 @@ from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
 from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.schemas import LensReport, Verification
+from autoreviewer.review.schemas import LensReport, SimplifyReport, SimplifyVerdict, Verification
 from autoreviewer.review.workspace import Workspace
 
 PROMPTS = Path(__file__).parent / "prompts"
+PSTACK = PROMPTS / "vendor" / "pstack"
 
 LENS_LIMITS = UsageLimits(request_limit=10_000)
 VERIFIER_LIMITS = UsageLimits(request_limit=10_000)
@@ -49,13 +50,13 @@ DEEPSEEK_CONTEXT_WINDOW = 1_048_576
 
 
 def _agent[OutputT](
-    model: Model, workspace: Workspace, output_type: type[OutputT], prompt: str, context_window: int
+    model: Model, workspace: Workspace, output_type: type[OutputT], instructions: str, context_window: int
 ) -> Agent[None, OutputT]:
     return Agent(
         model,
         deps_type=type(None),
         output_type=output_type,
-        instructions=(PROMPTS / prompt).read_text(),
+        instructions=instructions,
         capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window)],
         toolsets=[git_tools(workspace)],
         retries=RETRIES,
@@ -66,7 +67,7 @@ def lens_version(model_name: str) -> str:
     """Fingerprint of what shapes a lens conversation; a saved one is only continued if it matches."""
     material = "\n".join(
         [
-            (PROMPTS / "correctness.md").read_text(),
+            _prompt("correctness.md"),
             model_name,
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
             ",".join(sorted(READ_ONLY_TOOL_NAMES)),
@@ -78,10 +79,32 @@ def lens_version(model_name: str) -> str:
 def correctness_agent(
     model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
 ) -> Agent[None, LensReport]:
-    return _agent(model, workspace, LensReport, "correctness.md", context_window)
+    return _agent(model, workspace, LensReport, _prompt("correctness.md"), context_window)
 
 
 def verifier_agent(
     model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
 ) -> Agent[None, Verification]:
-    return _agent(model, workspace, Verification, "verifier.md", context_window)
+    return _agent(model, workspace, Verification, _prompt("verifier.md"), context_window)
+
+
+def simplify_agent(
+    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
+) -> Agent[None, SimplifyReport]:
+    principles = "\n\n".join(_body(path.read_text()) for path in sorted(PSTACK.glob("principle-*.md")))
+    return _agent(model, workspace, SimplifyReport, f"{_prompt('simplify.md')}\n{principles}", context_window)
+
+
+def simplify_checker_agent(
+    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+) -> Agent[None, SimplifyVerdict]:
+    return _agent(model, workspace, SimplifyVerdict, _prompt("simplify_checker.md"), context_window)
+
+
+def _prompt(name: str) -> str:
+    return (PROMPTS / name).read_text()
+
+
+def _body(skill: str) -> str:
+    """A SKILL.md without its YAML front matter."""
+    return skill.split("---", 2)[2].strip() if skill.startswith("---") else skill.strip()

@@ -48,6 +48,8 @@ class ReviewComment:
     path: str
     line: int
     body: str
+    start_line: int | None = None
+    """For a comment spanning lines start_line..line (e.g. a multi-line suggestion)."""
 
 
 class CommitNotFound(Exception):
@@ -214,7 +216,19 @@ class GitHubApp:
                     "commit_id": commit_sha,
                     "event": event,
                     "body": body,
-                    "comments": [{"path": c.path, "line": c.line, "side": "RIGHT", "body": c.body} for c in comments],
+                    "comments": [
+                        {
+                            "path": c.path,
+                            "line": c.line,
+                            "side": "RIGHT",
+                            "body": c.body,
+                            "start_line": c.start_line,
+                            "start_side": "RIGHT",
+                        }
+                        if c.start_line is not None and c.start_line < c.line
+                        else {"path": c.path, "line": c.line, "side": "RIGHT", "body": c.body}
+                        for c in comments
+                    ],
                 },
             )
         except RequestFailed as error:

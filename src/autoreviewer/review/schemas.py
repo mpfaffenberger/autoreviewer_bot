@@ -35,8 +35,19 @@ class Finding(BaseModel):
         "wrong. Matter-of-fact; don't overstate."
     )
     suggestion: str | None = Field(default=None, description="A concrete fix, if there is an obvious one")
-    kind: SkipJsonSchema[Literal["correctness", "types"]] = "correctness"
-    """Which check found it. Not part of the model's schema: models only ever produce correctness findings."""
+    kind: SkipJsonSchema[Literal["correctness", "types", "simplify"]] = "correctness"
+    """Which check found it. Not in the lens's schema: the lens only ever produces correctness findings."""
+    start_line: SkipJsonSchema[int | None] = None
+    """With `replacement`: the first line of a one-click GitHub suggestion that ends at `line`."""
+    replacement: SkipJsonSchema[str | None] = None
+    """Code that replaces lines `start_line`..`line` when the author applies the suggestion."""
+
+    @property
+    def lines_cut(self) -> int:
+        """How many lines applying the suggestion removes (0 without one)."""
+        if self.replacement is None:
+            return 0
+        return self.line - (self.start_line or self.line) + 1 - len(self.replacement.splitlines())
 
 
 class LensReport(BaseModel):
@@ -69,3 +80,25 @@ class Verification(BaseModel):
         description="If confirmed but the report gets a supporting detail wrong, a corrected explanation in the same "
         "style (the trigger first, then what goes wrong). Otherwise omit.",
     )
+
+
+class Suggestion(BaseModel):
+    path: str = Field(description="File path in the repository, e.g. src/app/util.py")
+    start_line: int = Field(description="First new-file line to replace, as printed by the diff tools")
+    end_line: int = Field(description="Last new-file line to replace; the same as start_line for one line")
+    replacement: str = Field(
+        description="The exact code that replaces those lines, with its indentation; empty to delete them"
+    )
+    title: str = Field(description="At most 80 characters: what the cut does")
+    explanation: str = Field(description="One or two sentences: why it's simpler and why it behaves the same")
+
+
+class SimplifyReport(BaseModel):
+    suggestions: list[Suggestion] = Field(
+        description="Every cut worth making in the lines this PR adds. Empty if the code is already tight."
+    )
+
+
+class SimplifyVerdict(BaseModel):
+    confirmed: bool = Field(description="True only if the replacement behaves identically and is simpler")
+    reason: str = Field(description="One or two sentences: which check failed, or what you verified")

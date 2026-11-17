@@ -22,6 +22,10 @@ _SECRETS = (
 )
 
 
+def has_secret(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _SECRETS)
+
+
 def sanitize(text: str, *, limit: int = MAX_TEXT) -> str:
     """Make model text safe to post: no pings, no secrets echoed back, bounded length."""
     for pattern in _SECRETS:
@@ -32,10 +36,18 @@ def sanitize(text: str, *, limit: int = MAX_TEXT) -> str:
 
 def comment_body(finding: Finding, *, blocking: bool = True) -> str:
     gate = "" if blocking else ", non-blocking"
-    parts = [f"**[P{finding.priority}] {finding.title}** ({finding.kind}{gate})", finding.explanation]
+    rank = "" if finding.kind == "simplify" else f"[P{finding.priority}] "
+    parts = [f"**{rank}{finding.title}** ({finding.kind}{gate})", finding.explanation]
     if finding.suggestion:
         parts.append(f"**Suggested fix:** {finding.suggestion}")
-    return sanitize("\n\n".join(parts))
+    body = sanitize("\n\n".join(parts))
+    if finding.replacement is None:
+        return body
+    # Not sanitized: it's code the author applies with one click (a zero-width space after an "@" would
+    # break a decorator), GitHub doesn't ping mentions inside code blocks, and suggestions with secrets
+    # never get this far. The fence outgrows any backtick run inside.
+    fence = "`" * max([3, *(len(run) + 1 for run in re.findall(r"`+", finding.replacement))])
+    return f"{body}\n\n{fence}suggestion\n{finding.replacement}\n{fence}"
 
 
 def review_body(outcome: Outcome, *, footer: str) -> str:
@@ -48,8 +60,14 @@ def review_body(outcome: Outcome, *, footer: str) -> str:
     lines = []
     if blocking:
         lines.append(f"Found {_count(blocking)} to fix before merging.")
+    simplify = [f for f in advisory if f.kind == "simplify"]
+    advisory = [f for f in advisory if f.kind != "simplify"]
     if advisory:
         lines.append(f"{_count(advisory, 'advisory')} worth a look (non-blocking).")
+    if simplify:
+        cut = sum(f.lines_cut for f in simplify)
+        share = f" ({cut / outcome.added_lines:.0%} of the {outcome.added_lines} added)" if outcome.added_lines else ""
+        lines.append(f"{len(simplify)} optional one-click simplification(s), cutting {cut} line(s){share}.")
     if outcome.general:
         lines.append("\nOutside the changed lines:")
         lines.extend(

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from pydantic_ai.models.openai import OpenAIChatModel
 
     from autoreviewer.review.job import AgentFactory
+    from autoreviewer.review.simplify import SimplifierFactory
 from autoreviewer.web.routing import (
     Ignore,
     MalformedPayload,
@@ -96,17 +97,38 @@ def create_app(
     return app
 
 
-def build_agent_factory(settings: Settings) -> AgentFactory:
-    """(lens, verifier) over a checkout, on the configured Boodleton models: shared by the bot and the CLI."""
-    from autoreviewer.review.agents import boodleton_model, correctness_agent, verifier_agent
+def _models(settings: Settings) -> tuple[OpenAIChatModel, OpenAIChatModel]:
+    """(the lens's model, the verifier's model) on Boodleton."""
+    from autoreviewer.review.agents import boodleton_model
 
     def model(name: str) -> OpenAIChatModel:
         return boodleton_model(name, base_url=settings.boodleton_base_url, api_key=settings.boodleton_api_key)
 
-    lens_model, verifier_model = model(settings.lens_model), model(settings.verifier_model)
+    return model(settings.lens_model), model(settings.verifier_model)
+
+
+def build_agent_factory(settings: Settings) -> AgentFactory:
+    """(lens, verifier) over a checkout, on the configured Boodleton models: shared by the bot and the CLI."""
+    from autoreviewer.review.agents import correctness_agent, verifier_agent
+
+    lens_model, verifier_model = _models(settings)
     return lambda workspace: (
         correctness_agent(lens_model, workspace, context_window=settings.lens_context_window),
         verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
+    )
+
+
+def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
+    """Proposals on the lens's model, checks on the verifier's; None when simplifications are off."""
+    from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
+    from autoreviewer.review.simplify import Simplifier
+
+    if not settings.simplify:
+        return None
+    propose_model, check_model = _models(settings)
+    return lambda workspace: Simplifier(
+        simplify_agent(propose_model, workspace, context_window=settings.lens_context_window),
+        simplify_checker_agent(check_model, workspace, context_window=settings.verifier_context_window),
     )
 
 
@@ -145,6 +167,7 @@ def main() -> None:
         memory=memory,
         lens_version=lens_version(settings.lens_model),
         block_at=settings.block_at_priority,
+        simplifier=build_simplifier_factory(settings),
     )
     durable.configure(settings.database)
 
