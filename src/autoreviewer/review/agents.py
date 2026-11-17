@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, AgentRetries
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -24,6 +24,11 @@ VERIFIER_LIMITS = UsageLimits(request_limit=10_000)
 """No token, tool-call, or cost limits: a review may explore as much as it needs. The request limit
 only stops a model stuck in a loop (pydantic-ai's default is 50). The practical ceiling is the model's
 context window per request."""
+
+RETRIES: AgentRetries = {"tools": 25, "output": 3}
+"""Consecutive failures allowed per tool before the run fails (any success resets the count).
+Exploring means guessing paths: a few misses on a directory that doesn't exist must not end a long
+review, as 3 did on PR #5. Twenty-five misses in a row of one tool means the model is stuck."""
 
 
 def boodleton_model(name: str, *, base_url: str, api_key: str) -> OpenAIChatModel:
@@ -45,7 +50,7 @@ def _agent[OutputT](
         instructions=(PROMPTS / prompt).read_text(),
         capabilities=_read_only_repo(workspace.root),
         toolsets=[git_tools(workspace)],
-        retries=3,
+        retries=RETRIES,
     )
 
 
