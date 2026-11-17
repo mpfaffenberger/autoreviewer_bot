@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pydantic_ai import Agent
+
 from autoreviewer.github import PullRequestState, Repo
 from autoreviewer.review.agents import (
     DEEPSEEK_CONTEXT_WINDOW,
@@ -27,8 +29,9 @@ from autoreviewer.review.agents import (
     correctness_agent,
     verifier_agent,
 )
-from autoreviewer.review.job import CheckResult, Reviewed, review_change
-from autoreviewer.review.schemas import Finding
+from autoreviewer.review.job import AgentFactory, CheckResult, Reviewed, review_change
+from autoreviewer.review.schemas import Finding, LensReport, Verification
+from autoreviewer.review.workspace import Workspace
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 
@@ -98,7 +101,7 @@ class Result:
     """Every raw finding and its fate, for triaging "false alarms" that may be real bugs in the host commit."""
 
 
-async def run_case(case: Case, agents: object, work: Path) -> Result:
+async def run_case(case: Case, agents: AgentFactory, work: Path) -> Result:
     started = time.monotonic()
     with tempfile.TemporaryDirectory(dir=work) as scratch:
         repo, lines = build_repo(case, Path(scratch))
@@ -107,7 +110,7 @@ async def run_case(case: Case, agents: object, work: Path) -> Result:
         )
         try:
             result = await review_change(
-                reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),  # type: ignore[arg-type]
+                reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),
                 repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head,
             )  # fmt: skip
         except Exception as error:  # a crashed case is reported, not fatal to the run
@@ -162,10 +165,10 @@ async def main() -> None:
         os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", "deepseek-v4.1-flash"), base_url=base_url, api_key=key
     )
 
-    def agents(workspace: object) -> object:
+    def agents(workspace: Workspace) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
         return (
-            correctness_agent(lens_model, workspace, context_window=QWEN_CONTEXT_WINDOW),  # type: ignore[arg-type]
-            verifier_agent(verifier_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),  # type: ignore[arg-type]
+            correctness_agent(lens_model, workspace, context_window=QWEN_CONTEXT_WINDOW),
+            verifier_agent(verifier_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),
         )
 
     cases = [c for c in CASES if not args.only or c.name in args.only]
