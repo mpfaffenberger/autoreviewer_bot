@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 PULL_REQUEST_ACTIONS = frozenset({"opened", "reopened", "synchronize", "ready_for_review"})
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+"""Commenters who may command the bot on anyone's PR. A PR's own author (human or bot) may always."""
 
 
 @dataclass(frozen=True)
@@ -38,30 +41,44 @@ class PullRequestClosed:
     number: int
 
 
-Decision = Ignore | Pong | PullRequestUpdated | PullRequestClosed
+@dataclass(frozen=True)
+class ReviewRequested:
+    """`@<bot> review` in a PR's conversation: review the PR's current head (e.g. a PR opened before the
+    bot was installed, which no push has triggered yet). The payload carries no head SHA; it's looked up."""
+
+    installation_id: int
+    owner: str
+    repo: str
+    number: int
+    comment_id: int
+
+
+Decision = Ignore | Pong | PullRequestUpdated | PullRequestClosed | ReviewRequested
 
 
 class MalformedPayload(ValueError):
     """The payload lacks a field its event always carries."""
 
 
-def route(event: str, payload: Mapping[str, Any], repos: frozenset[str]) -> Decision:
+def route(event: str, payload: Mapping[str, Any], repos: frozenset[str], app_slug: str) -> Decision:
     try:
-        return _route(event, payload, repos)
+        return _route(event, payload, repos, app_slug)
     except (KeyError, TypeError) as error:
         raise MalformedPayload(f"{event} payload is missing {error}") from error
 
 
-def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str]) -> Decision:
+def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str], app_slug: str) -> Decision:
     if event == "ping":
         return Pong()
+    if event == "issue_comment":
+        return _comment(payload, repos, app_slug)
     if event != "pull_request":
         return Ignore(f"event {event!r} is not handled yet")
     action = payload["action"]
     if action not in PULL_REQUEST_ACTIONS and action != "closed":
         return Ignore(f"pull_request action {action!r} needs no review")
     repository = payload["repository"]
-    if repository["full_name"].lower() not in repos:
+    if not _allowed(repository, repos):
         return Ignore("repository is not on the allowlist")
     if action == "closed":
         return PullRequestClosed(
@@ -80,3 +97,37 @@ def _route(event: str, payload: Mapping[str, Any], repos: frozenset[str]) -> Dec
         number=pull_request["number"],
         head_sha=pull_request["head"]["sha"],
     )
+
+
+def _allowed(repository: Mapping[str, Any], repos: frozenset[str]) -> bool:
+    return repository["full_name"].lower() in repos
+
+
+def _comment(payload: Mapping[str, Any], repos: frozenset[str], app_slug: str) -> Decision:
+    if payload["action"] != "created":
+        return Ignore("only new comments are read")  # an edit must not re-run a command
+    issue, comment, repository = payload["issue"], payload["comment"], payload["repository"]
+    if "pull_request" not in issue:
+        return Ignore("comment on an issue, not a pull request")
+    if not _allowed(repository, repos):
+        return Ignore("repository is not on the allowlist")
+    author = comment["user"]["login"]
+    if author.lower() == f"{app_slug}[bot]".lower():
+        return Ignore("the bot's own comment")
+    if not is_review_command(comment.get("body") or "", app_slug):
+        return Ignore("no command for the bot")
+    if author != issue["user"]["login"] and comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
+        return Ignore(f"{author} may not command the bot on someone else's pull request")
+    return ReviewRequested(
+        installation_id=payload["installation"]["id"],
+        owner=repository["owner"]["login"],
+        repo=repository["name"],
+        number=issue["number"],
+        comment_id=comment["id"],
+    )
+
+
+def is_review_command(body: str, app_slug: str) -> bool:
+    """`@<slug> review` anywhere in the comment, case-insensitive, outside quoted (`>`) lines."""
+    command = re.compile(rf"(?<![\w-])@{re.escape(app_slug)}\s+review\b", re.IGNORECASE)
+    return any(command.search(line) for line in body.splitlines() if not line.lstrip().startswith(">"))

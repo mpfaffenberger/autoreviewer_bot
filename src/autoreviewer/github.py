@@ -66,6 +66,15 @@ class PullRequestReader(Protocol):
     async def compare(self, repo: Repo, base_sha: str, head_sha: str) -> Comparison: ...
 
 
+Reaction = Literal["eyes", "+1"]
+
+
+class Commands(PullRequestReader, Protocol):
+    """What answering a comment command needs: read the PR, and acknowledge the comment."""
+
+    async def react(self, repo: Repo, comment_id: int, content: Reaction) -> None: ...
+
+
 class PullRequests(PullRequestReader, Protocol):
     """Everything the bot's review job needs: reading, plus check runs and posting reviews."""
 
@@ -198,6 +207,12 @@ class GitHubApp:
             if error.response.status_code == 422:
                 raise ReviewRejected(str(error)) from error
             raise
+
+    async def react(self, repo: Repo, comment_id: int, content: Reaction) -> None:
+        github = self._as_installation(repo.installation_id)
+        await github.rest.reactions.async_create_for_issue_comment(
+            repo.owner, repo.name, comment_id, data={"content": content}
+        )
 
     async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
         github = self._as_installation(repo.installation_id)

@@ -18,6 +18,7 @@ from autoreviewer.github import (
     Comparison,
     Conclusion,
     PullRequestState,
+    Reaction,
     Repo,
     ReviewComment,
     ReviewEvent,
@@ -169,6 +170,8 @@ class FakeGitHub:
     """Make create_review raise ReviewRejected when it has comments, like GitHub's 422."""
     reviews: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     checks: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
+    fail_reactions: bool = False
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
         heads = self.head_shas or [self.repo.head]
@@ -210,6 +213,11 @@ class FakeGitHub:
         self.reviews.append(
             {"commit_sha": commit_sha, "event": event, "body": body, "comments": comments, "author": BOT}
         )
+
+    async def react(self, repo: Repo, comment_id: int, content: Reaction) -> None:
+        if self.fail_reactions:
+            raise RuntimeError("GitHub is down")
+        self.reactions.append((comment_id, content))
 
     async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
         return any(r["commit_sha"] == commit_sha and r["author"] == author for r in self.reviews)
