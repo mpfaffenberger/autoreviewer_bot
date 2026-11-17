@@ -99,11 +99,14 @@ def _finding(path: str, line: int, hits: list[Diagnostic]) -> Finding:
 
 async def _ruff(root: Path, paths: list[str]) -> list[Diagnostic]:
     overrides = [arg for option in RUFF_OPTIONS for arg in ("--config", option)]
-    process = await asyncio.create_subprocess_exec(
-        find_ruff_bin(), "check", "--isolated", "--no-cache", "--exit-zero", "--output-format", "json",
-        "--select", TYPE_RULES, *overrides, "--", *paths,
-        cwd=root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )  # fmt: skip
+    try:
+        process = await asyncio.create_subprocess_exec(
+            find_ruff_bin(), "check", "--isolated", "--no-cache", "--exit-zero", "--output-format", "json",
+            "--select", TYPE_RULES, *overrides, "--", *paths,
+            cwd=root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )  # fmt: skip
+    except OSError as error:  # no runnable ruff binary: a deploy problem, not a reason to lose the review
+        raise LintError(f"could not start ruff: {error}") from error
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=RUFF_TIMEOUT_S)
     except TimeoutError:

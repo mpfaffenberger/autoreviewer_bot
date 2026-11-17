@@ -111,3 +111,9 @@ async def test_a_broken_linter_skips_the_type_checks_not_the_review(
     github = FakeGitHub(replace(repo, head=head))
     await review_and_post(job_deps(github, tmp_path, []), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
     assert [r["event"] for r in github.reviews] == ["APPROVE"]
+
+
+async def test_a_missing_ruff_binary_is_a_lint_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lint, "find_ruff_bin", lambda: str(tmp_path / "no-such-ruff"))
+    with pytest.raises(lint.LintError, match="could not start ruff"):
+        await type_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))
