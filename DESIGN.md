@@ -150,6 +150,11 @@ worth keeping is adapted from pstack's comment-sicko. It runs alongside the corr
 When a review continues on new commits, only files changed since the last review are considered, so
 pushes don't repeat the same suggestions.
 
+Measured with `python -m evals.simplify` (real functions from this repo, deliberately bloated; every
+posted suggestion is applied and the full test suite run on the result). v1, 2026-11-17: **26 of 28
+planted lines cut (93%)**, 4 of 4 bloated cases simplified, **0 test failures**, 0 suggestions on the
+tight control case, about 13 GPU-minutes.
+
 ### Deterministic checks (no model)
 
 Rules a tool can decide exactly are a linter's job, not a lens's. `review/lint.py` runs ruff on the

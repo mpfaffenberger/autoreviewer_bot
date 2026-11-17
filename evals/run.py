@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
 
 from autoreviewer.github import PullRequestState, Repo
 from autoreviewer.review.agents import (
@@ -78,6 +79,17 @@ def build_repo(case: Case, parent: Path) -> tuple[GitRepo, list[int]]:
     if not case.clean and not lines:
         raise ValueError(f"{case.name}: anchor {case.target!r} not found after mutation")
     return GitRepo(path, base, head), lines
+
+
+def models_from_env() -> tuple[OpenAIChatModel, OpenAIChatModel]:
+    """(lens model, verifier model) on Boodleton, as configured for the bot."""
+    base_url = os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1")
+    key = os.environ["BOODLETON_API_KEY"]
+    lens = os.environ.get("AUTOREVIEWER_LENS_MODEL", "qwen3.8-flash-next")
+    verifier = os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", "deepseek-v4.1-flash")
+    return boodleton_model(lens, base_url=base_url, api_key=key), boodleton_model(
+        verifier, base_url=base_url, api_key=key
+    )
 
 
 def hits(findings: list[Finding], case: Case, lines: list[int]) -> bool:
@@ -156,14 +168,7 @@ async def main() -> None:
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
     args = parser.parse_args()
 
-    base_url = os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1")
-    key = os.environ["BOODLETON_API_KEY"]
-    lens_model = boodleton_model(
-        os.environ.get("AUTOREVIEWER_LENS_MODEL", "qwen3.8-flash-next"), base_url=base_url, api_key=key
-    )
-    verifier_model = boodleton_model(
-        os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", "deepseek-v4.1-flash"), base_url=base_url, api_key=key
-    )
+    lens_model, verifier_model = models_from_env()
 
     def agents(workspace: Workspace) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
         return (

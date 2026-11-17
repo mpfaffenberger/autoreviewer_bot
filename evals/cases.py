@@ -35,12 +35,13 @@ class Case:
     replace_all: bool = False
     clean: bool = False
     host: str | None = None
-    """A real commit to use as the PR (its parent is the base); None means a change to CORPUS_COMMIT."""
+    """A real commit to use as the PR (its parent is the base); None means a change to `corpus`."""
+    corpus: str = CORPUS_COMMIT
 
     @property
     def commits(self) -> tuple[str, str]:
         """(base, head before the mutation)."""
-        return (f"{self.host}~1", self.host) if self.host else (CORPUS_COMMIT, CORPUS_COMMIT)
+        return (f"{self.host}~1", self.host) if self.host else (self.corpus, self.corpus)
 
     @property
     def target(self) -> str:
