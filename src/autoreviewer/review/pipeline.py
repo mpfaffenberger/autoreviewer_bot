@@ -20,6 +20,7 @@ from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
 from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
+from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import Finding, LensReport, Verification
 
 logger = logging.getLogger("autoreviewer.review")
@@ -171,12 +172,15 @@ async def review(
     conversation: str | None = None,
     block_at: int = BLOCK_AT_PRIORITY,
     checked: Sequence[Finding] = (),
+    progress: Progress | None = None,
 ) -> Outcome:
+    progress = progress or Progress()
     prompt = continuation_prompt(pr, continuation) if continuation else lens_prompt(pr)
+    progress.set_phase("Continuing the last review" if continuation else "Reviewing the change")
     lens_run = await lens.run(
         prompt,
         message_history=continuation.history if continuation else None,
-        capabilities=list(lens_capabilities) or None,
+        capabilities=[*lens_capabilities, progress.watch("reviewer")],
         conversation_id=conversation,
         # The history names the last review's checkout; this review has a new one (the new head).
         workspace="new" if continuation else None,
@@ -196,12 +200,18 @@ async def review(
             candidates.append(finding)
 
     slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
+    if candidates:
+        progress.set_phase(f"Verifying {len(candidates)} candidate finding(s)")
 
     async def verify(finding: Finding) -> Verification | str:
         """The verdict, or why there is none."""
         async with slots:
             try:
-                return (await verifier.run(verifier_prompt(pr, finding), usage_limits=VERIFIER_LIMITS)).output
+                watch = progress.watch(f"verifier ({finding.path}:{finding.line})")
+                prompt = verifier_prompt(pr, finding)
+                run = await verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])
+                progress.note(f"{'confirmed' if run.output.confirmed else 'rejected'}: {finding.title}")
+                return run.output
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
                 return f"verification failed: {type(error).__name__}"

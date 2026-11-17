@@ -53,8 +53,8 @@ async def _start_check(pull: PullRequestUpdated) -> int:
 
 
 @DBOS.step()  # no retries: review_and_post never raises, and model time isn't free
-async def _review_and_post(pull: PullRequestUpdated) -> job.CheckResult:
-    return await job.review_and_post(_require_deps(), pull)
+async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.CheckResult:
+    return await job.review_and_post(_require_deps(), pull, check_id)
 
 
 @DBOS.step(retries_allowed=True, max_attempts=3)
@@ -65,7 +65,7 @@ async def _finish_check(pull: PullRequestUpdated, check_id: int, result: job.Che
 @DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
 async def review_workflow(pull: PullRequestUpdated) -> job.CheckResult:
     check_id = await _start_check(pull)
-    result = await _review_and_post(pull)
+    result = await _review_and_post(pull, check_id)
     await _finish_check(pull, check_id, result)
     return result
 

@@ -129,17 +129,24 @@ async def test_check_run_lifecycle_and_review_payloads(fake_and_app: tuple[FakeG
     first = await app.start_check(REPO, HEAD)
     check_id = await app.start_check(REPO, HEAD)  # twice: the client must survive across calls (the M0 GC bug)
     assert first == check_id
-    await app.finish_check(REPO, check_id, conclusion="failure", title="1 issue", summary="see review")
+    await app.update_check(REPO, check_id, title="Reviewing", summary="3 tool calls", text="```text\nlog\n```")
+    await app.finish_check(REPO, check_id, conclusion="failure", title="1 issue", summary="see review", text="trail")
     await app.create_review(
         REPO, 7, commit_sha=HEAD, event="REQUEST_CHANGES", body="body", comments=[ReviewComment("f1.py", 1, "bug")]
     )
 
     assert check_id == 99
     assert fake.writes[0][2] == {"name": CHECK_NAME, "head_sha": HEAD, "status": "in_progress"}
+    # Progress leaves the status alone (still in_progress); finishing completes it, keeping the trail.
     assert fake.writes[2][2] == {
-        "status": "completed", "conclusion": "failure", "output": {"title": "1 issue", "summary": "see review"}
-    }  # fmt: skip
+        "output": {"title": "Reviewing", "summary": "3 tool calls", "text": "```text\nlog\n```"}
+    }
     assert fake.writes[3][2] == {
+        "status": "completed",
+        "conclusion": "failure",
+        "output": {"title": "1 issue", "summary": "see review", "text": "trail"},
+    }
+    assert fake.writes[4][2] == {
         "commit_id": HEAD,
         "event": "REQUEST_CHANGES",
         "body": "body",

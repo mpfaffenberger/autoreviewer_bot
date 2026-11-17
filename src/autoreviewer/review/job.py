@@ -8,9 +8,11 @@ checkpointed), and posting skips a commit the bot already reviewed.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import tempfile
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -30,12 +32,16 @@ from autoreviewer.review.diff import MAX_CHANGED_LINES, select
 from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, review
+from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import comment_body, review_body
 from autoreviewer.review.schemas import LensReport, Verification
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated
 
 logger = logging.getLogger("autoreviewer.job")
+
+PROGRESS_INTERVAL_S = 30.0
+"""How often a running review updates its check run, at most (GitHub rate-limits App writes)."""
 
 AgentFactory = Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]
 
@@ -65,6 +71,8 @@ class CheckResult:
     title: str
     summary: str
     conclusion: Conclusion
+    details: str = ""
+    """What the review did (see progress.py), kept on the finished check run."""
 
 
 @dataclass(frozen=True)
@@ -88,14 +96,46 @@ async def start_check(deps: ReviewDeps, pull: PullRequestUpdated) -> int:
 
 async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int, result: CheckResult) -> None:
     await deps.github.finish_check(
-        repo_of(pull), check_id, conclusion=result.conclusion, title=result.title, summary=result.summary
+        repo_of(pull),
+        check_id,
+        conclusion=result.conclusion,
+        title=result.title,
+        summary=result.summary,
+        text=result.details,
     )
 
 
-async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated) -> CheckResult:
-    """Never raises: every outcome, including a crash, becomes the check run's result."""
+async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None) -> CheckResult:
+    """Never raises: every outcome, including a crash, becomes the check run's result.
+
+    With `check_id`, the check run shows what the review is doing while it runs (see progress.py).
+    """
+    progress = Progress()
+    async with _publishing(deps, repo_of(pull), check_id, progress):
+        result = await _guarded_review(deps, pull, progress)
+    return replace(result, details=progress.details())
+
+
+@contextlib.asynccontextmanager
+async def _publishing(deps: ReviewDeps, repo: Repo, check_id: int | None, progress: Progress) -> AsyncIterator[None]:
+    """Publish `progress` to the check run for the duration of the block (if there is a check run)."""
+    if check_id is None:
+        yield
+        return
+    done = asyncio.Event()
+    publisher = asyncio.create_task(_publish(deps, repo, check_id, progress, done))
     try:
-        return await _review(deps, repo_of(pull), pull)
+        yield
+    finally:
+        done.set()
+        # Wait, don't cancel: an update cut off mid-request could still reach GitHub after the final result
+        # and overwrite it with progress.
+        await publisher
+
+
+async def _guarded_review(deps: ReviewDeps, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
+    try:
+        return await _review(deps, repo_of(pull), pull, progress)
     except Superseded:
         return CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
     except Exception:
@@ -105,6 +145,25 @@ async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated) -> CheckRe
             "The review could not be completed. Push again to retry; the bot's logs have the details.",
             "neutral",
         )
+
+
+async def _publish(deps: ReviewDeps, repo: Repo, check_id: int, progress: Progress, done: asyncio.Event) -> None:
+    """Show progress on the check run every PROGRESS_INTERVAL_S while something changed, until `done`.
+    Best-effort: GitHub limits how often an App may write, and a failed update must never touch the review."""
+    published = progress.version
+    while True:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(done.wait(), PROGRESS_INTERVAL_S)
+            return
+        if progress.version == published:
+            continue
+        published = progress.version
+        try:
+            await deps.github.update_check(
+                repo, check_id, title=progress.phase, summary=progress.summary(), text=progress.details()
+            )
+        except Exception:
+            logger.warning("could not show progress on check run %d", check_id, exc_info=True)
 
 
 async def review_change(
@@ -120,6 +179,7 @@ async def review_change(
     memory: ReviewMemory | None = None,
     lens_version: str = "",
     block_at: int = BLOCK_AT_PRIORITY,
+    progress: Progress | None = None,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -172,6 +232,7 @@ async def review_change(
             conversation=conversation,
             block_at=block_at,
             checked=typed,
+            progress=progress,
         )
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
@@ -224,7 +285,7 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
     )
 
 
-async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
+async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
     state = await _current(deps, repo, pull)
     conversation = conversation_id(repo, pull.number)
     try:
@@ -240,6 +301,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> Che
             memory=deps.memory,
             lens_version=deps.lens_version,
             block_at=deps.block_at,
+            progress=progress,
         )
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
