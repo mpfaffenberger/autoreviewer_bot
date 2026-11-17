@@ -42,7 +42,7 @@ from autoreviewer.review.pipeline import (
 )
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import comment_body, review_body
-from autoreviewer.review.schemas import LensKind, LensReport, Verification
+from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated
@@ -66,6 +66,25 @@ class Lens:
     whole_pr: bool = True
     """On a continued review: the whole PR again (required for a lens that blocks, or a finding from an
     earlier commit would quietly stop blocking), or only files changed since the last review."""
+
+
+async def _run_lens(
+    spec: Lens, workspace: Workspace, pr: PullRequestText, *, progress: Progress, block_at: int
+) -> Outcome:
+    """One extra lens over `pr`. An advisory lens that fails costs only its advice; a lens that can block
+    fails the review, since approving without it would fail open."""
+    try:
+        lens, verifier = spec.agents(workspace)
+        paths = [change.path for change in pr.reviewable]
+        instructions = spec.instructions(paths) if spec.instructions else None
+        return await review_lens(
+            pr, lens, verifier, kind=spec.kind, instructions=instructions, progress=progress, block_at=block_at
+        )
+    except Exception:
+        if spec.kind not in ADVISORY_KINDS:
+            raise
+        logger.warning("the %s lens failed; posting none of its findings", spec.kind, exc_info=True)
+        return Outcome(block_at=block_at)
 
 
 def _only(pr: PullRequestText, paths: set[str]) -> PullRequestText:
@@ -277,23 +296,9 @@ async def review_change(
             extra = []
             for spec in lenses:
                 target = pr if spec.whole_pr or scope is None else _only(pr, scope)
-                if not target.reviewable:
-                    continue
-                extra_lens, extra_verifier = spec.agents(workspace)
-                paths = [change.path for change in target.reviewable]
-                extra.append(
-                    lenses_group.create_task(
-                        review_lens(
-                            target,
-                            extra_lens,
-                            extra_verifier,
-                            kind=spec.kind,
-                            instructions=spec.instructions(paths) if spec.instructions else None,
-                            progress=progress,
-                            block_at=block_at,
-                        )
-                    )
-                )
+                if target.reviewable:
+                    run = _run_lens(spec, workspace, target, progress=progress, block_at=block_at)
+                    extra.append(lenses_group.create_task(run))
             simplify_task = None
             if simplifier is not None:
                 simplify_task = lenses_group.create_task(

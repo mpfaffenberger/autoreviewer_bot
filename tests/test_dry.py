@@ -71,3 +71,11 @@ def test_settings_choose_the_lenses(security: bool, dry: bool, kinds: list[str],
     assert [lens.kind for lens in lenses] == kinds
     assert all(lens.whole_pr is (lens.kind == "security") for lens in lenses)
     assert models_note(settings).startswith(note)
+
+
+async def test_a_failing_dry_lens_costs_only_its_advice(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    dry = (Lens("dry", lens_agents([], kind="dry", crash=True), whole_pr=False),)
+    deps = replace(job_deps(github, tmp_path, [finding(5)]), lenses=dry)
+    result = await review_and_post(deps, pull(repo))
+    assert result.conclusion == "failure" and [r["event"] for r in github.reviews] == ["REQUEST_CHANGES"]
