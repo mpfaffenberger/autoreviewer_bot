@@ -71,13 +71,14 @@ class Outcome:
         return [*self.inline, *self.general]
 
     def absorb(self, other: Outcome) -> None:
-        """Add another lens's results. Where both posted on one line, the more urgent finding stays."""
+        """Add another lens's results. Where correctness and security posted on one line (likely one defect
+        seen twice), the more urgent finding stays; other kinds (types, DRY, simplify) are separate issues."""
         self.rejected += other.rejected
         self.unverified += other.unverified
         self.low_confidence += other.low_confidence
         for target, findings in ((self.inline, other.inline), (self.general, other.general)):
             for finding in findings:
-                same = next((f for f in self.posted if (f.path, f.line) == (finding.path, finding.line)), None)
+                same = next((f for f in self.posted if _same_defect(f, finding)), None)
                 if same is None:
                     target.append(finding)
                 elif finding.priority < same.priority:
@@ -162,6 +163,13 @@ def verifier_prompt(pr: PullRequestText, finding: Finding) -> str:
         f"# Pull request title\n{pr.title}\n\n"
         f'Check it: start with diff(path="{finding.path}") and read the surrounding code.\n'
     )
+
+
+_DEFECT_KINDS = frozenset({"correctness", "security"})
+
+
+def _same_defect(a: Finding, b: Finding) -> bool:
+    return {a.kind, b.kind} <= _DEFECT_KINDS and (a.path, a.line) == (b.path, b.line)
 
 
 def _dedupe(findings: list[Finding]) -> list[Finding]:

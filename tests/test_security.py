@@ -7,17 +7,26 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import PullRequestState
-from autoreviewer.review.agents import security_references, simplify_agent, simplify_checker_agent
+from autoreviewer.review.agents import (
+    security_agent,
+    security_references,
+    security_verifier_agent,
+    simplify_agent,
+    simplify_checker_agent,
+)
 from autoreviewer.review.job import Reviewed, repo_of, review_and_post, review_change
 from autoreviewer.review.memory import ReviewMemory, conversation_id
+from autoreviewer.review.pipeline import review_security
+from autoreviewer.review.progress import Progress
 from autoreviewer.review.simplify import Simplifier
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import PullRequestUpdated
 from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, add_commit, agents, finding, job_deps, security_agents
+from tests.test_review import pr_text
 
 pytestmark = pytest.mark.anyio
 
@@ -111,3 +120,35 @@ async def test_a_failing_lens_cancels_the_others(repo: GitRepo, tmp_path: Path) 
     result = await review_and_post(deps, pull(repo))
     await asyncio.sleep(0.6)  # long enough for an orphaned simplifier to finish
     assert result.title == "Review failed" and finished == []
+
+
+async def test_a_lint_finding_on_the_same_line_never_hides_a_vulnerability(repo: GitRepo, tmp_path: Path) -> None:
+    head = add_commit(repo, {"calc.py": "def run(expression):\n    return eval(expression)\n"})  # line 1: untyped
+    github = FakeGitHub(replace(repo, head=head))
+    vulnerability = finding(1, path="calc.py", title="eval of input")
+    deps = replace(job_deps(github, tmp_path, []), security=security_agents([vulnerability]))
+    await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
+    review = github.reviews[0]
+    bodies = [comment.body for comment in review["comments"]]
+    assert any("(types)" in body for body in bodies) and any("(security)" in body for body in bodies)
+
+
+async def test_the_security_lens_sees_its_prompt_and_the_references(workspace: Workspace) -> None:
+    """Run-level instructions must add to the agent's, not replace them (as a pydantic-ai upgrade could)."""
+    seen: list[str | None] = []
+
+    def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.append([m.instructions for m in messages if isinstance(m, ModelRequest)][-1])
+        return ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, {"findings": [], "overall_correct": True, "reviewed": []})]
+        )
+
+    agent, verifier = (
+        security_agent(FunctionModel(lens), workspace),
+        security_verifier_agent(FunctionModel(lens), workspace),
+    )
+    pr = await pr_text(workspace)
+    await review_security(pr, agent, verifier, instructions=security_references(["stats.py"]), progress=Progress())
+    [instructions] = seen
+    assert instructions is not None
+    assert "security vulnerabilities it introduces" in instructions and "Fail-Open Security Switches" in instructions
