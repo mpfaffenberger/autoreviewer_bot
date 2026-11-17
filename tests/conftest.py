@@ -12,10 +12,12 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic_ai.workspaces import LocalWorkspaceBackend
 
+from autoreviewer.review.workspace import Workspace, fetch
 from autoreviewer.sandbox.client import SandboxdClient
 from autoreviewer.sandbox.daemon import Limits, create_app
 from autoreviewer.sandbox.protocol import SandboxSpec
 from autoreviewer.sandbox.providers import ProvidedSandbox, SandboxProvider
+from tests.review_fakes import GitRepo, make_repo
 
 
 @pytest.fixture
@@ -61,3 +63,13 @@ async def running_daemon(
 ) -> AsyncIterator[SandboxdClient]:
     async with serve(create_app(provider, limits, **app_kwargs)) as socket_path, SandboxdClient(socket_path) as client:
         yield client
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> GitRepo:
+    return make_repo(tmp_path / "origin")
+
+
+@pytest.fixture
+async def workspace(repo: GitRepo, tmp_path: Path) -> Workspace:
+    return await fetch(tmp_path / "checkout", url=repo.url, head=repo.head, base=repo.base)

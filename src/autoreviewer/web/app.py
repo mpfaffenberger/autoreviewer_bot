@@ -94,7 +94,10 @@ def main() -> None:
     deps = ReviewDeps(
         github=github,
         source=GitHubSource(github),
-        agents=lambda workspace: (correctness_agent(lens_model, workspace), verifier_agent(verifier_model, workspace)),
+        agents=lambda workspace: (
+            correctness_agent(lens_model, workspace, context_window=settings.lens_context_window),
+            verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
+        ),
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
         models_note=f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`",
