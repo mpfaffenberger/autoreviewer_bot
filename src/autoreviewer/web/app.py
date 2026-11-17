@@ -118,6 +118,19 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
     )
 
 
+def build_security_factory(settings: Settings) -> AgentFactory | None:
+    """(security lens, security verifier) on the same models as correctness; None when it's off."""
+    from autoreviewer.review.agents import security_agent, security_verifier_agent
+
+    if not settings.security:
+        return None
+    lens_model, verifier_model = _models(settings)
+    return lambda workspace: (
+        security_agent(lens_model, workspace, context_window=settings.lens_context_window),
+        security_verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
+    )
+
+
 def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
     """Proposals on the lens's model, checks on the verifier's; None when simplifications are off."""
     from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
@@ -133,7 +146,8 @@ def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
 
 
 def models_note(settings: Settings) -> str:
-    return f"correctness by `{settings.lens_model}`, verified by `{settings.verifier_model}`"
+    lenses = "correctness and security" if settings.security else "correctness"
+    return f"{lenses} by `{settings.lens_model}`, verified by `{settings.verifier_model}`"
 
 
 def main() -> None:
@@ -168,6 +182,7 @@ def main() -> None:
         lens_version=lens_version(settings.lens_model),
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
+        security=build_security_factory(settings),
     )
     durable.configure(settings.database)
 

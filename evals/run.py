@@ -28,12 +28,15 @@ from autoreviewer.review.agents import (
     QWEN_CONTEXT_WINDOW,
     boodleton_model,
     correctness_agent,
+    security_agent,
+    security_verifier_agent,
     verifier_agent,
 )
 from autoreviewer.review.job import AgentFactory, CheckResult, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
 from evals.cases import CASES, HIT_TOLERANCE, Case
+from evals.security_cases import CASES as SECURITY_CASES
 from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,11 +112,13 @@ class Result:
     error: str | None = None
     blocking_hit: bool = False
     """The seeded bug was posted at a priority that blocks the merge."""
+    security_hit: bool = False
+    """The security lens (not only the correctness lens) posted the seeded bug."""
     findings: list[str] = field(default_factory=list[str])
     """Every raw finding and its fate, for triaging "false alarms" that may be real bugs in the host commit."""
 
 
-async def run_case(case: Case, agents: AgentFactory, work: Path) -> Result:
+async def run_case(case: Case, agents: AgentFactory, security: AgentFactory | None, work: Path) -> Result:
     started = time.monotonic()
     with tempfile.TemporaryDirectory(dir=work) as scratch:
         repo, lines = build_repo(case, Path(scratch))
@@ -123,7 +128,7 @@ async def run_case(case: Case, agents: AgentFactory, work: Path) -> Result:
         try:
             result = await review_change(
                 reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),
-                repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head,
+                repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head, security=security,
             )  # fmt: skip
         except Exception as error:  # a crashed case is reported, not fatal to the run
             return Result(case.name, case.clean, False, False, 0, 0, 0, time.monotonic() - started, repr(error)[:300])
@@ -152,6 +157,7 @@ async def run_case(case: Case, agents: AgentFactory, work: Path) -> Result:
         false_alarms,
         seconds,
         blocking_hit=hits([f for f in posted if blocks(f)], case, lines),
+        security_hit=hits([f for f in posted if f.kind == "security"], case, lines),
         findings=[f"{f.path}:{f.line} {_grade(f)} {f.title} [{fate}]" for f, fate in fates],
     )
 
@@ -166,6 +172,8 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", nargs="*", help="case names to run (default: all)")
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
+    parser.add_argument("--suite", choices=("correctness", "security"), default="correctness")
+    parser.add_argument("--no-security", action="store_true", help="correctness lens only (the baseline)")
     args = parser.parse_args()
 
     lens_model, verifier_model = models_from_env()
@@ -176,13 +184,20 @@ async def main() -> None:
             verifier_agent(verifier_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),
         )
 
-    cases = [c for c in CASES if not args.only or c.name in args.only]
+    def security(workspace: Workspace) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
+        return (
+            security_agent(lens_model, workspace, context_window=QWEN_CONTEXT_WINDOW),
+            security_verifier_agent(verifier_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),
+        )
+
+    suite = SECURITY_CASES if args.suite == "security" else CASES
+    cases = [c for c in suite if not args.only or c.name in args.only]
     slots = asyncio.Semaphore(CONCURRENCY)
     with tempfile.TemporaryDirectory(prefix="autoreviewer-eval-") as work:
 
         async def bounded(case: Case) -> Result:
             async with slots:
-                result = await run_case(case, agents, Path(work))
+                result = await run_case(case, agents, None if args.no_security else security, Path(work))
                 kind = "clean" if case.clean else "bug  "
                 print(
                     f"  {case.name:26} {kind} lens_hit={result.lens_hit!s:5} posted_hit={result.posted_hit!s:5} "
@@ -202,6 +217,7 @@ async def main() -> None:
         "lens_recall": sum(r.lens_hit for r in bugs) / max(1, len(bugs)),
         "posted_recall": sum(r.posted_hit for r in bugs) / max(1, len(bugs)),
         "blocking_recall": sum(r.blocking_hit for r in bugs) / max(1, len(bugs)),
+        "security_lens_recall": sum(r.security_hit for r in bugs) / max(1, len(bugs)),
         "false_alarms_on_bug_cases": sum(r.false_alarms for r in bugs),
         "clean_cases_with_findings": sum(1 for r in clean if r.posted),
         "errors": sum(1 for r in results if r.error),

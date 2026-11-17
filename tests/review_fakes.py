@@ -25,7 +25,14 @@ from autoreviewer.github import (
     ReviewEvent,
     ReviewRejected,
 )
-from autoreviewer.review.agents import correctness_agent, simplify_agent, simplify_checker_agent, verifier_agent
+from autoreviewer.review.agents import (
+    correctness_agent,
+    security_agent,
+    security_verifier_agent,
+    simplify_agent,
+    simplify_checker_agent,
+    verifier_agent,
+)
 from autoreviewer.review.job import ReviewDeps
 from autoreviewer.review.schemas import LensReport, Verification
 from autoreviewer.review.simplify import Simplifier, SimplifierFactory
@@ -276,4 +283,26 @@ def simplifier(
 
     return lambda ws: Simplifier(
         simplify_agent(FunctionModel(propose), ws), simplify_checker_agent(FunctionModel(check), ws)
+    )
+
+
+def security_agents(
+    findings: list[dict[str, Any]],
+    confirm: Callable[[dict[str, Any]], bool] = lambda f: True,
+    *,
+    prompts: list[str] | None = None,
+    crash: bool = False,
+) -> Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]:
+    """A fake security factory: reports `findings`, records its prompts, or crashes."""
+
+    def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if crash:
+            raise RuntimeError("model server down")
+        if prompts is not None:
+            prompts.append(_prompt(messages))
+        return _final(info, {"findings": findings, "overall_correct": not findings, "reviewed": []})
+
+    return lambda ws: (
+        security_agent(FunctionModel(lens), ws),
+        security_verifier_agent(verifier_model(confirm), ws),
     )

@@ -70,6 +70,21 @@ class Outcome:
     def posted(self) -> list[Finding]:
         return [*self.inline, *self.general]
 
+    def absorb(self, other: Outcome) -> None:
+        """Add another lens's results. Where both posted on one line, the more urgent finding stays."""
+        self.rejected += other.rejected
+        self.unverified += other.unverified
+        self.low_confidence += other.low_confidence
+        for target, findings in ((self.inline, other.inline), (self.general, other.general)):
+            for finding in findings:
+                same = next((f for f in self.posted if (f.path, f.line) == (finding.path, finding.line)), None)
+                if same is None:
+                    target.append(finding)
+                elif finding.priority < same.priority:
+                    for kept in (self.inline, self.general):
+                        if same in kept:
+                            kept[kept.index(same)] = finding
+
     def is_blocking(self, finding: Finding) -> bool:
         return finding.kind != "simplify" and finding.priority <= self.block_at  # simplifications are optional
 
@@ -164,6 +179,80 @@ def place(outcome: Outcome, finding: Finding, patch: str) -> None:
     (outcome.inline if finding.line in commentable_lines(patch) else outcome.general).append(finding)
 
 
+async def _judge(
+    findings: list[Finding],
+    pr: PullRequestText,
+    verifier: Agent[None, Verification],
+    progress: Progress,
+    outcome: Outcome,
+    *,
+    label: str,
+) -> None:
+    """Filter a lens's findings, have `verifier` check the rest, and sort each into `outcome`."""
+    reviewable = {change.path for change in pr.reviewable}
+    candidates = []
+    for finding in _dedupe(findings):
+        if finding.path not in reviewable:  # hallucinated or out of scope, not worth a verifier call
+            outcome.rejected.append((finding, "path is not among the changed files"))
+        elif finding.confidence < MIN_CONFIDENCE:
+            outcome.low_confidence.append(finding)
+        else:
+            candidates.append(finding)
+
+    slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
+    if candidates:
+        progress.set_phase(f"Verifying {len(candidates)} candidate finding(s)")
+
+    async def verify(finding: Finding) -> Verification | str:
+        """The verdict, or why there is none."""
+        async with slots:
+            try:
+                watch = progress.watch(f"{label} ({finding.path}:{finding.line})")
+                prompt = verifier_prompt(pr, finding)
+                run = await verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])
+                progress.note(f"{'confirmed' if run.output.confirmed else 'rejected'}: {finding.title}")
+                return run.output
+            except Exception as error:  # precision first: an unverifiable finding is not posted
+                logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
+                return f"verification failed: {type(error).__name__}"
+
+    verdicts = await asyncio.gather(*(verify(finding) for finding in candidates))
+    for finding, verdict in zip(candidates, verdicts, strict=True):
+        if isinstance(verdict, str):
+            outcome.unverified.append((finding, verdict))
+        elif not verdict.confirmed:
+            outcome.rejected.append((finding, verdict.reason))
+        else:
+            # The verifier read the code too: its corrections win.
+            corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
+            finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
+            place(outcome, finding, pr.patches.get(finding.path, ""))
+
+
+async def review_security(
+    pr: PullRequestText,
+    lens: Agent[None, LensReport],
+    verifier: Agent[None, Verification],
+    *,
+    instructions: str,
+    progress: Progress,
+    block_at: int = BLOCK_AT_PRIORITY,
+) -> Outcome:
+    """The security lens over the whole PR, always fresh: a continued review must still re-check every
+    vulnerability, or one found on an earlier commit would silently stop blocking."""
+    run = await lens.run(
+        lens_prompt(pr),
+        instructions=instructions,
+        capabilities=[progress.watch("security")],
+        usage_limits=LENS_LIMITS,
+    )
+    findings = [finding.model_copy(update={"kind": "security"}) for finding in run.output.findings]
+    outcome = Outcome(block_at=block_at)
+    await _judge(findings, pr, verifier, progress, outcome, label="security verifier")
+    logger.info("security: %d requests, %d found, %d posted", run.usage.requests, len(findings), len(outcome.posted))
+    return outcome
+
+
 async def review(
     pr: PullRequestText,
     lens: Agent[None, LensReport],
@@ -190,45 +279,7 @@ async def review(
     )
     report, usage = lens_run.output, lens_run.usage
     outcome = Outcome(block_at=block_at, overall_correct=report.overall_correct, reviewed=report.reviewed)
-    reviewable = {change.path for change in pr.reviewable}
-
-    candidates = []
-    for finding in _dedupe(report.findings):
-        if finding.path not in reviewable:  # hallucinated or out of scope, not worth a verifier call
-            outcome.rejected.append((finding, "path is not among the changed files"))
-        elif finding.confidence < MIN_CONFIDENCE:
-            outcome.low_confidence.append(finding)
-        else:
-            candidates.append(finding)
-
-    slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
-    if candidates:
-        progress.set_phase(f"Verifying {len(candidates)} candidate finding(s)")
-
-    async def verify(finding: Finding) -> Verification | str:
-        """The verdict, or why there is none."""
-        async with slots:
-            try:
-                watch = progress.watch(f"verifier ({finding.path}:{finding.line})")
-                prompt = verifier_prompt(pr, finding)
-                run = await verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])
-                progress.note(f"{'confirmed' if run.output.confirmed else 'rejected'}: {finding.title}")
-                return run.output
-            except Exception as error:  # precision first: an unverifiable finding is not posted
-                logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
-                return f"verification failed: {type(error).__name__}"
-
-    verdicts = await asyncio.gather(*(verify(finding) for finding in candidates))
-    for finding, verdict in zip(candidates, verdicts, strict=True):
-        if isinstance(verdict, str):
-            outcome.unverified.append((finding, verdict))
-        elif not verdict.confirmed:
-            outcome.rejected.append((finding, verdict.reason))
-        else:
-            # The verifier read the code too: its corrections win.
-            corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
-            finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
-            place(outcome, finding, pr.patches.get(finding.path, ""))
+    await _judge(report.findings, pr, verifier, progress, outcome, label="verifier")
     for finding in checked:  # proven by a tool, not a model: nothing for a verifier to judge
         place(outcome, finding, pr.patches.get(finding.path, ""))
     compacted = compaction_stats(lens_run.all_messages())
