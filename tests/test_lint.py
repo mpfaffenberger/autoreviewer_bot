@@ -96,7 +96,8 @@ async def test_a_pr_adding_untyped_code_gets_a_blocking_types_comment(repo: GitR
 
 async def test_broken_python_is_not_a_typing_finding(tmp_path: Path) -> None:
     """ruff reports invalid-syntax whatever is selected; that's the lens's business, not "add annotations"."""
-    assert await type_findings(tmp_path, *new_file(tmp_path, "wip.py", "def scale(xs: list[int]\n")) == []
+    source = "def scale(xs: list[int]) -> int\n    return len(xs)\n"  # missing colon: an error on line 1
+    assert await type_findings(tmp_path, *new_file(tmp_path, "wip.py", source)) == []
 
 
 async def test_a_broken_linter_skips_the_type_checks_not_the_review(
