@@ -78,13 +78,10 @@ class Outcome:
         self.low_confidence += other.low_confidence
         for target, findings in ((self.inline, other.inline), (self.general, other.general)):
             for finding in findings:
-                same = next((f for f in self.posted if _same_defect(f, finding)), None)
-                if same is None:
+                if (same := next((f for f in target if _same_defect(f, finding)), None)) is None:
                     target.append(finding)
                 elif finding.priority < same.priority:
-                    for kept in (self.inline, self.general):
-                        if same in kept:
-                            kept[kept.index(same)] = finding
+                    target[target.index(same)] = finding
 
     def is_blocking(self, finding: Finding) -> bool:
         return finding.kind != "simplify" and finding.priority <= self.block_at  # simplifications are optional
@@ -165,11 +162,8 @@ def verifier_prompt(pr: PullRequestText, finding: Finding) -> str:
     )
 
 
-_DEFECT_KINDS = frozenset({"correctness", "security"})
-
-
 def _same_defect(a: Finding, b: Finding) -> bool:
-    return {a.kind, b.kind} <= _DEFECT_KINDS and (a.path, a.line) == (b.path, b.line)
+    return {a.kind, b.kind} <= {"correctness", "security"} and (a.path, a.line) == (b.path, b.line)
 
 
 def _dedupe(findings: list[Finding]) -> list[Finding]:
