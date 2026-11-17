@@ -207,7 +207,7 @@ async def test_a_bug_requests_changes_with_an_inline_comment(repo: GitRepo, tmp_
     [posted] = github.reviews
     assert posted["event"] == "REQUEST_CHANGES" and posted["commit_sha"] == repo.head
     assert [(c.path, c.line) for c in posted["comments"]] == [("stats.py", 5)]
-    assert (result.conclusion, result.title) == ("failure", "1 blocking correctness issue(s)")
+    assert (result.conclusion, result.title) == ("failure", "1 blocking issue(s)")
 
 
 async def test_a_clean_pr_is_approved(repo: GitRepo, tmp_path: Path) -> None:

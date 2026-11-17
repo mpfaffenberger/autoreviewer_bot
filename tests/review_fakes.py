@@ -224,12 +224,17 @@ class FakeGitHub:
 
 
 def job_deps(
-    github: FakeGitHub, work_dir: Path, findings: list[dict[str, Any]] | None = None, **kwargs: Any
+    github: FakeGitHub,
+    work_dir: Path,
+    findings: list[dict[str, Any]] | None = None,
+    *,
+    confirm: Callable[[dict[str, Any]], bool] = lambda f: True,
+    priority: Callable[[dict[str, Any]], int | None] = lambda f: None,
 ) -> ReviewDeps:
     return ReviewDeps(
         github=github,
         source=LocalSource(github.repo),
-        agents=agents([] if findings is None else findings, **kwargs),
+        agents=agents([] if findings is None else findings, confirm=confirm, priority=priority),
         work_dir=work_dir,
         bot_login=BOT,
         models_note="test models",

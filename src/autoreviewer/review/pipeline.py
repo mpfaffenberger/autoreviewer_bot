@@ -170,6 +170,7 @@ async def review(
     lens_capabilities: Sequence[AbstractCapability[None]] = (),
     conversation: str | None = None,
     block_at: int = BLOCK_AT_PRIORITY,
+    checked: Sequence[Finding] = (),
 ) -> Outcome:
     prompt = continuation_prompt(pr, continuation) if continuation else lens_prompt(pr)
     lens_run = await lens.run(
@@ -216,6 +217,8 @@ async def review(
             corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
             finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
             _place(outcome, finding, pr.patches.get(finding.path, ""))
+    for finding in checked:  # proven by a tool, not a model: nothing for a verifier to judge
+        _place(outcome, finding, pr.patches.get(finding.path, ""))
     compacted = compaction_stats(lens_run.all_messages())
     logger.info(
         "review: lens made %d requests and %d tool calls (compaction cleared %d, deduplicated %d results); "

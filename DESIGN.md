@@ -132,6 +132,18 @@ calibrated **confidence** (0-10, from Qodo PR-Agent). Lessons taken from publish
 - **Explicit acceptance criteria** in the verifier, so precision is a rubric, not a mood.
 - **Comments state the trigger first**, then the consequence. No praise, no "please verify".
 
+### Deterministic checks (no model)
+
+Rules a tool can decide exactly are a linter's job, not a lens's. `review/lint.py` runs ruff on the
+Python files a PR changes and reports only on **lines the PR adds**: missing argument or return
+annotations block (P1); `Any` and a bare `# type: ignore` are advisory (P2), because both are sometimes
+justified. ruff only parses files and runs with `--isolated`, so the repo's own config (for example
+`per-file-ignores`) can't switch the rules off. These findings skip the verifier, are labelled
+"(types)", and aren't kept in the lens's memory, since they're recomputed every review. This repo applies
+the same rules to itself (`pyproject.toml`). TypeScript (oxlint) is next once a TS repo is subscribed.
+A type *checker* (`ty`) would need the PR's dependencies installed, which means running the PR's
+build code, so it waits for the sandbox.
+
 ### Measuring it
 
 `evals/` runs the real reviewer over seeded bugs in this repo's own code, with no GitHub calls:
