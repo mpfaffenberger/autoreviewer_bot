@@ -19,6 +19,8 @@ class Settings:
     app_slug: str
     webhook_secret: str = field(repr=False)
     private_key: str = field(repr=False)
+    logfire_include_content: bool = True
+    """Send prompts, model output, and tool results (the reviewed code) to Logfire with each trace."""
     block_at_priority: int = 1
     """Confirmed findings at this priority or more urgent (0 = P0 ... 3 = P3) block the merge; 3 blocks on all."""
     max_concurrent_jobs: int = 2
@@ -50,6 +52,7 @@ class Settings:
             private_key=key_path.read_text(),
             max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", "2")),
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
+            logfire_include_content=env.get("AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", "true").lower() != "false",
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],
             lens_model=env.get("AUTOREVIEWER_LENS_MODEL", cls.lens_model),

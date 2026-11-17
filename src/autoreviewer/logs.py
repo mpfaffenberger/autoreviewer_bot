@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import re
 
+import logfire
+
 _SECRET_QUERY = re.compile(r"([?&](?:token|access_token|code|client_secret|jwt)=)[^&\s\"']+", re.IGNORECASE)
 _NOISY = ("httpx", "httpx2", "httpcore", "openai")
 
@@ -23,10 +25,15 @@ class RedactSecrets(logging.Filter):
         return True
 
 
-def configure(level: int = logging.INFO) -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
-    handler.addFilter(RedactSecrets())
-    logging.basicConfig(level=level, handlers=[handler], force=True)
+def configure(level: int = logging.INFO, *, to_logfire: bool = False) -> None:
+    """Log to stderr, and to Logfire as well with `to_logfire` (after telemetry.configure)."""
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    handlers: list[logging.Handler] = [console]
+    if to_logfire:
+        handlers.append(logfire.LogfireLoggingHandler())
+    for handler in handlers:  # the same scrubbing on every way out
+        handler.addFilter(RedactSecrets())
+    logging.basicConfig(level=level, handlers=handlers, force=True)
     for name in _NOISY:
         logging.getLogger(name).setLevel(logging.WARNING)
