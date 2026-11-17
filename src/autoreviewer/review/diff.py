@@ -108,6 +108,11 @@ def commentable_lines(patch: str) -> frozenset[int]:
     return frozenset(number for number, _ in _new_side_lines(patch) if number is not None)
 
 
+def added_lines(patch: str) -> frozenset[int]:
+    """New-file line numbers this patch adds: what a PR can be held responsible for."""
+    return frozenset(line for line, raw in _new_side_lines(patch) if line and raw.startswith("+"))
+
+
 def annotate_git_diff(text: str) -> str:
     """Prefix each line that exists in the new file with its line number, so models cite lines exactly."""
     out: list[str] = []

@@ -29,7 +29,7 @@ def sanitize(text: str) -> str:
 
 def comment_body(finding: Finding, *, blocking: bool = True) -> str:
     gate = "" if blocking else ", non-blocking"
-    parts = [f"**[P{finding.priority}] {finding.title}** (correctness{gate})", finding.explanation]
+    parts = [f"**[P{finding.priority}] {finding.title}** ({finding.kind}{gate})", finding.explanation]
     if finding.suggestion:
         parts.append(f"**Suggested fix:** {finding.suggestion}")
     return sanitize("\n\n".join(parts))
@@ -39,7 +39,7 @@ def review_body(outcome: Outcome, *, footer: str) -> str:
     """The review's summary: blocking findings first, advisory ones after, then where they are."""
     posted = outcome.posted
     if not posted:
-        return f"No correctness issues found.\n\n{footer}"
+        return f"No issues found.\n\n{footer}"
     blocking = [f for f in posted if outcome.is_blocking(f)]
     advisory = [f for f in posted if not outcome.is_blocking(f)]
     lines = []
@@ -56,5 +56,5 @@ def review_body(outcome: Outcome, *, footer: str) -> str:
     return "\n".join(lines)
 
 
-def _count(findings: list[Finding], kind: str = "correctness") -> str:
-    return f"{len(findings)} {kind} issue{'s' if len(findings) != 1 else ''}"
+def _count(findings: list[Finding], kind: str = "") -> str:
+    return f"{len(findings)} {kind + ' ' if kind else ''}issue{'s' if len(findings) != 1 else ''}"

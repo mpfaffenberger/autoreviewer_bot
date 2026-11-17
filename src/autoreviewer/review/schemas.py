@@ -7,7 +7,10 @@ verifier's and the code's job, not the lens's.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 PRIORITY_HELP = (
     "0 (P0): drop everything to fix; breaks releases, operations, or major usage, without depending on unusual "
@@ -32,6 +35,8 @@ class Finding(BaseModel):
         "wrong. Matter-of-fact; don't overstate."
     )
     suggestion: str | None = Field(default=None, description="A concrete fix, if there is an obvious one")
+    kind: SkipJsonSchema[Literal["correctness", "types"]] = "correctness"
+    """Which check found it. Not part of the model's schema: models only ever produce correctness findings."""
 
 
 class LensReport(BaseModel):

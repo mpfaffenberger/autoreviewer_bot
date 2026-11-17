@@ -27,6 +27,7 @@ from autoreviewer.github import (
     ReviewRejected,
 )
 from autoreviewer.review.diff import MAX_CHANGED_LINES, select
+from autoreviewer.review.lint import type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, review
 from autoreviewer.review.render import comment_body, review_body
@@ -155,6 +156,7 @@ async def review_change(
                 changed_since = await read_changes_since_previous(workspace)
                 continuation = Continuation(prior, history, head_sha, changed_since)
         persistence, run_id = memory.persistence(conversation) if memory else (None, "")
+        typed = await type_findings(workspace.root, selection.reviewable, patches)
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
         outcome = await review(
@@ -165,6 +167,7 @@ async def review_change(
             lens_capabilities=[persistence] if persistence else (),
             conversation=conversation,
             block_at=block_at,
+            checked=typed,
         )
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
@@ -203,7 +206,12 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
         head_sha=head_sha,
         base_sha=base,
         version=version,
-        findings=[{"path": f.path, "line": f.line, "title": f"[P{f.priority}] {f.title}"} for f in outcome.posted],
+        # Only what the lens said: linter findings are recomputed every review, and aren't its to re-check.
+        findings=[
+            {"path": f.path, "line": f.line, "title": f"[P{f.priority}] {f.title}"}
+            for f in outcome.posted
+            if f.kind == "correctness"
+        ],
         dropped=[
             {"path": f.path, "line": f.line, "title": f.title, "reason": reason} for f, reason in outcome.rejected
         ],
@@ -318,6 +326,6 @@ def _summary(outcome: Outcome) -> CheckResult:
     if outcome.blocking:
         count = len(outcome.posted) - len(advisory)
         return CheckResult(
-            f"{count} blocking correctness issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
+            f"{count} blocking issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
         )
-    return CheckResult("No blocking correctness issues", f"Approved.{notes}", "success")
+    return CheckResult("No blocking issues", f"Approved.{notes}", "success")

@@ -50,7 +50,7 @@ async def test_a_queued_review_runs_all_three_phases(launch: Launch) -> None:
 
     assert result.conclusion == "failure"
     assert [c["status"] for c in github.checks] == ["completed"]
-    assert github.checks[0]["title"] == "1 blocking correctness issue(s)"
+    assert github.checks[0]["title"] == "1 blocking issue(s)"
     assert [r["event"] for r in github.reviews] == ["REQUEST_CHANGES"]
 
 

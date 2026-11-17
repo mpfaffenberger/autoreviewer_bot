@@ -45,7 +45,7 @@ async def run(workspace: Workspace, calls: list[tuple[str, dict[str, Any]]], win
 
 
 def test_same_call_keys_exact_read_only_calls() -> None:
-    def call(name: str, **args: Any) -> ToolCallPart:
+    def call(name: str, **args: object) -> ToolCallPart:
         return ToolCallPart(tool_name=name, args=args)
 
     assert same_call(call("diff", path="a.py")) == same_call(call("diff", path="a.py"))

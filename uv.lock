@@ -60,6 +60,7 @@ dependencies = [
     { name = "httpx2" },
     { name = "pydantic-ai-harness" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
+    { name = "ruff" },
     { name = "uvicorn" },
 ]
 
@@ -74,7 +75,6 @@ dev = [
     { name = "pydantic-ai-harness", extra = ["smol"] },
     { name = "pyright" },
     { name = "pytest" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -86,6 +86,7 @@ requires-dist = [
     { name = "pydantic-ai-harness", specifier = "==0.68.0" },
     { name = "pydantic-ai-harness", extras = ["smol"], marker = "extra == 'sandboxd'", specifier = "==0.68.0" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = "==2.68.0" },
+    { name = "ruff", specifier = "==0.17.5" },
     { name = "uvicorn", specifier = ">=0.32" },
 ]
 provides-extras = ["sandboxd"]
@@ -96,7 +97,6 @@ dev = [
     { name = "pydantic-ai-harness", extras = ["smol"], specifier = "==0.68.0" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]

@@ -15,11 +15,11 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from autoreviewer.github import Conclusion, Repo, ReviewComment, ReviewEvent
 from autoreviewer.review import durable
 from autoreviewer.review.agents import correctness_agent, verifier_agent
 from autoreviewer.web.routing import PullRequestUpdated
@@ -44,17 +44,21 @@ class PersistentGitHub(FakeGitHub):
             github.checks, github.reviews = saved["checks"], saved["reviews"]
         return github
 
-    async def start_check(self, *args: Any, **kwargs: Any) -> int:
-        check_id = await super().start_check(*args, **kwargs)
+    async def start_check(self, repo: Repo, head_sha: str) -> int:
+        check_id = await super().start_check(repo, head_sha)
         self._save()
         return check_id
 
-    async def finish_check(self, *args: Any, **kwargs: Any) -> None:
-        await super().finish_check(*args, **kwargs)
+    async def finish_check(
+        self, repo: Repo, check_id: int, *, conclusion: Conclusion, title: str, summary: str
+    ) -> None:
+        await super().finish_check(repo, check_id, conclusion=conclusion, title=title, summary=summary)
         self._save()
 
-    async def create_review(self, *args: Any, **kwargs: Any) -> None:
-        await super().create_review(*args, **kwargs)
+    async def create_review(
+        self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]
+    ) -> None:
+        await super().create_review(repo, number, commit_sha=commit_sha, event=event, body=body, comments=comments)
         self._save()
 
 
