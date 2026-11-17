@@ -37,6 +37,8 @@ class Case:
     host: str | None = None
     """A real commit to use as the PR (its parent is the base); None means a change to `corpus`."""
     corpus: str = CORPUS_COMMIT
+    also: tuple[tuple[str, str], ...] = ()
+    """More (old, new) edits in the same file, applied before the main one (e.g. an import the change needs)."""
 
     @property
     def commits(self) -> tuple[str, str]:

@@ -27,14 +27,13 @@ from autoreviewer.github import (
 )
 from autoreviewer.review.agents import (
     correctness_agent,
-    security_agent,
-    security_verifier_agent,
+    lens_pair,
     simplify_agent,
     simplify_checker_agent,
     verifier_agent,
 )
 from autoreviewer.review.job import ReviewDeps
-from autoreviewer.review.schemas import LensReport, Verification
+from autoreviewer.review.schemas import LensKind, LensReport, Verification
 from autoreviewer.review.simplify import Simplifier, SimplifierFactory
 from autoreviewer.review.workspace import Workspace, fetch
 
@@ -286,14 +285,15 @@ def simplifier(
     )
 
 
-def security_agents(
+def lens_agents(
     findings: list[dict[str, Any]],
     confirm: Callable[[dict[str, Any]], bool] = lambda f: True,
     *,
+    kind: LensKind = "security",
     prompts: list[str] | None = None,
     crash: bool = False,
 ) -> Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]:
-    """A fake security factory: reports `findings`, records its prompts, or crashes."""
+    """A fake extra lens: reports `findings`, records its prompts, or crashes."""
 
     def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if crash:
@@ -302,7 +302,4 @@ def security_agents(
             prompts.append(_prompt(messages))
         return _final(info, {"findings": findings, "overall_correct": not findings, "reviewed": []})
 
-    return lambda ws: (
-        security_agent(FunctionModel(lens), ws),
-        security_verifier_agent(verifier_model(confirm), ws),
-    )
+    return lambda ws: lens_pair(kind, FunctionModel(lens), verifier_model(confirm), ws)

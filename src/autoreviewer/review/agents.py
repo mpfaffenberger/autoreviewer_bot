@@ -18,7 +18,7 @@ from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
 from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.schemas import LensReport, SimplifyReport, SimplifyVerdict, Verification
+from autoreviewer.review.schemas import LensKind, LensReport, SimplifyReport, SimplifyVerdict, Verification
 from autoreviewer.review.workspace import Workspace
 
 PROMPTS = Path(__file__).parent / "prompts"
@@ -100,17 +100,29 @@ def verifier_agent(
     return _agent(model, workspace, Verification, _prompt("verifier.md"), context_window)
 
 
-def security_agent(
-    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
-) -> Agent[None, LensReport]:
-    """Run it with `instructions=security_references(paths)`: the references depend on the PR's languages."""
-    return _agent(model, workspace, LensReport, _prompt("security.md"), context_window)
+LENS_PROMPTS: dict[LensKind, tuple[str, str]] = {
+    "security": ("security.md", "security_verifier.md"),
+    "dry": ("dry.md", "dry_verifier.md"),
+}
+"""Each extra lens's (lens prompt, verifier prompt)."""
 
 
-def security_verifier_agent(
-    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
-) -> Agent[None, Verification]:
-    return _agent(model, workspace, Verification, _prompt("security_verifier.md"), context_window)
+def lens_pair(
+    kind: LensKind,
+    lens_model: Model,
+    verifier_model: Model,
+    workspace: Workspace,
+    *,
+    lens_window: int = QWEN_CONTEXT_WINDOW,
+    verifier_window: int = DEEPSEEK_CONTEXT_WINDOW,
+) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
+    """(lens, verifier) for one extra lens. The security lens also wants `security_references` as run
+    instructions."""
+    lens_prompt, verifier_prompt = LENS_PROMPTS[kind]
+    return (
+        _agent(lens_model, workspace, LensReport, _prompt(lens_prompt), lens_window),
+        _agent(verifier_model, workspace, Verification, _prompt(verifier_prompt), verifier_window),
+    )
 
 
 def security_references(paths: Iterable[str]) -> str:

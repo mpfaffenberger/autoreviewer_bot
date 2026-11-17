@@ -21,7 +21,7 @@ from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
 from autoreviewer.review.progress import Progress
-from autoreviewer.review.schemas import Finding, LensReport, Verification
+from autoreviewer.review.schemas import ADVISORY_KINDS, Finding, LensKind, LensReport, Verification
 
 logger = logging.getLogger("autoreviewer.review")
 
@@ -84,7 +84,7 @@ class Outcome:
                     target[target.index(same)] = finding
 
     def is_blocking(self, finding: Finding) -> bool:
-        return finding.kind != "simplify" and finding.priority <= self.block_at  # simplifications are optional
+        return finding.kind not in ADVISORY_KINDS and finding.priority <= self.block_at
 
     @property
     def blocking(self) -> bool:
@@ -231,27 +231,24 @@ async def _judge(
             place(outcome, finding, pr.patches.get(finding.path, ""))
 
 
-async def review_security(
+async def review_lens(
     pr: PullRequestText,
     lens: Agent[None, LensReport],
     verifier: Agent[None, Verification],
     *,
-    instructions: str,
+    kind: LensKind,
+    instructions: str | None,
     progress: Progress,
     block_at: int = BLOCK_AT_PRIORITY,
 ) -> Outcome:
-    """The security lens over the whole PR, always fresh: a continued review must still re-check every
-    vulnerability, or one found on an earlier commit would silently stop blocking."""
+    """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier."""
     run = await lens.run(
-        lens_prompt(pr),
-        instructions=instructions,
-        capabilities=[progress.watch("security")],
-        usage_limits=LENS_LIMITS,
+        lens_prompt(pr), instructions=instructions, capabilities=[progress.watch(kind)], usage_limits=LENS_LIMITS
     )
-    findings = [finding.model_copy(update={"kind": "security"}) for finding in run.output.findings]
+    findings = [finding.model_copy(update={"kind": kind}) for finding in run.output.findings]
     outcome = Outcome(block_at=block_at)
-    await _judge(findings, pr, verifier, progress, outcome, label="security verifier")
-    logger.info("security: %d requests, %d found, %d posted", run.usage.requests, len(findings), len(outcome.posted))
+    await _judge(findings, pr, verifier, progress, outcome, label=f"{kind} verifier")
+    logger.info("%s: %d requests, %d found, %d posted", kind, run.usage.requests, len(findings), len(outcome.posted))
     return outcome
 
 

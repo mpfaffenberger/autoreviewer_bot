@@ -22,7 +22,9 @@ class Settings:
     logfire_include_content: bool = True
     """Send prompts, model output, and tool results (the reviewed code) to Logfire with each trace."""
     security: bool = True
-    """Run the security lens (see review/pipeline.py, review_security) alongside correctness."""
+    """Run the security lens alongside correctness (see review/pipeline.py, review_lens)."""
+    dry: bool = True
+    """Run the DRY lens: new code that re-implements an existing helper, the stdlib, or a dependency."""
     simplify: bool = True
     """Post optional one-click simplifications of the code a PR adds (see review/simplify.py)."""
     block_at_priority: int = 1
@@ -58,6 +60,7 @@ class Settings:
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
             simplify=parse_bool(env, "AUTOREVIEWER_SIMPLIFY", default=True),
             security=parse_bool(env, "AUTOREVIEWER_SECURITY", default=True),
+            dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True),
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],
