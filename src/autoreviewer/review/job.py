@@ -9,9 +9,10 @@ checkpointed), and posting skips a commit the bot already reviewed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import tempfile
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -110,13 +111,26 @@ async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated, check_id: 
     With `check_id`, the check run shows what the review is doing while it runs (see progress.py).
     """
     progress = Progress()
-    publisher = asyncio.create_task(_publish(deps, repo_of(pull), check_id, progress)) if check_id else None
-    try:
+    async with _publishing(deps, repo_of(pull), check_id, progress):
         result = await _guarded_review(deps, pull, progress)
-    finally:
-        if publisher is not None:
-            publisher.cancel()
     return replace(result, details=progress.details())
+
+
+@contextlib.asynccontextmanager
+async def _publishing(deps: ReviewDeps, repo: Repo, check_id: int | None, progress: Progress) -> AsyncIterator[None]:
+    """Publish `progress` to the check run for the duration of the block (if there is a check run)."""
+    if check_id is None:
+        yield
+        return
+    done = asyncio.Event()
+    publisher = asyncio.create_task(_publish(deps, repo, check_id, progress, done))
+    try:
+        yield
+    finally:
+        done.set()
+        # Wait, don't cancel: an update cut off mid-request could still reach GitHub after the final result
+        # and overwrite it with progress.
+        await publisher
 
 
 async def _guarded_review(deps: ReviewDeps, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
@@ -133,12 +147,14 @@ async def _guarded_review(deps: ReviewDeps, pull: PullRequestUpdated, progress: 
         )
 
 
-async def _publish(deps: ReviewDeps, repo: Repo, check_id: int, progress: Progress) -> None:
-    """Show progress on the check run every PROGRESS_INTERVAL_S while something changed. Best-effort: GitHub
-    limits how often an App may write, and a failed update must never touch the review."""
+async def _publish(deps: ReviewDeps, repo: Repo, check_id: int, progress: Progress, done: asyncio.Event) -> None:
+    """Show progress on the check run every PROGRESS_INTERVAL_S while something changed, until `done`.
+    Best-effort: GitHub limits how often an App may write, and a failed update must never touch the review."""
     published = progress.version
     while True:
-        await asyncio.sleep(PROGRESS_INTERVAL_S)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(done.wait(), PROGRESS_INTERVAL_S)
+            return
         if progress.version == published:
             continue
         published = progress.version

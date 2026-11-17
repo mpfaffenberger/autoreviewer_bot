@@ -8,6 +8,7 @@ code blocks, where markdown and HTML do nothing.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCall
 from pydantic_ai.models import ModelRequestContext
 
 from autoreviewer.review.render import sanitize
+
+logger = logging.getLogger("autoreviewer.progress")
 
 MAX_ACTIVITY = 40
 """Recent events shown, newest first."""
@@ -85,7 +88,10 @@ class _Watch(AbstractCapability[None]):
     async def after_model_request(
         self, ctx: RunContext[None], *, request_context: ModelRequestContext, response: ModelResponse
     ) -> ModelResponse:
-        self.progress.record(self.who, response)
+        try:
+            self.progress.record(self.who, response)
+        except Exception:  # watching must never change the run it watches
+            logger.warning("could not record progress for %s", self.who, exc_info=True)
         return response
 
 

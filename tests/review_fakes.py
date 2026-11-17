@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from collections.abc import Callable
@@ -173,6 +174,7 @@ class FakeGitHub:
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_check_updates: bool = False
+    check_update_delay: float = 0.0
     fail_reactions: bool = False
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
@@ -203,6 +205,7 @@ class FakeGitHub:
         return len(self.checks)
 
     async def update_check(self, repo: Repo, check_id: int, *, title: str, summary: str, text: str) -> None:
+        await asyncio.sleep(self.check_update_delay)
         if self.fail_check_updates:
             raise RuntimeError("secondary rate limit")
         self.check_updates.append({"check_id": check_id, "title": title, "summary": summary, "text": text})
