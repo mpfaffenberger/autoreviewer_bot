@@ -132,6 +132,29 @@ calibrated **confidence** (0-10, from Qodo PR-Agent). Lessons taken from publish
 - **Explicit acceptance criteria** in the verifier, so precision is a rubric, not a mood.
 - **Comments state the trigger first**, then the consequence. No praise, no "please verify".
 
+### Security
+
+`review_security` in `review/pipeline.py`, run alongside correctness, always on the **whole PR**: a
+continued review must re-check every vulnerability, or one found on an earlier commit would quietly stop
+blocking. If it fails, the review fails (no verdict); approving without it would be a fail-open default.
+
+- **Lens** (`prompts/security.md`, Qwen): learn the security model, compare the change against it, trace
+  untrusted input to sensitive operations. Injection and code execution, authn/z, secrets and crypto,
+  data exposure, insecure defaults. Excludes denial of service, resource leaks, rate limits, and
+  test-only code. Method, categories, and exclusions are adapted from Anthropic's
+  claude-code-security-review (MIT).
+- **References by language**: `agents.security_references()` maps the PR's file extensions to Trail of
+  Bits reference files, vendored unmodified in `prompts/vendor/trailofbits/` (CC-BY-SA-4.0): insecure
+  defaults and auth pitfalls always, plus `sharp-edges/lang-<language>.md` per changed language. They are
+  passed as run instructions: chosen by code, so the model can't skip them, and never read from the
+  repository under review. (The skills' `SKILL.md` workflows need tools a read-only reviewer lacks, so
+  only their reference files are used.)
+- **Verifier** (`prompts/security_verifier.md`, DeepSeek): introduced by the change, attacker-reachable,
+  concrete exploit with nothing on the path stopping it, not excluded. Adapted from Anthropic's findings
+  filter.
+- Findings share the P0-P3 gate. When both lenses report one line, the more urgent finding is posted.
+  `AUTOREVIEWER_SECURITY=false` turns it off.
+
 ### Simplify (optional, one-click)
 
 `review/simplify.py`, guided by pstack's principles (Lauren Tan's, MIT, vendored verbatim and pinned in

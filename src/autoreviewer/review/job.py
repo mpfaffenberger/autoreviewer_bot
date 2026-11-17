@@ -28,13 +28,22 @@ from autoreviewer.github import (
     ReviewComment,
     ReviewRejected,
 )
+from autoreviewer.review.agents import security_references
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
-from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, place, review
+from autoreviewer.review.pipeline import (
+    BLOCK_AT_PRIORITY,
+    Continuation,
+    Outcome,
+    PullRequestText,
+    place,
+    review,
+    review_security,
+)
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import comment_body, review_body
-from autoreviewer.review.schemas import Finding, LensReport, Verification
+from autoreviewer.review.schemas import LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated
@@ -67,6 +76,8 @@ class ReviewDeps:
     """Confirmed findings at this priority or more urgent block the merge (1: P0 and P1)."""
     simplifier: SimplifierFactory | None = None
     """Optional one-click simplifications (see simplify.py); None skips them."""
+    security: AgentFactory | None = None
+    """(security lens, security verifier) over a checkout; None skips the security review."""
 
 
 @dataclass(frozen=True)
@@ -184,6 +195,7 @@ async def review_change(
     block_at: int = BLOCK_AT_PRIORITY,
     progress: Progress | None = None,
     simplifier: SimplifierFactory | None = None,
+    security: AgentFactory | None = None,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -230,20 +242,44 @@ async def review_change(
         progress = progress or Progress()
         # Continuing: only files changed since the last review, so each push doesn't repeat suggestions.
         scope = {change.path for change in continuation.changed_since} if continuation else None
-        outcome, suggestions = await asyncio.gather(
-            review(
-                pr,
-                lens,
-                verifier,
-                continuation=continuation,
-                lens_capabilities=[persistence] if persistence else (),
-                conversation=conversation,
-                block_at=block_at,
-                checked=typed,
-                progress=progress,
-            ),
-            suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope) if simplifier else _none(),
-        )
+        # A TaskGroup, not gather: if one lens fails, the others are cancelled instead of burning GPU on a
+        # review that has already failed.
+        async with asyncio.TaskGroup() as lenses:
+            correctness = lenses.create_task(
+                review(
+                    pr,
+                    lens,
+                    verifier,
+                    continuation=continuation,
+                    lens_capabilities=[persistence] if persistence else (),
+                    conversation=conversation,
+                    block_at=block_at,
+                    checked=typed,
+                    progress=progress,
+                )
+            )
+            security_task = None
+            if security is not None:
+                security_lens, security_verifier = security(workspace)
+                security_task = lenses.create_task(
+                    review_security(
+                        pr,
+                        security_lens,
+                        security_verifier,
+                        instructions=security_references(change.path for change in pr.reviewable),
+                        progress=progress,
+                        block_at=block_at,
+                    )
+                )
+            simplify_task = None
+            if simplifier is not None:
+                simplify_task = lenses.create_task(
+                    suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope)
+                )
+        outcome = correctness.result()
+        if security_task is not None:
+            outcome.absorb(security_task.result())
+        suggestions = simplify_task.result() if simplify_task is not None else []
         outcome.added_lines = sum(len(added_lines(patches.get(change.path, ""))) for change in pr.reviewable)
         for suggestion in suggestions:
             place(outcome, suggestion, patches.get(suggestion.path, ""))
@@ -278,10 +314,6 @@ async def _resumable(
     return prior
 
 
-async def _none() -> list[Finding]:
-    return []
-
-
 def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: Outcome) -> PriorReview:
     return PriorReview(
         run_id=run_id,
@@ -295,10 +327,14 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
             if f.kind == "correctness"
         ],
         dropped=[
-            {"path": f.path, "line": f.line, "title": f.title, "reason": reason} for f, reason in outcome.rejected
+            {"path": f.path, "line": f.line, "title": f.title, "reason": reason}
+            for f, reason in outcome.rejected
+            if f.kind == "correctness"
         ],
         # Never as "dropped": a verifier failure is no verdict, and the next review must look again.
-        unverified=[{"path": f.path, "line": f.line, "title": f.title} for f, _ in outcome.unverified],
+        unverified=[
+            {"path": f.path, "line": f.line, "title": f.title} for f, _ in outcome.unverified if f.kind == "correctness"
+        ],
     )
 
 
@@ -320,6 +356,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
             block_at=deps.block_at,
             progress=progress,
             simplifier=deps.simplifier,
+            security=deps.security,
         )
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close

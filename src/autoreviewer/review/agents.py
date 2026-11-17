@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from collections.abc import Iterable
+from pathlib import Path, PurePosixPath
 
 from pydantic_ai import Agent, AgentRetries
 from pydantic_ai.capabilities import LocalWorkspace
@@ -22,6 +23,17 @@ from autoreviewer.review.workspace import Workspace
 
 PROMPTS = Path(__file__).parent / "prompts"
 PSTACK = PROMPTS / "vendor" / "pstack"
+TRAIL_OF_BITS = PROMPTS / "vendor" / "trailofbits"
+
+LANGUAGES = {
+    ".py": "python", ".pyi": "python",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "javascript", ".tsx": "javascript", ".mts": "javascript", ".cts": "javascript",
+    ".c": "c", ".h": "c", ".cc": "c", ".cpp": "c", ".cxx": "c", ".hpp": "c", ".hh": "c",
+    ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+    ".cs": "csharp", ".php": "php", ".rb": "ruby", ".swift": "swift",
+}  # fmt: skip
+"""File extension -> Trail of Bits sharp-edges reference (TypeScript shares JavaScript's, C++ shares C's)."""
 
 LENS_LIMITS = UsageLimits(request_limit=10_000)
 VERIFIER_LIMITS = UsageLimits(request_limit=10_000)
@@ -86,6 +98,38 @@ def verifier_agent(
     model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
 ) -> Agent[None, Verification]:
     return _agent(model, workspace, Verification, _prompt("verifier.md"), context_window)
+
+
+def security_agent(
+    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
+) -> Agent[None, LensReport]:
+    """Run it with `instructions=security_references(paths)`: the references depend on the PR's languages."""
+    return _agent(model, workspace, LensReport, _prompt("security.md"), context_window)
+
+
+def security_verifier_agent(
+    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+) -> Agent[None, Verification]:
+    return _agent(model, workspace, Verification, _prompt("security_verifier.md"), context_window)
+
+
+def security_references(paths: Iterable[str]) -> str:
+    """Trail of Bits references for a PR touching `paths`: insecure defaults and auth pitfalls always, plus
+    each changed language's sharp edges. Chosen by code from file extensions, so the model can't skip them,
+    and read only from this package, never from the repository under review."""
+    languages = sorted(
+        {LANGUAGES[suffix] for path in paths if (suffix := PurePosixPath(path).suffix.lower()) in LANGUAGES}
+    )
+    files = [
+        *sorted((TRAIL_OF_BITS / "insecure-defaults").glob("*.md")),
+        TRAIL_OF_BITS / "sharp-edges" / "auth-patterns.md",
+        *(TRAIL_OF_BITS / "sharp-edges" / f"lang-{language}.md" for language in languages),
+    ]
+    sections = "\n\n".join(file.read_text().strip() for file in files)
+    return (
+        "# Security references (Trail of Bits skills, CC-BY-SA-4.0, unmodified)\n\n"
+        f"Background for languages in this PR: {', '.join(languages) or 'none recognised'}.\n\n{sections}"
+    )
 
 
 def simplify_agent(
