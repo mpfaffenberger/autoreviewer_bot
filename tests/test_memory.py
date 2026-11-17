@@ -13,12 +13,13 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import PullRequestState, Repo
 from autoreviewer.review.agents import correctness_agent, verifier_agent
-from autoreviewer.review.job import review_change
+from autoreviewer.review.job import ReviewDeps, Reviewed, review_and_post, review_change
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import Outcome
 from autoreviewer.review.schemas import LensReport, Verification
 from autoreviewer.review.workspace import Workspace
-from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, add_commit, finding, verifier_model
+from autoreviewer.web.routing import PullRequestUpdated
+from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, add_commit, finding, verifier_model
 
 pytestmark = pytest.mark.anyio
 
@@ -68,8 +69,10 @@ async def review_at(
         reader=github, source=LocalSource(github.repo), agents=spy.agents, work_dir=work,
         repo=REPO, number=NUMBER, state=state, head_sha=head, memory=memory, lens_version=version,
     )  # fmt: skip
-    assert isinstance(result, Outcome)
-    return result
+    assert isinstance(result, Reviewed)
+    if result.remember is not None:
+        memory.remember(CONVERSATION, result.remember)  # what the bot's job does once the PR is still open
+    return result.outcome
 
 
 @pytest.fixture
@@ -160,3 +163,64 @@ def test_conversation_ids_are_per_pr_and_case_insensitive() -> None:
         == "review:owner/repo#3"
     )
     assert conversation_id(REPO, 1) != conversation_id(REPO, 2)
+
+
+# --- closing a PR while it is being reviewed: forgetting wins (found by the bot reviewing PR #9) ------
+
+
+def closing_lens(github: FakeGitHub, *, then: str = "answer") -> LensSpy:
+    """A lens that closes the PR mid-run, like a merge landing while the review is still thinking."""
+    spy = LensSpy([finding(5)])
+
+    def model() -> FunctionModel:
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            github.pr_state = "closed"
+            if then == "crash":
+                raise RuntimeError("model server went away")
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={"findings": [finding(5)]})]
+            )
+
+        return FunctionModel(respond)
+
+    spy.model = model  # type: ignore[method-assign]
+    return spy
+
+
+def pull_event(repo: GitRepo, head: str) -> PullRequestUpdated:
+    return PullRequestUpdated(installation_id=1, owner=REPO.owner, repo=REPO.name, number=NUMBER, head_sha=head)
+
+
+def deps_with(github: FakeGitHub, spy: LensSpy, memory: ReviewMemory, work: Path) -> ReviewDeps:
+    return ReviewDeps(
+        github=github, source=LocalSource(github.repo), agents=spy.agents, work_dir=work, bot_login=BOT,
+        models_note="test", memory=memory, lens_version="v1",
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("then", ["answer", "crash"])
+async def test_a_pr_closed_mid_review_keeps_no_memory(
+    repo: GitRepo, memory: ReviewMemory, tmp_path: Path, then: str
+) -> None:
+    github = FakeGitHub(repo)
+    result = await review_and_post(
+        deps_with(github, closing_lens(github, then=then), memory, tmp_path), pull_event(repo, repo.head)
+    )
+
+    assert github.reviews == []
+    assert result.conclusion == "neutral"  # Superseded or Review failed, never a verdict
+    assert memory.last(CONVERSATION) is None
+    assert not (tmp_path / "steps").exists() or not any((tmp_path / "steps").iterdir())
+
+
+async def test_a_newer_head_keeps_the_memory_but_posts_nothing(
+    repo: GitRepo, memory: ReviewMemory, tmp_path: Path
+) -> None:
+    newer = add_commit(repo, {"stats.py": FIXED})
+    github = FakeGitHub(repo, head_shas=[repo.head, newer])  # moves on after the review starts
+    result = await review_and_post(
+        deps_with(github, LensSpy([finding(5)]), memory, tmp_path), pull_event(repo, repo.head)
+    )
+
+    assert github.reviews == [] and result.title == "Superseded"
+    assert memory.last(CONVERSATION).head_sha == repo.head  # type: ignore[union-attr]  # the next review continues from it

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from autoreviewer.github import PublicGitHub, PullRequestReader, Repo
-from autoreviewer.review.job import AgentFactory, CheckResult, review_change
+from autoreviewer.review.job import AgentFactory, CheckResult, Reviewed, review_change
 from autoreviewer.review.pipeline import Outcome
 from autoreviewer.review.render import comment_body
 from autoreviewer.review.workspace import PublicSource, RepoSource
@@ -92,7 +92,7 @@ async def review_pr(
         state=state,
         head_sha=state.head_sha,
     )  # no memory: on-demand reviews always start fresh
-    return Report(ref, state.head_sha, state.title, result)
+    return Report(ref, state.head_sha, state.title, result.outcome if isinstance(result, Reviewed) else result)
 
 
 EXIT_APPROVE, EXIT_REQUEST_CHANGES, EXIT_ERROR = 0, 1, 2

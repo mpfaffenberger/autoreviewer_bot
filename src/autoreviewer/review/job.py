@@ -63,6 +63,13 @@ class CheckResult:
     conclusion: Conclusion
 
 
+@dataclass(frozen=True)
+class Reviewed:
+    outcome: Outcome
+    remember: PriorReview | None
+    """What to save for the next review of this PR; None without memory."""
+
+
 class Superseded(Exception):
     """The PR moved on (new push, closed) while we worked; the newer event gets its own review."""
 
@@ -108,13 +115,14 @@ async def review_change(
     head_sha: str,
     memory: ReviewMemory | None = None,
     lens_version: str = "",
-) -> Outcome | CheckResult:
+) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
     With `memory`, a head that adds commits on top of the last reviewed one continues that review's
     conversation; anything else (first review, force-push, moved merge-base, changed prompt or model)
-    starts fresh. Returns the findings, or a CheckResult when there is nothing to review or it is too
-    large. Shared by the bot's job (which then posts) and on-demand reviews (which print).
+    starts fresh. Returns the findings (plus what to remember, which the caller saves only once it knows
+    the PR is still open), or a CheckResult when there is nothing to review or it is too large. Shared
+    by the bot's job (which then posts) and on-demand reviews (which print).
     """
     base = (await reader.compare(repo, state.base_sha, head_sha)).merge_base
     conversation = conversation_id(repo, number)
@@ -153,12 +161,11 @@ async def review_change(
             lens_capabilities=[persistence] if persistence else (),
             conversation=conversation,
         )
-    if memory is not None:
-        memory.remember(conversation, _prior_review(run_id, head_sha, base, lens_version, outcome))
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
     )
-    return outcome
+    remember = _prior_review(run_id, head_sha, base, lens_version, outcome) if memory is not None else None
+    return Reviewed(outcome, remember)
 
 
 async def _resumable(
@@ -196,23 +203,50 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
 
 async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> CheckResult:
     state = await _current(deps, repo, pull)
-    result = await review_change(
-        reader=deps.github,
-        source=deps.source,
-        agents=deps.agents,
-        work_dir=deps.work_dir,
-        repo=repo,
-        number=pull.number,
-        state=state,
-        head_sha=pull.head_sha,
-        memory=deps.memory,
-        lens_version=deps.lens_version,
-    )
+    conversation = conversation_id(repo, pull.number)
+    try:
+        result = await review_change(
+            reader=deps.github,
+            source=deps.source,
+            agents=deps.agents,
+            work_dir=deps.work_dir,
+            repo=repo,
+            number=pull.number,
+            state=state,
+            head_sha=pull.head_sha,
+            memory=deps.memory,
+            lens_version=deps.lens_version,
+        )
+    except Exception:
+        await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
+        raise
     if isinstance(result, CheckResult):
         return result
-    await _current(deps, repo, pull)  # the review took minutes; don't post against a commit that's gone
-    await _post(deps, repo, pull, result)
-    return _summary(result)
+
+    # The review took minutes. Forgetting wins: a PR closed meanwhile keeps nothing (its webhook already
+    # deleted the memory, and this review must not write it back). A newer head keeps this analysis, which
+    # the next review can continue from, but gets no post: it has its own review coming.
+    latest = await deps.github.get_pull(repo, pull.number)
+    if latest.state != "open":
+        if deps.memory is not None:
+            deps.memory.forget(conversation)
+        raise Superseded
+    if deps.memory is not None and result.remember is not None:
+        deps.memory.remember(conversation, result.remember)
+    if latest.head_sha != pull.head_sha:
+        raise Superseded
+    await _post(deps, repo, pull, result.outcome)
+    return _summary(result.outcome)
+
+
+async def _forget_if_closed(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, conversation: str) -> None:
+    if deps.memory is None:
+        return
+    try:
+        if (await deps.github.get_pull(repo, pull.number)).state != "open":
+            deps.memory.forget(conversation)
+    except Exception:  # never let cleanup hide the original failure
+        logger.exception("could not check whether %s was closed", conversation)
 
 
 async def _current(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> PullRequestState:
