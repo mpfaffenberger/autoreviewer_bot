@@ -99,8 +99,78 @@ async def test_public_github_sends_credentials_only_when_given_a_token(
         return httpx2.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
 
     github = PublicGitHub(token)
-    github._github = type(github._github)(
-        github._github.auth, async_transport=httpx2.MockTransport(handle)
-    )
+    github._github = type(github._github)(github._github.auth, async_transport=httpx2.MockTransport(handle))
     assert await github.merge_base(Repo(0, "someone", "elsewhere"), "b" * 40, "a" * 40) == "c" * 40
     assert [value.lower() if value else None for value in seen] == [expected_auth.lower() if expected_auth else None]
+
+
+# --- exit codes: 0 approve, 1 request changes, 2 error (a crash must never look like a verdict) ------
+
+
+@pytest.fixture
+def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from autoreviewer.web.config import Settings
+
+    settings = Settings(
+        app_id=1,
+        app_slug="s",
+        webhook_secret="x",
+        private_key="k",
+        repos=frozenset(),
+        boodleton_api_key="test-key",
+        work_dir=tmp_path,
+    )
+    monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls, env=None: settings))
+
+
+def _report(result: object) -> object:
+    from autoreviewer.ondemand import Report
+
+    return Report(REF, "a" * 40, "title", result)  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("cli")
+@pytest.mark.parametrize(("blocking", "code"), [(True, 1), (False, 0)])
+def test_verdicts_map_to_exit_codes(monkeypatch: pytest.MonkeyPatch, blocking: bool, code: int) -> None:
+    from autoreviewer import ondemand
+    from autoreviewer.review.pipeline import Outcome
+    from autoreviewer.review.schemas import Finding
+
+    outcome = Outcome(inline=[Finding.model_validate(finding(5))] if blocking else [])
+
+    async def fake_review(*_: object, **__: object) -> object:
+        return _report(outcome)
+
+    monkeypatch.setattr(ondemand, "review_pr", fake_review)
+    assert ondemand.run(["o/r#1"]) == code
+
+
+@pytest.mark.usefixtures("cli")
+def test_a_crash_exits_2_not_1(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from autoreviewer import ondemand
+
+    async def boom(*_: object, **__: object) -> object:
+        raise RuntimeError("GitHub is down")
+
+    monkeypatch.setattr(ondemand, "review_pr", boom)
+    assert ondemand.run(["o/r#1"]) == ondemand.EXIT_ERROR
+    assert "error: could not review o/r#1: RuntimeError: GitHub is down" in capsys.readouterr().err
+
+
+def test_missing_configuration_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    from autoreviewer import ondemand
+    from autoreviewer.web.config import Settings
+
+    def broken(cls: type, env: object = None) -> Settings:
+        raise KeyError("BOODLETON_API_KEY")
+
+    monkeypatch.setattr(Settings, "from_env", classmethod(broken))
+    assert ondemand.run(["o/r#1"]) == ondemand.EXIT_ERROR
+
+
+def test_a_bad_reference_exits_2() -> None:
+    from autoreviewer import ondemand
+
+    with pytest.raises(SystemExit) as exit_info:
+        ondemand.run(["not-a-pr"])
+    assert exit_info.value.code == ondemand.EXIT_ERROR
