@@ -132,6 +132,24 @@ calibrated **confidence** (0-10, from Qodo PR-Agent). Lessons taken from publish
 - **Explicit acceptance criteria** in the verifier, so precision is a rubric, not a mood.
 - **Comments state the trigger first**, then the consequence. No praise, no "please verify".
 
+### Simplify (optional, one-click)
+
+`review/simplify.py`, guided by pstack's principles (Lauren Tan's, MIT, vendored verbatim and pinned in
+`prompts/vendor/pstack/`): laziness, subtract before you add, minimize reader load. Its list of comments
+worth keeping is adapted from pstack's comment-sicko. It runs alongside the correctness lens.
+
+1. Qwen proposes exact replacements `{path, start_line, end_line, replacement}` for **lines the PR adds**,
+   aiming at roughly a fifth of them where the code allows, never inventing cuts to hit a number.
+2. Code drops any it can prove wrong: outside the added lines, not shorter, overlapping, carrying a
+   secret, or (Python) leaving the file unparseable (`compile(..., ONLY_AST)`, never executed).
+3. DeepSeek checks each survivor behaves identically and is genuinely simpler.
+4. Survivors are posted as GitHub multi-line `suggestion` comments (one click to apply). They **never
+   block**, at any `AUTOREVIEWER_BLOCK_AT_PRIORITY`, and the review summary says how much of the added
+   code they cut. A failure anywhere costs only the suggestions. `AUTOREVIEWER_SIMPLIFY=false` turns it off.
+
+When a review continues on new commits, only files changed since the last review are considered, so
+pushes don't repeat the same suggestions.
+
 ### Deterministic checks (no model)
 
 Rules a tool can decide exactly are a linter's job, not a lens's. `review/lint.py` runs ruff on the

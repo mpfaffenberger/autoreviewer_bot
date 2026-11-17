@@ -28,13 +28,14 @@ from autoreviewer.github import (
     ReviewComment,
     ReviewRejected,
 )
-from autoreviewer.review.diff import MAX_CHANGED_LINES, select
+from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
-from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, review
+from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Continuation, Outcome, PullRequestText, place, review
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import comment_body, review_body
-from autoreviewer.review.schemas import LensReport, Verification
+from autoreviewer.review.schemas import Finding, LensReport, Verification
+from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated
 
@@ -64,6 +65,8 @@ class ReviewDeps:
     """Fingerprint of the lens prompt and model (see agents.lens_version)."""
     block_at: int = BLOCK_AT_PRIORITY
     """Confirmed findings at this priority or more urgent block the merge (1: P0 and P1)."""
+    simplifier: SimplifierFactory | None = None
+    """Optional one-click simplifications (see simplify.py); None skips them."""
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,7 @@ async def review_change(
     lens_version: str = "",
     block_at: int = BLOCK_AT_PRIORITY,
     progress: Progress | None = None,
+    simplifier: SimplifierFactory | None = None,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -223,17 +227,26 @@ async def review_change(
             typed = []
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
-        outcome = await review(
-            pr,
-            lens,
-            verifier,
-            continuation=continuation,
-            lens_capabilities=[persistence] if persistence else (),
-            conversation=conversation,
-            block_at=block_at,
-            checked=typed,
-            progress=progress,
+        progress = progress or Progress()
+        # Continuing: only files changed since the last review, so each push doesn't repeat suggestions.
+        scope = {change.path for change in continuation.changed_since} if continuation else None
+        outcome, suggestions = await asyncio.gather(
+            review(
+                pr,
+                lens,
+                verifier,
+                continuation=continuation,
+                lens_capabilities=[persistence] if persistence else (),
+                conversation=conversation,
+                block_at=block_at,
+                checked=typed,
+                progress=progress,
+            ),
+            suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope) if simplifier else _none(),
         )
+        outcome.added_lines = sum(len(added_lines(patches.get(change.path, ""))) for change in pr.reviewable)
+        for suggestion in suggestions:
+            place(outcome, suggestion, patches.get(suggestion.path, ""))
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
     )
@@ -263,6 +276,10 @@ async def _resumable(
     if comparison.status != "ahead":
         return None  # force-push, rebase, or reset: the old conversation describes code that's gone
     return prior
+
+
+async def _none() -> list[Finding]:
+    return []
 
 
 def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: Outcome) -> PriorReview:
@@ -302,6 +319,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
             lens_version=deps.lens_version,
             block_at=deps.block_at,
             progress=progress,
+            simplifier=deps.simplifier,
         )
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
@@ -361,7 +379,8 @@ async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome:
             event=event,
             body=review_body(outcome, footer=footer),
             comments=[
-                ReviewComment(f.path, f.line, comment_body(f, blocking=outcome.is_blocking(f))) for f in outcome.inline
+                ReviewComment(f.path, f.line, comment_body(f, blocking=outcome.is_blocking(f)), f.start_line)
+                for f in outcome.inline
             ],
         )
     except ReviewRejected:

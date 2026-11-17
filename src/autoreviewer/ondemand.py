@@ -26,6 +26,7 @@ from autoreviewer.github import PublicGitHub, PullRequestReader, Repo
 from autoreviewer.review.job import AgentFactory, CheckResult, Reviewed, review_change
 from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Outcome
 from autoreviewer.review.render import comment_body
+from autoreviewer.review.simplify import SimplifierFactory
 from autoreviewer.review.workspace import PublicSource, RepoSource
 
 logger = logging.getLogger("autoreviewer.ondemand")
@@ -99,6 +100,7 @@ async def review_pr(
     agents: AgentFactory,
     work_dir: Path,
     block_at: int = BLOCK_AT_PRIORITY,
+    simplifier: SimplifierFactory | None = None,
 ) -> Report:
     repo = Repo(installation_id=0, owner=ref.owner, name=ref.repo)  # no App installation involved
     state = await reader.get_pull(repo, ref.number)
@@ -112,13 +114,14 @@ async def review_pr(
         state=state,
         head_sha=state.head_sha,
         block_at=block_at,
+        simplifier=simplifier,
     )  # no memory: on-demand reviews always start fresh
     return Report(ref, state.head_sha, state.title, result.outcome if isinstance(result, Reviewed) else result)
 
 
 def run(argv: list[str] | None = None) -> int:
     from autoreviewer import logs, telemetry
-    from autoreviewer.web.app import build_agent_factory
+    from autoreviewer.web.app import build_agent_factory, build_simplifier_factory
     from autoreviewer.web.config import Settings
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -144,6 +147,7 @@ def run(argv: list[str] | None = None) -> int:
                 agents=build_agent_factory(settings),
                 work_dir=settings.work_dir,
                 block_at=settings.block_at_priority,
+                simplifier=build_simplifier_factory(settings),
             )
         )
     except Exception as error:  # any failure is an error, never a verdict

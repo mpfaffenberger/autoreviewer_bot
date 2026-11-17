@@ -63,13 +63,15 @@ class Outcome:
     overall_correct: bool = True
     """The lens's overall verdict on the change (Codex-style), alongside its findings."""
     reviewed: list[str] = field(default_factory=list[str])
+    added_lines: int = 0
+    """Lines the PR adds in reviewable files: what simplifications are measured against."""
 
     @property
     def posted(self) -> list[Finding]:
         return [*self.inline, *self.general]
 
     def is_blocking(self, finding: Finding) -> bool:
-        return finding.priority <= self.block_at
+        return finding.kind != "simplify" and finding.priority <= self.block_at  # simplifications are optional
 
     @property
     def blocking(self) -> bool:
@@ -158,7 +160,7 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
     return unique[:MAX_FINDINGS]
 
 
-def _place(outcome: Outcome, finding: Finding, patch: str) -> None:
+def place(outcome: Outcome, finding: Finding, patch: str) -> None:
     (outcome.inline if finding.line in commentable_lines(patch) else outcome.general).append(finding)
 
 
@@ -226,9 +228,9 @@ async def review(
             # The verifier read the code too: its corrections win.
             corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
             finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
-            _place(outcome, finding, pr.patches.get(finding.path, ""))
+            place(outcome, finding, pr.patches.get(finding.path, ""))
     for finding in checked:  # proven by a tool, not a model: nothing for a verifier to judge
-        _place(outcome, finding, pr.patches.get(finding.path, ""))
+        place(outcome, finding, pr.patches.get(finding.path, ""))
     compacted = compaction_stats(lens_run.all_messages())
     logger.info(
         "review: lens made %d requests and %d tool calls (compaction cleared %d, deduplicated %d results); "
