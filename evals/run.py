@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models import Model
 
 from autoreviewer.github import PullRequestState, Repo
 from autoreviewer.review.agents import (
@@ -37,6 +37,7 @@ from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps,
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.app import lens
+from autoreviewer.web.config import Settings, model_lanes_from
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
@@ -44,7 +45,8 @@ from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results")
-CONCURRENCY = 2
+CONCURRENCY = Settings.max_concurrent_jobs
+"""Cases at once: as many as the bot runs reviews, so cases don't queue behind each other's model lanes."""
 
 
 def _snapshot(path: Path, commit: str) -> None:
@@ -91,15 +93,18 @@ def build_repo(case: Case, parent: Path) -> tuple[GitRepo, list[int]]:
     return GitRepo(path, base, head), lines
 
 
-def models_from_env() -> tuple[OpenAIChatModel, OpenAIChatModel]:
-    """(lens model, verifier model) on Boodleton, as configured for the bot."""
+def models_from_env() -> tuple[Model, Model]:
+    """(lens model, verifier model) on Boodleton, as configured for the bot, with the bot's lanes."""
     base_url = os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1")
     key = os.environ["BOODLETON_API_KEY"]
+    lanes = model_lanes_from(os.environ)  # the bot's rule, blank included
+
+    def model(name: str) -> Model:
+        return boodleton_model(name, base_url=base_url, api_key=key, lanes=lanes.get(name))
+
     lens = os.environ.get("AUTOREVIEWER_LENS_MODEL", "qwen3.8-flash-next")
     verifier = os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", "deepseek-v4.1-flash")
-    return boodleton_model(lens, base_url=base_url, api_key=key), boodleton_model(
-        verifier, base_url=base_url, api_key=key
-    )
+    return model(lens), model(verifier)
 
 
 def hits(findings: list[Finding], case: Case, lines: list[int]) -> bool:

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
-from pydantic_ai import Agent, AgentRetries
+from pydantic_ai import Agent, AgentRetries, ConcurrencyLimiter
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
+from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
@@ -49,8 +51,21 @@ Exploring means guessing paths: a few misses on a directory that doesn't exist m
 review, as 3 did on PR #5. Twenty-five misses in a row of one tool means the model is stuck."""
 
 
-def boodleton_model(name: str, *, base_url: str, api_key: str) -> OpenAIChatModel:
-    return OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key))
+def boodleton_model(name: str, *, base_url: str, api_key: str, lanes: int | None = None) -> Model:
+    """A model on Boodleton; with `lanes`, at most that many requests to it at once across this process."""
+    model = OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key))
+    return model if lanes is None else with_lanes(model, name, lanes)
+
+
+def with_lanes(model: Model, name: str, lanes: int) -> Model:
+    """`model` sharing one process-wide limiter with every other model of this name: requests beyond `lanes`
+    wait here, rather than in the model server's queue where other users wait too."""
+    return ConcurrencyLimitedModel(model, limiter=_lanes(name, lanes))
+
+
+@functools.cache
+def _lanes(name: str, lanes: int) -> ConcurrencyLimiter:
+    return ConcurrencyLimiter(max_running=lanes, name=f"{name} lanes")
 
 
 def _read_only_repo(root: Path) -> list[LocalWorkspace[None] | FileSystem[None]]:

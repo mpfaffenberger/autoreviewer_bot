@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
+DEFAULT_MODEL_LANES = {"qwen3.8-flash-next": 3, "deepseek-v4.1-flash": 4}
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,10 @@ class Settings:
     """After this, every lens wraps up with what it has; a review cut short never approves."""
     hard_deadline_minutes: float = 50
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
+    model_lanes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_MODEL_LANES))
+    """At most this many requests at once to each model, across every review (AUTOREVIEWER_MODEL_LANES, e.g.
+    "qwen3.8-flash-next=3,deepseek-v4.1-flash=4"). Qwen's server has 3 lanes; DeepSeek's has more, but it's
+    shared. Models not listed are unlimited."""
     max_concurrent_jobs: int = 1
     """One review at a time: each already runs three Qwen agents in parallel (correctness, security, simplify),
     and Qwen's server has 3 lanes. Two at once left 6 of 9 requests waiting and pushed both past their deadline."""
@@ -62,6 +67,7 @@ class Settings:
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
             max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
+            model_lanes=model_lanes_from(env),
             soft_deadline_minutes=float(env.get("AUTOREVIEWER_SOFT_DEADLINE_MINUTES", cls.soft_deadline_minutes)),
             hard_deadline_minutes=float(env.get("AUTOREVIEWER_HARD_DEADLINE_MINUTES", cls.hard_deadline_minutes)),
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
@@ -92,3 +98,20 @@ def parse_bool(env: Mapping[str, str], name: str, *, default: bool) -> bool:
     if value in _TRUE | _FALSE:
         return value in _TRUE
     raise ValueError(f"{name}={env[name]!r}: expected true/false (or 1/0, yes/no, on/off)")
+
+
+def model_lanes_from(env: Mapping[str, str]) -> dict[str, int]:
+    """AUTOREVIEWER_MODEL_LANES, or the defaults when it's missing or blank (a placeholder line must never switch
+    the limits off). Shared by the bot and the evals."""
+    return parse_lanes(env.get("AUTOREVIEWER_MODEL_LANES", "")) or dict(DEFAULT_MODEL_LANES)
+
+
+def parse_lanes(value: str) -> dict[str, int]:
+    """ "model=3,other=4" -> {"model": 3, "other": 4}; a malformed entry stops startup. Blank -> {}."""
+    lanes: dict[str, int] = {}
+    for item in filter(None, (part.strip() for part in value.split(","))):
+        name, _, count = item.rpartition("=")
+        if not name or not count.isdigit() or int(count) < 1:
+            raise ValueError(f"AUTOREVIEWER_MODEL_LANES: expected model=lanes (lanes >= 1), got {item!r}")
+        lanes[name] = int(count)
+    return lanes

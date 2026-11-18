@@ -352,6 +352,14 @@ the model names in reviewer config. Prefer the allowlist.
 
 ---
 
+
+**Lanes (measured 2026-11-18).** Qwen's server has 3 lanes (`max_batch_size` 3); DeepSeek's has more but is
+shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
+`ConcurrencyLimitedModel`): `AUTOREVIEWER_MODEL_LANES`, default Qwen 3 and DeepSeek 4. Excess requests wait in
+the bot rather than in the model server's queue, where everyone else waits too. One review runs at a time
+(`AUTOREVIEWER_MAX_CONCURRENT_JOBS=1`): a review already runs three Qwen finders in parallel, and two at once left
+6 of 9 requests queued at the server and pushed both past their deadline.
+
 ## 8. Subscriptions ("as a service")
 
 A **GitHub App** install *is* the subscription unit. The user installs it on an
