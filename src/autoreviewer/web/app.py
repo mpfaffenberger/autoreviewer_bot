@@ -119,6 +119,10 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
     )
 
 
+MAX_DRY_POSTED = 3
+"""The eval's clean 786-line commit drew 8 DRY comments, mostly true but too many to read: keep 3."""
+
+
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:
     """The enabled lenses beside correctness, on the same models. Security reviews the whole PR every time
     (it can block); DRY findings are advice, so a continued review only looks at what changed."""
@@ -141,7 +145,7 @@ def build_lenses(settings: Settings) -> tuple[Lens, ...]:
     if settings.security:
         lenses.append(Lens("security", agents("security"), instructions=security_references))
     if settings.dry:
-        lenses.append(Lens("dry", agents("dry"), whole_pr=False))
+        lenses.append(Lens("dry", agents("dry"), whole_pr=False, max_posted=MAX_DRY_POSTED))
     return tuple(lenses)
 
 

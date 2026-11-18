@@ -212,9 +212,11 @@ class Judge:
         kind: Literal["correctness"] | LensKind = "correctness",
         label: str,
         publish: Publish | None = None,
+        limit: int = MAX_FINDINGS,
     ) -> None:
+        """`limit`: how many findings are verified at most, counting only those past the free filters."""
         self._pr, self._verifier, self._progress, self._outcome = pr, verifier, progress, outcome
-        self._kind, self._label, self._publish = kind, label, publish
+        self._kind, self._label, self._publish, self._limit = kind, label, publish, limit
         self._reviewable = {change.path for change in pr.reviewable}
         self._slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
         self._tasks: list[asyncio.Task[None]] = []
@@ -243,8 +245,8 @@ class Judge:
         if finding.confidence < MIN_CONFIDENCE:
             self._record(self._outcome.low_confidence, key, finding)
             return "Below the confidence needed to verify it: not reported."
-        if current is None and len(self._latest) >= MAX_FINDINGS:
-            return f"You have reported {MAX_FINDINGS} findings, the most that are checked: not reported."
+        if current is None and len(self._latest) >= self._limit:
+            return f"You have reported {self._limit} findings, the most that are checked: not reported."
         self._latest[key] = finding
         self._tasks.append(asyncio.create_task(self._verify(finding)))
         self._progress.note(f"reported: {finding.title}")
@@ -322,10 +324,14 @@ async def review_lens(
     block_at: int = BLOCK_AT_PRIORITY,
     publish: Publish | None = None,
     capabilities: Sequence[AbstractCapability[None]] = (),
+    max_posted: int = MAX_FINDINGS,
 ) -> Outcome:
-    """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier."""
+    """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier. Only its first
+    `max_posted` findings past the free filters are verified (and so posted)."""
     outcome = Outcome(block_at=block_at)
-    judge = Judge(pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish)
+    judge = Judge(
+        pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish, limit=max_posted
+    )
     combined = "\n\n".join(part for part in (instructions, LENS_RULES) if part)
     run = await _run_judged(
         judge,

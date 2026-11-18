@@ -79,3 +79,42 @@ async def test_a_failing_dry_lens_costs_only_its_advice(repo: GitRepo, tmp_path:
     deps = replace(job_deps(github, tmp_path, [finding(5)]), lenses=dry)
     result = await review_and_post(deps, pull(repo))
     assert result.conclusion == "failure" and [r["event"] for r in github.reviews] == ["REQUEST_CHANGES"]
+
+
+async def test_only_the_most_confident_advice_is_checked_and_posted(repo: GitRepo, tmp_path: Path) -> None:
+    github, asked = FakeGitHub(repo), list[int]()
+
+    def confirm(reported: dict[str, object]) -> bool:
+        asked.append(int(str(reported["confidence"])))
+        return True
+
+    reports = [finding(line, title=f"dup {line}", priority=3, confidence=confidence) for line, confidence in
+               [(1, 5), (2, 9), (3, 7), (4, 8), (5, 6)]]  # fmt: skip
+    dry = (Lens("dry", lens_agents(reports, confirm, kind="dry"), whole_pr=False, max_posted=2),)
+    await review_and_post(replace(job_deps(github, tmp_path), lenses=dry), pull(repo))
+    assert sorted(asked) == [8, 9]  # the other three never cost a verifier call
+
+
+async def test_hunches_and_out_of_scope_findings_dont_use_up_the_cap(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #20: the cap was applied before the free filters."""
+    github, asked = FakeGitHub(repo), list[int]()
+
+    def confirm(reported: dict[str, object]) -> bool:
+        asked.append(int(str(reported["line"])))
+        return True
+
+    reports = [
+        finding(1, path="elsewhere.py", priority=2, confidence=10),  # not a changed file
+        finding(2, priority=2, confidence=2),  # a hunch
+        finding(3, priority=3, confidence=8),
+        finding(4, priority=3, confidence=7),
+    ]
+    dry = (Lens("dry", lens_agents(reports, confirm, kind="dry"), whole_pr=False, max_posted=2),)
+    await review_and_post(replace(job_deps(github, tmp_path), lenses=dry), pull(repo))
+    assert sorted(asked) == [3, 4]
+
+
+def test_dry_posts_at_most_three() -> None:
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
+    [dry] = [lens for lens in build_lenses(settings) if lens.kind == "dry"]
+    assert dry.max_posted == 3
