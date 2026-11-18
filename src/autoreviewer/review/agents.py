@@ -13,7 +13,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
-from pydantic_ai_harness import FileSystem
+from pydantic_ai_harness import DetectLoops, FileSystem
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
 from autoreviewer.review.compaction import review_compaction
@@ -36,10 +36,12 @@ LANGUAGES = {
 """File extension -> Trail of Bits sharp-edges reference (TypeScript shares JavaScript's, C++ shares C's)."""
 
 LENS_LIMITS = UsageLimits(request_limit=10_000)
-VERIFIER_LIMITS = UsageLimits(request_limit=10_000)
-"""No token, tool-call, or cost limits: a review may explore as much as it needs. The request limit
-only stops a model stuck in a loop (pydantic-ai's default is 50). The practical ceiling is the model's
-context window per request."""
+"""No token, tool-call, or cost limits: a lens may explore as much as the change needs. The request limit
+only stops a model stuck in a loop; the deadline (deadline.py) bounds its time."""
+VERIFIER_LIMITS = UsageLimits(request_limit=80)
+"""A verifier checks one finding: needing more than 80 steps means it's stuck. A live security verifier
+re-read one file 650+ times, one line further each time, before this. Over budget, the finding stays
+unverified (not posted, checked again next review)."""
 
 RETRIES: AgentRetries = {"tools": 25, "output": 3}
 """Consecutive failures allowed per tool before the run fails (any success resets the count).
@@ -69,7 +71,8 @@ def _agent[OutputT](
         deps_type=type(None),
         output_type=output_type,
         instructions=instructions,
-        capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window)],
+        # DetectLoops nudges a model repeating identical calls, alternating between two, or repeating itself.
+        capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window), DetectLoops()],
         toolsets=[git_tools(workspace)],
         retries=RETRIES,
     )
@@ -80,6 +83,17 @@ REPORT_AS_YOU_GO = """# Reporting
 Call `report_finding` the moment you are sure enough of a finding to include it in your report: it is
 verified and posted to the PR right away, so the author can start fixing it while you keep reviewing.
 Then carry on. Your final report must still list every finding, including those you already reported."""
+FOCUS = """# Scope
+
+Review only the change: the lines this pull request adds or removes, and what they affect. Search and read the
+rest of the codebase only to understand that change (the surrounding function, its callers, the definitions it
+uses, the conventions it should follow). Don't audit code the PR doesn't touch, don't report problems that
+existed before it, and don't read files with no bearing on the diff. A focused review finishes sooner, and its
+findings are the ones the author can act on."""
+
+LENS_RULES = f"{FOCUS}\n\n{REPORT_AS_YOU_GO}"
+"""Run instructions every lens gets, whatever its own prompt says."""
+
 REPORT_TOOL = "report_finding"
 """The tool a lens calls to hand over a finding mid-run (pipeline.Judge)."""
 
@@ -92,7 +106,7 @@ def lens_version(model_name: str) -> str:
             model_name,
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
             ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
-            REPORT_AS_YOU_GO,
+            LENS_RULES,
         ]
     )
     return hashlib.sha256(material.encode()).hexdigest()[:16]

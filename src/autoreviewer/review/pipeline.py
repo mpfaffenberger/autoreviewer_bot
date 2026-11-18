@@ -18,7 +18,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.toolsets import FunctionToolset
 
-from autoreviewer.review.agents import LENS_LIMITS, REPORT_AS_YOU_GO, REPORT_TOOL, VERIFIER_LIMITS
+from autoreviewer.review.agents import LENS_LIMITS, LENS_RULES, REPORT_TOOL, VERIFIER_LIMITS
 from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
@@ -70,6 +70,8 @@ class Outcome:
     overall_correct: bool = True
     """The lens's overall verdict on the change (Codex-style), alongside its findings."""
     reviewed: list[str] = field(default_factory=list[str])
+    cut_short: bool = False
+    """A lens that can block hit the time limit before covering the whole change: never an approval."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
 
@@ -319,18 +321,19 @@ async def review_lens(
     progress: Progress,
     block_at: int = BLOCK_AT_PRIORITY,
     publish: Publish | None = None,
+    capabilities: Sequence[AbstractCapability[None]] = (),
 ) -> Outcome:
     """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier."""
     outcome = Outcome(block_at=block_at)
     judge = Judge(pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish)
-    combined = "\n\n".join(part for part in (instructions, REPORT_AS_YOU_GO) if part)
+    combined = "\n\n".join(part for part in (instructions, LENS_RULES) if part)
     run = await _run_judged(
         judge,
         lambda toolsets: lens.run(
             lens_prompt(pr),
             instructions=combined,
             toolsets=toolsets,
-            capabilities=[progress.watch(kind)],
+            capabilities=[*capabilities, progress.watch(kind)],
             usage_limits=LENS_LIMITS,
         ),
     )
@@ -363,7 +366,7 @@ async def review(
         judge,
         lambda toolsets: lens.run(
             prompt,
-            instructions=REPORT_AS_YOU_GO,
+            instructions=LENS_RULES,
             toolsets=toolsets,
             message_history=continuation.history if continuation else None,
             capabilities=[*lens_capabilities, progress.watch("reviewer")],

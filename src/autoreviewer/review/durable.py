@@ -12,6 +12,7 @@ minute of GPU time and nothing else.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -42,6 +43,9 @@ def _require_deps() -> job.ReviewDeps:
     return _deps
 
 
+logger = logging.getLogger("autoreviewer.durable")
+
+
 def workflow_id(pull: PullRequestUpdated) -> str:
     """One review per PR head: redeliveries and duplicate events can never start a second one."""
     return f"review:{pull.owner}/{pull.repo}#{pull.number}@{pull.head_sha}".lower()
@@ -60,6 +64,10 @@ async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.Check
 @DBOS.step(retries_allowed=True, max_attempts=3)
 async def _finish_check(pull: PullRequestUpdated, check_id: int, result: job.CheckResult) -> None:
     await job.finish_check(_require_deps(), pull, check_id, result)
+
+
+REVIEW_STEP = 2
+"""review_workflow's second step (_review_and_post): a re-run starts there, keeping the check run."""
 
 
 @DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
@@ -103,10 +111,52 @@ async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResu
         return await queue.enqueue_async(review_workflow, pull)
 
 
-async def enqueue_review(pull: PullRequestUpdated) -> bool:
-    """Queue a review of this head (a no-op if one exists); True if it had already finished."""
+_ENDED_WITHOUT_RESULT = frozenset(
+    status.value
+    for status in (
+        WorkflowStatusString.CANCELLED,
+        WorkflowStatusString.ERROR,
+        WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED,
+    )
+)
+
+
+async def enqueue_review(pull: PullRequestUpdated, *, retry_failed: bool = False) -> bool:
+    """Queue a review of this head (a no-op if one exists); True if it had already finished with a verdict.
+
+    With `retry_failed` (an explicit request, never a redelivered push), a review of this head that was
+    cancelled, crashed, parked after repeated crashes, or finished without a verdict runs again.
+    """
     handle = await enqueue(pull)
-    return (await handle.get_status()).status == WorkflowStatusString.SUCCESS.value
+    status = (await handle.get_status()).status
+    if retry_failed and status in _ENDED_WITHOUT_RESULT:
+        await _retry(handle.workflow_id, status)
+        return False
+    if (
+        retry_failed
+        and status == WorkflowStatusString.SUCCESS.value
+        and (await handle.get_result()).conclusion == "neutral"
+    ):
+        # Finished without a verdict (partially reviewed, timed out, failed): what "push again or ask again" promises.
+        logger.info("re-running %s, which ended without a verdict", handle.workflow_id)
+        await DBOS.fork_workflow_async(handle.workflow_id, REVIEW_STEP, queue_name=QUEUE)
+        return False
+    return status == WorkflowStatusString.SUCCESS.value
+
+
+async def _retry(workflow_id: str, status: str) -> None:
+    """Run an ended review again from its first failed step. Resuming would replay a recorded failure, so a
+    failed step means a fork (a new workflow keeping the steps before it, e.g. the check run); with no
+    failure recorded (cancelled, or crashed mid-step) it resumes where it stopped."""
+    steps = await DBOS.list_workflow_steps_async(workflow_id)
+    failed = [step["function_id"] for step in steps if step["error"] is not None]
+    if failed:
+        logger.info("retrying the %s review %s from step %d", status.lower(), workflow_id, min(failed))
+        await DBOS.fork_workflow_async(workflow_id, min(failed), queue_name=QUEUE)
+    else:
+        logger.info("resuming the %s review %s", status.lower(), workflow_id)
+        # On the review queue: by default DBOS resumes on its internal queue, which ignores our concurrency.
+        await DBOS.resume_workflow_async(workflow_id, queue_name=QUEUE)
 
 
 def shutdown() -> None:

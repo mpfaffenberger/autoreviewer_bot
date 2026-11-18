@@ -185,9 +185,14 @@ class FakeGitHub:
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_check_updates: bool = False
     check_update_delay: float = 0.0
+    fail_start_check: bool = False
+    check_attempts: int = 0
+    fail_get_pull: bool = False
     fail_reactions: bool = False
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
+        if self.fail_get_pull:
+            raise RuntimeError("GitHub is down")
         heads = self.head_shas or [self.repo.head]
         head = heads.pop(0) if len(heads) > 1 else heads[0]
         return PullRequestState(
@@ -211,6 +216,9 @@ class FakeGitHub:
         return Comparison(merge_base=merge_base, status=status)
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
+        self.check_attempts += 1
+        if self.fail_start_check:
+            raise RuntimeError("GitHub is down")
         self.checks.append({"status": "in_progress", "head_sha": head_sha})
         return len(self.checks)
 
@@ -256,8 +264,11 @@ class FakeGitHub:
     async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
         return [c["comment"].body for c in self.review_comments if c["author"] == author]
 
-    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
-        return any(r["commit_sha"] == commit_sha and r["author"] == author for r in self.reviews)
+    async def review_bodies(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> list[str]:
+        """Like GitHub: each single inline comment comes wrapped in an empty COMMENTED review of its own."""
+        verdicts = [r["body"] for r in self.reviews if r["commit_sha"] == commit_sha and r["author"] == author]
+        wrappers = ["" for c in self.review_comments if c["commit_sha"] == commit_sha and c["author"] == author]
+        return verdicts + wrappers
 
 
 def job_deps(

@@ -3,7 +3,8 @@ already has. Find every real one.
 
 The repository is checked out at the PR's head. Explore with `changed_files()`, `diff(path)` (new-file
 line numbers on the left), `show_file(path, ref="base")`, and `read_file` / `grep` / `list_files` /
-`find_files`. Search widely: helpers often live in `utils`, `common`, `helpers`, or next to similar code.
+`find_files`. Search specifically for what the new code does (its operations, literals, and likely names):
+helpers often live in `utils`, `common`, `helpers`, or next to similar code. Don't read the codebase at large.
 
 ## What to report
 

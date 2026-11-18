@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from autoreviewer.github import (
     PullRequestState,
     Repo,
 )
+from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
@@ -48,6 +49,8 @@ from autoreviewer.web.routing import PullRequestUpdated
 
 logger = logging.getLogger("autoreviewer.job")
 
+SUPERSEDED_CHECK_S = 60.0
+"""How often a running review checks whether its PR moved on (a newer push, or closed)."""
 PROGRESS_INTERVAL_S = 30.0
 """How often a running review updates its check run, at most (GitHub rate-limits App writes)."""
 
@@ -68,7 +71,14 @@ class Lens:
 
 
 async def _run_lens(
-    spec: Lens, workspace: Workspace, pr: PullRequestText, *, progress: Progress, block_at: int, publish: Publish | None
+    spec: Lens,
+    workspace: Workspace,
+    pr: PullRequestText,
+    *,
+    progress: Progress,
+    block_at: int,
+    publish: Publish | None,
+    deadline: Deadline | None,
 ) -> Outcome:
     """One extra lens over `pr`. An advisory lens that fails costs only its advice; a lens that can block
     fails the review, since approving without it would fail open."""
@@ -85,6 +95,7 @@ async def _run_lens(
             progress=progress,
             block_at=block_at,
             publish=publish,
+            capabilities=[deadline.watch(spec.kind)] if deadline else (),
         )
     except Exception:
         if spec.kind not in ADVISORY_KINDS:
@@ -119,6 +130,10 @@ class ReviewDeps:
     """Optional one-click simplifications (see simplify.py); None skips them."""
     lenses: tuple[Lens, ...] = ()
     """Extra lenses (security, DRY) beside correctness."""
+    soft_deadline_s: float = 30 * 60
+    """After this, every lens wraps up with what it has (see deadline.py)."""
+    hard_deadline_s: float = 50 * 60
+    """After this, the review is cancelled: no verdict (findings already posted stay)."""
 
 
 @dataclass(frozen=True)
@@ -193,6 +208,14 @@ async def _guarded_review(deps: ReviewDeps, pull: PullRequestUpdated, progress: 
         return await _review(deps, repo_of(pull), pull, progress)
     except Superseded:
         return CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
+    except TimeoutError:
+        logger.warning("reviewing %s/%s#%d at %s timed out", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
+        return CheckResult(
+            "Review timed out",
+            f"Stopped after {deps.hard_deadline_s / 60:g} minutes, before a verdict. Findings confirmed until then "
+            "are posted as comments. Push again to retry.",
+            "neutral",
+        )
     except Exception:
         logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
         return CheckResult(
@@ -238,6 +261,7 @@ async def review_change(
     simplifier: SimplifierFactory | None = None,
     lenses: Sequence[Lens] = (),
     publish: Publish | None = None,
+    deadline: Deadline | None = None,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -293,7 +317,10 @@ async def review_change(
                     lens,
                     verifier,
                     continuation=continuation,
-                    lens_capabilities=[persistence] if persistence else (),
+                    lens_capabilities=[
+                        *([persistence] if persistence else ()),
+                        *([deadline.watch("reviewer")] if deadline else ()),
+                    ],
                     conversation=conversation,
                     block_at=block_at,
                     checked=typed,
@@ -305,12 +332,28 @@ async def review_change(
             for spec in lenses:
                 target = pr if spec.whole_pr or scope is None else _only(pr, scope)
                 if target.reviewable:
-                    run = _run_lens(spec, workspace, target, progress=progress, block_at=block_at, publish=publish)
+                    run = _run_lens(
+                        spec,
+                        workspace,
+                        target,
+                        progress=progress,
+                        block_at=block_at,
+                        publish=publish,
+                        deadline=deadline,
+                    )
                     extra.append(lenses_group.create_task(run))
             simplify_task = None
             if simplifier is not None:
                 simplify_task = lenses_group.create_task(
-                    suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope, publish=publish)
+                    suggest(
+                        pr,
+                        simplifier(workspace),
+                        workspace.root,
+                        progress,
+                        paths=scope,
+                        publish=publish,
+                        capabilities=[deadline.watch("simplifier")] if deadline else (),
+                    )
                 )
         outcome = correctness.result()
         for task in extra:
@@ -322,7 +365,13 @@ async def review_change(
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
     )
-    remember = _prior_review(run_id, head_sha, base, lens_version, outcome) if memory is not None else None
+    if deadline is not None:
+        blocking_lenses = {"reviewer", *(spec.kind for spec in lenses if spec.kind not in ADVISORY_KINDS)}
+        outcome.cut_short = bool(deadline.wrapped_up & blocking_lenses)
+    # A review cut short isn't continued from: files it never read wouldn't count as "changed since".
+    remember = None
+    if memory is not None and not outcome.cut_short:
+        remember = _prior_review(run_id, head_sha, base, lens_version, outcome)
     return Reviewed(outcome, remember)
 
 
@@ -381,23 +430,31 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, block_at=deps.block_at
     )
     try:
-        result = await review_change(
-            reader=deps.github,
-            source=deps.source,
-            agents=deps.agents,
-            work_dir=deps.work_dir,
-            repo=repo,
-            number=pull.number,
-            state=state,
-            head_sha=pull.head_sha,
-            memory=deps.memory,
-            lens_version=deps.lens_version,
-            block_at=deps.block_at,
-            progress=progress,
-            simplifier=deps.simplifier,
-            lenses=deps.lenses,
-            publish=publisher,
-        )
+        async with asyncio.timeout(deps.hard_deadline_s):
+            result = await _unless_superseded(
+                deps,
+                repo,
+                pull,
+                review_change(
+                    reader=deps.github,
+                    source=deps.source,
+                    agents=deps.agents,
+                    work_dir=deps.work_dir,
+                    repo=repo,
+                    number=pull.number,
+                    state=state,
+                    head_sha=pull.head_sha,
+                    memory=deps.memory,
+                    lens_version=deps.lens_version,
+                    block_at=deps.block_at,
+                    progress=progress,
+                    simplifier=deps.simplifier,
+                    lenses=deps.lenses,
+                    publish=publisher,
+                    deadline=Deadline(deps.soft_deadline_s),
+                ),
+            )
+
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
         raise
@@ -427,6 +484,41 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         posted=publisher.posted,
     )
     return _summary(result.outcome)
+
+
+async def _unless_superseded(
+    deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, review: Awaitable[Reviewed | CheckResult]
+) -> Reviewed | CheckResult:
+    """Run `review`, cancelling it as soon as the PR moves on (a newer push, or closed): its result would be
+    thrown away, and the newer head's review may be waiting for this slot."""
+    reviewing = asyncio.ensure_future(review)
+    watching = asyncio.ensure_future(_moved_on(deps, repo, pull))
+    try:
+        await asyncio.wait({reviewing, watching}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (reviewing, watching):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(reviewing, watching, return_exceptions=True)
+    if watching.done() and not watching.cancelled() and watching.result():
+        raise Superseded
+    return reviewing.result()
+
+
+async def _moved_on(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> bool:
+    """Return True once the PR's head is no longer `pull.head_sha` or the PR is closed; check every minute."""
+    while True:
+        await asyncio.sleep(SUPERSEDED_CHECK_S)
+        try:
+            state = await deps.github.get_pull(repo, pull.number)
+        except Exception:  # a GitHub hiccup is no reason to stop a review
+            logger.warning("could not check whether %s/%s#%d moved on", pull.owner, pull.repo, pull.number)
+            continue
+        if state.head_sha != pull.head_sha or state.state != "open":
+            logger.info(
+                "%s/%s#%d moved on from %s; stopping its review", pull.owner, pull.repo, pull.number, pull.head_sha[:7]
+            )
+            return True
 
 
 async def _forget_if_closed(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, conversation: str) -> None:
@@ -462,5 +554,11 @@ def _summary(outcome: Outcome) -> CheckResult:
     if blocking:
         return CheckResult(
             f"{len(blocking)} blocking issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
+        )
+    if outcome.cut_short:
+        return CheckResult(
+            "Partially reviewed",
+            f"Hit the time limit before covering the whole change; not approved.{notes}",
+            "neutral",
         )
     return CheckResult("No blocking issues", f"Approved.{notes}", "success")
