@@ -80,6 +80,17 @@ REPORT_AS_YOU_GO = """# Reporting
 Call `report_finding` the moment you are sure enough of a finding to include it in your report: it is
 verified and posted to the PR right away, so the author can start fixing it while you keep reviewing.
 Then carry on. Your final report must still list every finding, including those you already reported."""
+FOCUS = """# Scope
+
+Review only the change: the lines this pull request adds or removes, and what they affect. Search and read the
+rest of the codebase only to understand that change (the surrounding function, its callers, the definitions it
+uses, the conventions it should follow). Don't audit code the PR doesn't touch, don't report problems that
+existed before it, and don't read files with no bearing on the diff. A focused review finishes sooner, and its
+findings are the ones the author can act on."""
+
+LENS_RULES = f"{FOCUS}\n\n{REPORT_AS_YOU_GO}"
+"""Run instructions every lens gets, whatever its own prompt says."""
+
 REPORT_TOOL = "report_finding"
 """The tool a lens calls to hand over a finding mid-run (pipeline.Judge)."""
 
@@ -92,7 +103,7 @@ def lens_version(model_name: str) -> str:
             model_name,
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
             ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
-            REPORT_AS_YOU_GO,
+            LENS_RULES,
         ]
     )
     return hashlib.sha256(material.encode()).hexdigest()[:16]

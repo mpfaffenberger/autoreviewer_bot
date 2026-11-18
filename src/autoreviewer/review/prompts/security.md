@@ -10,9 +10,9 @@ verifier drop the wrong ones. A vulnerability you leave out is never seen again.
 
 ## Method
 
-1. **Learn the security model.** Where does untrusted data enter (HTTP requests, webhooks, CLI arguments,
-   files, environment, model output, other services)? What does the code already use to validate,
-   authenticate, escape, and sandbox? Read those helpers.
+1. **Learn the security model of the code this change touches.** Where does untrusted data reach it (HTTP
+   requests, webhooks, CLI arguments, files, environment, model output, other services)? What does that
+   code already use to validate, authenticate, escape, and sandbox? Read those helpers, not the whole repo.
 2. **Compare the change against it.** New entry points, removed or weakened checks, new uses of
    dangerous APIs, code that bypasses the project's own safe helpers.
 3. **Trace data flow** from each untrusted input the change touches to sensitive operations: shell and

@@ -13,7 +13,13 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Tool
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import PullRequestState
-from autoreviewer.review.agents import lens_pair, security_references, simplify_agent, simplify_checker_agent
+from autoreviewer.review.agents import (
+    REPORT_TOOL,
+    lens_pair,
+    security_references,
+    simplify_agent,
+    simplify_checker_agent,
+)
 from autoreviewer.review.job import Lens, Reviewed, repo_of, review_and_post, review_change
 from autoreviewer.review.memory import ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import review_lens
@@ -159,3 +165,4 @@ async def test_the_security_lens_sees_its_prompt_and_the_references(workspace: W
     assert seen_instructions is not None
     assert "security vulnerabilities it introduces" in seen_instructions
     assert "Fail-Open Security Switches" in seen_instructions
+    assert "Review only the change" in seen_instructions and REPORT_TOOL in seen_instructions  # LENS_RULES
