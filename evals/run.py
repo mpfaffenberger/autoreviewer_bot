@@ -102,8 +102,8 @@ def models_from_env() -> tuple[Model, Model]:
     def model(name: str) -> Model:
         return boodleton_model(name, base_url=base_url, api_key=key, lanes=lanes.get(name))
 
-    lens = os.environ.get("AUTOREVIEWER_LENS_MODEL", "qwen3.8-flash-next")
-    verifier = os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", "deepseek-v4.1-flash")
+    lens = os.environ.get("AUTOREVIEWER_LENS_MODEL", Settings.lens_model)
+    verifier = os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", Settings.verifier_model)
     return model(lens), model(verifier)
 
 
