@@ -21,7 +21,9 @@ from autoreviewer.review.schemas import Finding
 
 logger = logging.getLogger("autoreviewer.posting")
 
-_MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) -->")
+_MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) -->\Z")
+"""Only the marker that ends a comment counts: code appends it last, after any model text or suggestion code,
+so a marker an attacker plants in the PR (and gets quoted) can't make a real finding look already posted."""
 
 
 def fingerprint(head_sha: str, finding: Finding) -> str:
@@ -58,7 +60,7 @@ class Publisher:
             async with self._lock:
                 if self._existing is None:
                     bodies = await self._github.review_comment_bodies(self._repo, self._number, author=self._author)
-                    self._existing = {match for body in bodies for match in _MARKER.findall(body)}
+                    self._existing = {match[1] for body in bodies if (match := _MARKER.search(body))}
                 if key in self._existing or key in self.posted:
                     self.posted.add(key)
                     return
@@ -66,7 +68,6 @@ class Publisher:
                 if any(same_defect(f, finding) and f.priority <= finding.priority for f in self._findings):
                     self.posted.add(key)
                     return
-                self._findings.append(finding)
             comment = inline_comment(finding, head_sha=self._head_sha, block_at=self._block_at)
             await self._github.create_review_comment(
                 self._repo, self._number, commit_sha=self._head_sha, comment=comment
@@ -77,6 +78,7 @@ class Publisher:
             )
             return
         self.posted.add(key)
+        self._findings.append(finding)  # only once its comment exists can it stand in for a duplicate
 
 
 async def post_review(
@@ -112,7 +114,7 @@ async def post_review(
         # GitHub's diff view can differ from ours (e.g. files it doesn't render). Keep every finding, just
         # not inline: same verdict, the unposted findings listed in the review body.
         logger.warning("inline comments rejected for %s/%s#%d; listing them in the body", repo.owner, repo.name, number)
-        listed = replace(outcome, inline=[], general=[*outcome.general, *unposted])
+        listed = replace(outcome, inline=[], general=[*outcome.general, *outcome.inline])
         await github.create_review(
             repo, number, commit_sha=head_sha, event=event, body=review_body(listed, footer=footer), comments=[]
         )

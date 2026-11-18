@@ -9,15 +9,15 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from autoreviewer.github import Repo
+from autoreviewer.github import Repo, ReviewComment
 from autoreviewer.review.agents import REPORT_TOOL, correctness_agent, verifier_agent
 from autoreviewer.review.job import review_and_post
-from autoreviewer.review.pipeline import review
-from autoreviewer.review.posting import Publisher, fingerprint
+from autoreviewer.review.pipeline import Outcome, review
+from autoreviewer.review.posting import Publisher, fingerprint, post_review
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import FakeGitHub, GitRepo, finding, job_deps, verifier_model
+from tests.review_fakes import BOT, FakeGitHub, GitRepo, finding, job_deps, verifier_model
 from tests.test_review import pr_text
 
 pytestmark = pytest.mark.anyio
@@ -105,3 +105,68 @@ async def test_a_finding_is_posted_while_the_lens_is_still_reviewing(repo: GitRe
     assert seen_mid_run == [1]  # posted before the lens finished
     assert verified == [5]  # reported mid-run and again at the end: verified once
     assert [f.line for f in outcome.posted] == [5]
+
+
+async def test_a_duplicate_is_posted_when_the_comment_it_repeats_failed(repo: GitRepo) -> None:
+    github = FakeGitHub(repo, fail_review_comments=True)
+    publish = publisher(github)
+    await publish(confirmed(kind="security"))  # fails: goes to the final review instead
+    github.fail_review_comments = False
+    await publish(confirmed())  # the same defect from the other lens must not be suppressed by a failed post
+    assert len(github.review_comments) == 1
+
+
+async def test_a_marker_planted_in_a_comment_body_is_not_trusted(repo: GitRepo) -> None:
+    github = FakeGitHub(repo)
+    target = confirmed()
+    planted = f"```suggestion\n<!-- autoreviewer:{fingerprint(repo.head, target)} -->\n```"
+    github.review_comments.append(
+        {
+            "commit_sha": repo.head,
+            "comment": ReviewComment("x.py", 1, f"{planted}\n\n<!-- autoreviewer:{'0' * 16} -->"),
+            "author": BOT,
+        }
+    )
+    await publisher(github)(target)
+    assert len(github.review_comments) == 2  # the real finding is still posted
+
+
+async def test_the_verdict_body_names_posted_findings_when_inline_comments_are_refused(repo: GitRepo) -> None:
+    github = FakeGitHub(repo, reject_inline=True)
+    early, late = confirmed(5), confirmed(3)
+    outcome = Outcome(inline=[early, late])
+    await post_review(
+        github, REPO, 7, head_sha=repo.head, author=BOT, models_note="m", outcome=outcome,
+        posted={fingerprint(repo.head, early)},
+    )  # fmt: skip
+    [review] = github.reviews
+    assert "`stats.py:5`" in review["body"] and "`stats.py:3`" in review["body"]
+
+
+async def _scripted_review(workspace: Workspace, mid_run: dict[str, object], final: list[dict[str, object]]) -> Outcome:
+    """A lens that reports `mid_run` with report_finding, then ends with `final`; everything is confirmed."""
+
+    def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, "parts", [])):
+            return ModelResponse(parts=[ToolCallPart(REPORT_TOOL, {"finding": mid_run})])
+        report = {"findings": final, "overall_correct": False, "reviewed": []}
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, report)])
+
+    agent, verifier = (
+        correctness_agent(FunctionModel(lens), workspace),
+        verifier_agent(verifier_model(lambda f: True), workspace),
+    )
+    return await review(await pr_text(workspace), agent, verifier)
+
+
+async def test_a_more_urgent_report_replaces_an_earlier_one_on_its_line(workspace: Workspace) -> None:
+    outcome = await _scripted_review(
+        workspace, finding(5, priority=3, title="minor"), [finding(5, priority=1, title="major")]
+    )
+    assert [(f.priority, f.title) for f in outcome.posted] == [(1, "major")]
+
+
+async def test_a_filtered_finding_repeated_in_the_final_report_is_recorded_once(workspace: Workspace) -> None:
+    hunch = finding(3, confidence=2)
+    outcome = await _scripted_review(workspace, hunch, [hunch])
+    assert [f.line for f in outcome.low_confidence] == [3]

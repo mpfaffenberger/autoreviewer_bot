@@ -215,7 +215,10 @@ class Judge:
         self._kind, self._label, self._publish = kind, label, publish
         self._reviewable = {change.path for change in pr.reviewable}
         self._slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
-        self._tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
+        self._tasks: list[asyncio.Task[None]] = []
+        self._latest: dict[tuple[str, int], Finding] = {}
+        """The most urgent finding reported for each line: only its verdict counts."""
+        self._filtered: set[tuple[str, int]] = set()
 
     def toolset(self) -> FunctionToolset[None]:
         async def report(finding: Finding) -> str:
@@ -225,35 +228,46 @@ class Judge:
         return FunctionToolset([Tool(report, name=REPORT_TOOL)])
 
     def submit(self, finding: Finding) -> str:
-        """Start verifying `finding` unless it's out of scope, a hunch, or its line was already reported."""
+        """Start verifying `finding`, unless it's out of scope, a hunch, or not more urgent than what was
+        already reported for its line (a strictly more urgent report replaces the earlier one)."""
         finding = finding.model_copy(update={"kind": self._kind})
-        if (key := (finding.path, finding.line)) in self._tasks:
+        key = (finding.path, finding.line)
+        current = self._latest.get(key)
+        if current is not None and finding.priority >= current.priority:
             return "Already reported for this line. Keep reviewing."
         if finding.path not in self._reviewable:  # hallucinated or out of scope, not worth a verifier call
-            self._outcome.rejected.append((finding, "path is not among the changed files"))
+            self._record(self._outcome.rejected, key, (finding, "path is not among the changed files"))
             return f"{finding.path} is not among the changed files: not reported."
         if finding.confidence < MIN_CONFIDENCE:
-            self._outcome.low_confidence.append(finding)
+            self._record(self._outcome.low_confidence, key, finding)
             return "Below the confidence needed to verify it: not reported."
-        if len(self._tasks) >= MAX_FINDINGS:
+        if current is None and len(self._latest) >= MAX_FINDINGS:
             return f"You have reported {MAX_FINDINGS} findings, the most that are checked: not reported."
-        self._tasks[key] = asyncio.create_task(self._verify(finding))
+        self._latest[key] = finding
+        self._tasks.append(asyncio.create_task(self._verify(finding)))
         self._progress.note(f"reported: {finding.title}")
         return "Recorded: it is being verified now and will be posted if confirmed. Keep reviewing."
+
+    def _record[T](self, records: list[T], key: tuple[str, int], record: T) -> None:
+        """Note a finding filtered out without verification, once per line."""
+        if key not in self._filtered:
+            self._filtered.add(key)
+            records.append(record)
 
     async def finish(self, findings: list[Finding]) -> None:
         """Verify the final report's findings that weren't reported along the way, and wait for every verdict."""
         for finding in _dedupe(findings):
             self.submit(finding)
-        if pending := [task for task in self._tasks.values() if not task.done()]:
+        if pending := [task for task in self._tasks if not task.done()]:
             self._progress.set_phase(f"Verifying {len(pending)} candidate finding(s)")
-        await asyncio.gather(*self._tasks.values())
+        await asyncio.gather(*self._tasks)
 
     def cancel(self) -> None:
-        for task in self._tasks.values():
+        for task in self._tasks:
             task.cancel()
 
-    async def _verify(self, finding: Finding) -> None:
+    async def _verify(self, reported: Finding) -> None:
+        finding = reported
         async with self._slots:
             try:
                 watch = self._progress.watch(f"{self._label} ({finding.path}:{finding.line})")
@@ -264,12 +278,18 @@ class Judge:
                 self._outcome.unverified.append((finding, f"verification failed: {type(error).__name__}"))
                 return
         self._progress.note(f"{'confirmed' if verdict.confirmed else 'rejected'}: {finding.title}")
+        if self._latest.get((finding.path, finding.line)) is not reported:
+            return  # a more urgent report for this line superseded it while it was being verified
         if not verdict.confirmed:
             self._outcome.rejected.append((finding, verdict.reason))
             return
         # The verifier read the code too: its corrections win.
         corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
         finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
+        for confirmed in (self._outcome.inline, self._outcome.general):  # an earlier, less urgent report
+            confirmed[:] = [
+                f for f in confirmed if (f.kind, f.path, f.line) != (finding.kind, finding.path, finding.line)
+            ]
         if place(self._outcome, finding, self._pr.patches.get(finding.path, "")) and self._publish is not None:
             await self._publish(finding)
 
