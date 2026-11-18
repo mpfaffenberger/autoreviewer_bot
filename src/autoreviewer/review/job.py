@@ -28,7 +28,7 @@ from autoreviewer.github import (
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
-from autoreviewer.review.lint import LintError, type_findings
+from autoreviewer.review.lint import LintError, lint_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
@@ -303,10 +303,10 @@ async def review_change(
                 continuation = Continuation(prior, history, head_sha, changed_since)
         persistence, run_id = memory.persistence(conversation) if memory else (None, "")
         try:
-            typed = await type_findings(workspace.root, selection.reviewable, patches)
-        except LintError:  # a broken linter costs the type checks, never the review
-            logger.exception("%s at %s: type checks skipped", conversation, head_sha[:7])
-            typed = []
+            linted = await lint_findings(workspace.root, selection.reviewable, patches)
+        except LintError:  # a broken linter costs the lint checks, never the review
+            logger.exception("%s at %s: lint checks skipped", conversation, head_sha[:7])
+            linted = []
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
         progress = progress or Progress()
@@ -327,7 +327,7 @@ async def review_change(
                     ],
                     conversation=conversation,
                     block_at=block_at,
-                    checked=typed,
+                    checked=linted,
                     progress=progress,
                     publish=publish,
                 )

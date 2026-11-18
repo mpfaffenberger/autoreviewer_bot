@@ -238,6 +238,13 @@ justified. ruff only parses files and runs with `--isolated`, so the repo's own 
 `per-file-ignores`) can't switch the rules off. These findings skip the verifier, are labelled
 "(types)", and aren't kept in the lens's memory, since they're recomputed every review. This repo applies
 the same rules to itself (`pyproject.toml`). TypeScript (oxlint) is next once a TS repo is subscribed.
+
+Unused imports (`F401`) are the other exception to "lines the PR adds": deleting an import's last use
+leaves the import line untouched. So an unused import anywhere in a changed file is reported when the
+same message isn't already raised at the merge-base, where ruff is run on `git show base:path`. New,
+copied and renamed files have no base, so every unused import in them counts. These are P3 `lint`
+findings and never block (`ADVISORY_KINDS`): failing the build is CI's job. The lens prompts tell
+correctness and DRY to leave them alone; correctness once posted one as a blocking P1.
 A type *checker* (`ty`) would need the PR's dependencies installed, which means running the PR's
 build code, so it waits for the sandbox.
 

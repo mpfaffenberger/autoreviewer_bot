@@ -39,7 +39,7 @@ the wrong ones. A bug you leave out is never seen again.
 
 A defect introduced or exposed by this change that makes the program behave wrongly on an input or
 sequence of events that can actually happen. Not: style, naming, formatting, comments or docs,
-missing tests, type-hint nits, performance (unless pathological), security issues or duplicated
+missing tests, type-hint nits, unused imports (a linter reports those), performance (unless pathological), security issues or duplicated
 code (other reviewers cover those), or pre-existing problems the change doesn't touch.
 
 Write each finding so the author can act on it immediately: `explanation` starts with the trigger
