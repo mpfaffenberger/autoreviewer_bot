@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Tool
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import PullRequestState
+from autoreviewer.review import job
 from autoreviewer.review.agents import REPORT_TOOL, correctness_agent, verifier_agent
 from autoreviewer.review.deadline import WRAP_UP, Deadline
 from autoreviewer.review.job import Lens, Reviewed, repo_of, review_and_post, review_change
@@ -121,3 +122,30 @@ async def test_the_hard_deadline_ends_the_review_without_a_verdict(repo: GitRepo
     result = await review_and_post(deps, pull(repo))
     assert result.title == "Review timed out" and github.reviews == []
     assert [c.line for c in github.inline_comments] == [5]  # confirmed before the deadline: still posted
+
+
+async def test_a_push_mid_review_stops_it_instead_of_finishing(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    finished: list[bool] = []
+
+    async def slow(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        await asyncio.sleep(5)
+        finished.append(True)
+        return ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, {"findings": [], "overall_correct": True, "reviewed": []})]
+        )
+
+    monkeypatch.setattr(job, "SUPERSEDED_CHECK_S", 0.05)
+    github = FakeGitHub(repo, head_shas=[repo.head, repo.head, "b" * 40])  # moves on during the review
+    deps = replace(
+        job_deps(github, tmp_path, []),
+        agents=lambda ws: (
+            correctness_agent(FunctionModel(slow), ws),
+            verifier_agent(verifier_model(lambda f: True), ws),
+        ),
+    )
+    started = asyncio.get_running_loop().time()
+    result = await review_and_post(deps, pull(repo))
+    assert result.title == "Superseded" and github.reviews == [] and finished == []
+    assert asyncio.get_running_loop().time() - started < 2

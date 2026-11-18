@@ -221,6 +221,12 @@ posts a neutral COMMENT ("partially reviewed") with a neutral check, and isn't r
 (files it never read wouldn't count as changed since). The CLI exits 3 for it, and the evals use the
 bot's limits.
 
+A running review checks every minute whether its PR moved on (a newer push, or closed) and stops at
+once if so: its result would be thrown away, and the newer head's review may be waiting for its slot.
+`@chaos-emerald-reviewer review` re-runs a review of the current commit that ended without a verdict
+(cancelled, crashed, partially reviewed, timed out, failed). It resumes or forks the durable workflow,
+reusing the check run; a redelivered push never does.
+
 ### Deterministic checks (no model)
 
 Rules a tool can decide exactly are a linter's job, not a lens's. `review/lint.py` runs ruff on the
