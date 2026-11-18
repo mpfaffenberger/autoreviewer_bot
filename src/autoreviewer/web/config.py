@@ -7,8 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from autoreviewer.servers import DEEPSEEK, DEEPSEEK_CONTEXT_WINDOW, DEFAULT_MODEL_LANES, QWEN, QWEN_CONTEXT_WINDOW
+
 DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
-DEFAULT_MODEL_LANES = {"qwen3.8-flash-next": 3, "deepseek-v4.1-flash": 4}
 
 
 @dataclass(frozen=True)
@@ -35,18 +36,17 @@ class Settings:
     hard_deadline_minutes: float = 50
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
     model_lanes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_MODEL_LANES))
-    """At most this many requests at once to each model, across every review (AUTOREVIEWER_MODEL_LANES, e.g.
-    "qwen3.8-flash-next=3,deepseek-v4.1-flash=4"). Qwen's server has 3 lanes; DeepSeek's has more, but it's
-    shared. Models not listed are unlimited."""
+    """At most this many requests at once to each model, across every review (AUTOREVIEWER_MODEL_LANES,
+    "model=n,..."; defaults in servers.DEFAULT_MODEL_LANES). Models not listed are unlimited."""
     max_concurrent_jobs: int = 1
-    """One review at a time: each already runs three Qwen agents in parallel (correctness, security, simplify),
-    and Qwen's server has 3 lanes. Two at once left 6 of 9 requests waiting and pushed both past their deadline."""
+    """One review at a time: each already runs a Qwen agent per lens in parallel, about as many as Qwen has lanes
+    (servers.DEFAULT_MODEL_LANES). Two at once left most requests waiting and pushed both past their deadline."""
     boodleton_base_url: str = "http://boodleton:8000/v1"
     boodleton_api_key: str = field(default="", repr=False)
-    lens_model: str = "qwen3.8-flash-next"
-    verifier_model: str = "deepseek-v4.1-flash"
-    lens_context_window: int = 262_144
-    verifier_context_window: int = 1_048_576
+    lens_model: str = QWEN
+    verifier_model: str = DEEPSEEK
+    lens_context_window: int = QWEN_CONTEXT_WINDOW
+    verifier_context_window: int = DEEPSEEK_CONTEXT_WINDOW
     """Each model's context window in tokens; compaction keeps conversations under 60% of it."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")

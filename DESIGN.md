@@ -360,9 +360,16 @@ the model names in reviewer config. Prefer the allowlist.
 ---
 
 
-**Lanes (measured 2026-11-18).** Qwen's server has 3 lanes (`max_batch_size` 3); DeepSeek's has more but is
-shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
-`ConcurrencyLimitedModel`): `AUTOREVIEWER_MODEL_LANES`, default Qwen 3 and DeepSeek 4. Excess requests wait in
+**Lanes (measured 2026-11-18).** Qwen's server runs 4 streams of 224k tokens (`max_batch_size` 4); DeepSeek's has
+more but is shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
+`ConcurrencyLimitedModel`): `AUTOREVIEWER_MODEL_LANES`, default Qwen 4 and DeepSeek 4 (`servers.py`).
+
+The Qwen server pre-budgets each stream's full window (fp8 KV, 4.32 GiB at 224k) but only touches pages as contexts
+grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the
+engine's minimum 0.5 GiB reserve (`PARALLEL=4 CONTEXT=229376` in the recipe's `.env`). In the day before the change,
+the longest prompt was 216k (p99 136k, median 31k), so the cut rejected nothing. The thin reserve is the risk: if
+all four streams fill at once the server could run out of memory. Rollback: delete the `.env` and restart
+`qwen38-flash-next-tf`. Excess requests wait in
 the bot rather than in the model server's queue, where everyone else waits too. One review runs at a time
 (`AUTOREVIEWER_MAX_CONCURRENT_JOBS=1`): a review already runs three Qwen finders in parallel, and two at once left
 6 of 9 requests queued at the server and pushed both past their deadline.
