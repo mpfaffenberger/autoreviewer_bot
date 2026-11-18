@@ -105,6 +105,7 @@ async def test_an_explicit_request_resumes_a_cancelled_review_on_its_check_run(l
     await DBOS.cancel_workflow_async(handle.workflow_id)
     assert (await handle.get_status()).status == "CANCELLED"
     await durable.enqueue_review(pull, retry_failed=True)
+    assert (await handle.get_status()).queue_name == durable.QUEUE  # so the concurrency limit applies
     await (await DBOS.retrieve_workflow_async(handle.workflow_id)).get_result()
     assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1
 
