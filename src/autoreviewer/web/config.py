@@ -33,8 +33,9 @@ class Settings:
     """After this, every lens wraps up with what it has; a review cut short never approves."""
     hard_deadline_minutes: float = 50
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
-    max_concurrent_jobs: int = 2
-    """Reviews run on the shared GPU; two at a time leaves room for everyone else."""
+    max_concurrent_jobs: int = 1
+    """One review at a time: each already runs three Qwen agents in parallel (correctness, security, simplify),
+    and Qwen's server has 3 lanes. Two at once left 6 of 9 requests waiting and pushed both past their deadline."""
     boodleton_base_url: str = "http://boodleton:8000/v1"
     boodleton_api_key: str = field(default="", repr=False)
     lens_model: str = "qwen3.8-flash-next"
@@ -60,7 +61,7 @@ class Settings:
             app_slug=env["GITHUB_APP_SLUG"],
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
-            max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", "2")),
+            max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
             soft_deadline_minutes=float(env.get("AUTOREVIEWER_SOFT_DEADLINE_MINUTES", cls.soft_deadline_minutes)),
             hard_deadline_minutes=float(env.get("AUTOREVIEWER_HARD_DEADLINE_MINUTES", cls.hard_deadline_minutes)),
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),

@@ -155,7 +155,8 @@ async def _retry(workflow_id: str, status: str) -> None:
         await DBOS.fork_workflow_async(workflow_id, min(failed), queue_name=QUEUE)
     else:
         logger.info("resuming the %s review %s", status.lower(), workflow_id)
-        await DBOS.resume_workflow_async(workflow_id)
+        # On the review queue: by default DBOS resumes on its internal queue, which ignores our concurrency.
+        await DBOS.resume_workflow_async(workflow_id, queue_name=QUEUE)
 
 
 def shutdown() -> None:
