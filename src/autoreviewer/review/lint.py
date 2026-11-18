@@ -32,8 +32,6 @@ TYPE_RULE_PREFIXES = ("ANN", "PGH003")
 """Missing argument and return annotations, `Any`, and `# type: ignore` without an error code."""
 UNUSED_IMPORT = "F401"
 RULES = f"{TYPE_RULES},{UNUSED_IMPORT}"
-NO_BASE_FILE = frozenset("ACR")
-"""git statuses with no file at this path in the merge-base: every unused import in it is new."""
 RUFF_OPTIONS = ("lint.flake8-annotations.mypy-init-return = true",)
 """`__init__` with annotated arguments needs no `-> None`, as in mypy."""
 ADVISORY_RULES = frozenset({"ANN401", "PGH003"})
@@ -69,39 +67,41 @@ async def lint_findings(root: Path, changes: list[ChangedPath], patches: dict[st
         return []
     added = {path: added_lines(patches.get(path, "")) for path in python}
     typed: defaultdict[tuple[str, int], list[Diagnostic]] = defaultdict(list)
-    unused: defaultdict[tuple[str, int], list[Diagnostic]] = defaultdict(list)
+    unused: defaultdict[str, defaultdict[int, list[Diagnostic]]] = defaultdict(lambda: defaultdict(list))
     for diagnostic in await _ruff(root, sorted(python)):
         code = diagnostic["code"] or ""
         path = Path(diagnostic["filename"]).resolve().relative_to(root.resolve()).as_posix()
         line = diagnostic["location"]["row"]
         if code == UNUSED_IMPORT:
-            unused[(path, line)].append(diagnostic)
+            unused[path][line].append(diagnostic)
         elif code.startswith(TYPE_RULE_PREFIXES) and line in added.get(path, ()):
             typed[(path, line)].append(diagnostic)
     findings = [_finding(path, line, hits) for (path, line), hits in typed.items()]
-    already = await _unused_at_base(root, [python[path] for path in sorted({path for path, _ in unused})])
-    for (path, line), hits in unused.items():
-        if fresh := [hit for hit in hits if hit["message"] not in already.get(path, ())]:
-            findings.append(_unused_finding(path, line, fresh))
+    for path, lines in sorted(unused.items()):
+        already = await _unused_at_base(root, python[path])
+        if already is None:  # base unknown: say nothing rather than blame the PR for old imports
+            continue
+        for line, hits in lines.items():
+            if fresh := [hit for hit in hits if hit["message"] not in already]:
+                findings.append(_unused_finding(path, line, fresh))
     findings.sort(key=_urgency)
     if len(findings) > MAX_LINT_FINDINGS:
         logger.info("%d lint findings; posting the first %d", len(findings), MAX_LINT_FINDINGS)
     return findings[:MAX_LINT_FINDINGS]
 
 
-async def _unused_at_base(root: Path, changes: list[ChangedPath]) -> dict[str, set[str]]:
-    """Each file's unused-import messages at the merge-base, so only imports the PR left unused are reported."""
-    already: dict[str, set[str]] = {}
-    for change in changes:
-        if change.status in NO_BASE_FILE:
-            continue
-        try:
-            source = await run_git(root, "show", f"{BASE}:{change.path}")
-        except GitError as error:
-            raise LintError(f"could not read {change.path} at the merge-base: {error}") from error
-        diagnostics = await _ruff(root, [change.path], select=UNUSED_IMPORT, source=source)
-        already[change.path] = {d["message"] for d in diagnostics if d["code"] == UNUSED_IMPORT}
-    return already
+async def _unused_at_base(root: Path, change: ChangedPath) -> set[str] | None:
+    """The file's unused-import messages in the merge-base (empty for a new file); None if it can't be read,
+    which costs only this file's unused-import check, never the other lint findings."""
+    if change.base_path is None:
+        return set()
+    try:
+        source = await run_git(root, "show", f"{BASE}:{change.base_path}")
+    except GitError:
+        logger.warning("%s: merge-base unreadable, unused imports not checked", change.path, exc_info=True)
+        return None
+    diagnostics = await _ruff(root, [change.path], select=UNUSED_IMPORT, source=source)
+    return {d["message"] for d in diagnostics if d["code"] == UNUSED_IMPORT}
 
 
 def _urgency(finding: Finding) -> tuple[int, str, int]:
@@ -123,7 +123,7 @@ def _finding(path: str, line: int, hits: list[Diagnostic]) -> Finding:
         priority=1 if blocking else 2,
         confidence=10,
         title=title,
-        explanation="\n".join(f"- {hit['message']} (ruff `{hit['code']}`)" for hit in hits),
+        explanation=_explanation(hits),
         kind="types",
     )
 
@@ -135,9 +135,13 @@ def _unused_finding(path: str, line: int, hits: list[Diagnostic]) -> Finding:
         priority=3,
         confidence=10,
         title="Remove the unused import",
-        explanation="\n".join(f"- {hit['message']} (ruff `{hit['code']}`)" for hit in hits),
+        explanation=_explanation(hits),
         kind="lint",
     )
+
+
+def _explanation(hits: list[Diagnostic]) -> str:
+    return "\n".join(f"- {hit['message']} (ruff `{hit['code']}`)" for hit in hits)
 
 
 async def _ruff(root: Path, paths: list[str], *, select: str = RULES, source: str | None = None) -> list[Diagnostic]:

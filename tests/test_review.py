@@ -49,7 +49,7 @@ def test_parse_changes_handles_renames_deletions_and_binaries() -> None:
     numstat = "\0".join(["3\t1\ta.py", "2\t2\t", "old.py", "new.py", "0\t5\tgone.py", "-\t-\tlogo.png", ""])
     assert parse_changes(name_status, numstat) == [
         ChangedPath("a.py", "M", 3, 1),
-        ChangedPath("new.py", "R", 2, 2),
+        ChangedPath("new.py", "R", 2, 2, old_path="old.py"),
         ChangedPath("gone.py", "D", 0, 5),
         ChangedPath("logo.png", "A", None, None),
     ]

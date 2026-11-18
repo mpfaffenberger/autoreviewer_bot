@@ -121,15 +121,20 @@ async def test_a_missing_ruff_binary_is_a_lint_error(tmp_path: Path, monkeypatch
         await lint_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))
 
 
-def edited(root: Path, name: str, base: str, head: str) -> tuple[list[ChangedPath], dict[str, str]]:
-    """`name` as a file the PR edits: `base` committed on the merge-base branch, `head` checked out."""
+def edited(
+    root: Path, name: str, base: str, head: str, *, renamed_from: str | None = None
+) -> tuple[list[ChangedPath], dict[str, str]]:
+    """`name` as a file the PR edits (and maybe renames): `base` committed on the merge-base branch, `head`
+    in the working tree. The patch only needs to exist: unused imports don't depend on it."""
     git(root, "init", "-q", "-b", "base")
-    (root / name).write_text(base)
+    (root / (renamed_from or name)).write_text(base)
     git(root, "add", "-A")
     git(root, "commit", "-qm", "base")
+    if renamed_from:
+        git(root, "mv", renamed_from, name)
     (root / name).write_text(head)
-    patch = git(root, "diff", "--unified=0", "--", name).split("\n", 4)[-1]  # from the first @@ hunk on
-    return [ChangedPath(name, "M", 1, 1)], {name: patch + "\n"}
+    status = "R" if renamed_from else "M"
+    return [ChangedPath(name, status, 1, 1, old_path=renamed_from)], {name: "@@ -3 +3 @@\n-x\n+y\n"}
 
 
 async def test_an_import_left_unused_is_reported_though_its_line_is_untouched(tmp_path: Path) -> None:
@@ -165,3 +170,19 @@ async def test_a_pr_leaving_an_unused_import_is_approved_with_advice(repo: GitRe
     [comment] = github.inline_comments
     assert (comment.path, comment.line) == ("util.py", 1)
     assert comment.body.startswith("**[P3] Remove the unused import** (lint")
+
+
+async def test_a_renamed_file_is_compared_with_its_old_path(tmp_path: Path) -> None:
+    """From the bot's review of #28: moving a module must not blame the PR for its old unused imports."""
+    old = "import os\n\nSEP = '/'\n"
+    changes = edited(tmp_path, "new.py", old, "import os\nimport sys\n\nSEP = '|'\n", renamed_from="old.py")
+    [finding] = await lint_findings(tmp_path, *changes)  # sys is the PR's; os was unused before the move
+    assert "`sys` imported but unused" in finding.explanation
+
+
+async def test_an_unreadable_base_costs_only_that_files_unused_imports(tmp_path: Path) -> None:
+    """From the bot's review of #28: a git failure used to discard every lint finding, types included."""
+    source = "import os\n\n\n" + UNTYPED
+    changes, patches = new_file(tmp_path, "scale.py", source)  # no repository here: `git show` fails
+    findings = await lint_findings(tmp_path, [replace(changes[0], status="M")], patches)
+    assert [(f.kind, f.line) for f in findings] == [("types", 4)]
