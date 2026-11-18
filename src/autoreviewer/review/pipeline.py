@@ -18,7 +18,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.toolsets import FunctionToolset
 
-from autoreviewer.review.agents import LENS_LIMITS, REPORT_AS_YOU_GO, REPORT_TOOL, VERIFIER_LIMITS
+from autoreviewer.review.agents import LENS_LIMITS, LENS_RULES, REPORT_TOOL, VERIFIER_LIMITS
 from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
@@ -323,7 +323,7 @@ async def review_lens(
     """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier."""
     outcome = Outcome(block_at=block_at)
     judge = Judge(pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish)
-    combined = "\n\n".join(part for part in (instructions, REPORT_AS_YOU_GO) if part)
+    combined = "\n\n".join(part for part in (instructions, LENS_RULES) if part)
     run = await _run_judged(
         judge,
         lambda toolsets: lens.run(
@@ -363,7 +363,7 @@ async def review(
         judge,
         lambda toolsets: lens.run(
             prompt,
-            instructions=REPORT_AS_YOU_GO,
+            instructions=LENS_RULES,
             toolsets=toolsets,
             message_history=continuation.history if continuation else None,
             capabilities=[*lens_capabilities, progress.watch("reviewer")],
