@@ -34,7 +34,8 @@ from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results")
 CONCURRENCY = Settings.max_concurrent_jobs
-"""Cases at once: as many as the bot runs reviews, so cases don't queue behind each other's model lanes."""
+"""Cases at once by default: as many as the bot runs reviews, so cases don't queue behind each other's model
+lanes. More (--concurrency) finishes sooner, but per-case times then include waiting for lanes."""
 
 
 def _snapshot(path: Path, commit: str) -> None:
@@ -175,6 +176,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", nargs="*", help="case names to run (default: all)")
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="cases at once")
     parser.add_argument("--suite", choices=("correctness", "security", "dry"), default="correctness")
     parser.add_argument("--lens", action="append", choices=("security", "dry"), default=[], help="extra lens to run")
     args = parser.parse_args()
@@ -185,7 +187,7 @@ async def main() -> None:
 
     suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]
-    slots = asyncio.Semaphore(CONCURRENCY)
+    slots = asyncio.Semaphore(args.concurrency)
     with tempfile.TemporaryDirectory(prefix="autoreviewer-eval-") as work:
 
         async def bounded(case: Case) -> Result:
