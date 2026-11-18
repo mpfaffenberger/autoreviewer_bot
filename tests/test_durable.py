@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dbos import DBOS
 
 from autoreviewer.review import durable
 from autoreviewer.web.routing import PullRequestUpdated
@@ -72,6 +74,39 @@ async def test_enqueue_review_says_whether_the_head_was_already_reviewed(launch:
     await (await durable.enqueue(pull)).get_result()
     assert await durable.enqueue_review(pull) is True  # finished: asking again runs nothing
     assert len(github.reviews) == 1
+
+
+async def test_only_an_explicit_request_retries_a_crashed_review(launch: Launch) -> None:
+    github = await launch([])
+    github.fail_start_check = True
+    pull = pull_for(github.repo)
+    handle = await durable.enqueue(pull)
+    with pytest.raises(Exception, match="maximum of 3 retries"):
+        await handle.get_result()
+    attempts = github.check_attempts
+    assert await durable.enqueue_review(pull) is False  # e.g. a redelivered push: left alone
+    await asyncio.sleep(3)  # long enough for the queue (polled about once a second) to start a retry
+    assert (await handle.get_status()).status == "ERROR" and github.check_attempts == attempts
+
+    github.fail_start_check = False
+    assert await durable.enqueue_review(pull, retry_failed=True) is False  # "@bot review": runs again
+    for _ in range(200):
+        if github.reviews:
+            break
+        await asyncio.sleep(0.05)
+    assert [r["event"] for r in github.reviews] == ["APPROVE"]
+
+
+async def test_an_explicit_request_resumes_a_cancelled_review_on_its_check_run(launch: Launch) -> None:
+    github = await launch([])
+    github.check_update_delay = 0
+    pull = pull_for(github.repo)
+    handle = await durable.enqueue(pull)
+    await DBOS.cancel_workflow_async(handle.workflow_id)
+    assert (await handle.get_status()).status == "CANCELLED"
+    await durable.enqueue_review(pull, retry_failed=True)
+    await (await DBOS.retrieve_workflow_async(handle.workflow_id)).get_result()
+    assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1
 
 
 def test_workflow_ids_are_per_head_and_case_insensitive() -> None:

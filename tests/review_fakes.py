@@ -185,6 +185,8 @@ class FakeGitHub:
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_check_updates: bool = False
     check_update_delay: float = 0.0
+    fail_start_check: bool = False
+    check_attempts: int = 0
     fail_reactions: bool = False
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
@@ -211,6 +213,9 @@ class FakeGitHub:
         return Comparison(merge_base=merge_base, status=status)
 
     async def start_check(self, repo: Repo, head_sha: str) -> int:
+        self.check_attempts += 1
+        if self.fail_start_check:
+            raise RuntimeError("GitHub is down")
         self.checks.append({"status": "in_progress", "head_sha": head_sha})
         return len(self.checks)
 

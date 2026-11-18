@@ -12,6 +12,7 @@ minute of GPU time and nothing else.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -40,6 +41,9 @@ def _require_deps() -> job.ReviewDeps:
     if _deps is None:
         raise RuntimeError("durable.launch() must run before reviews are executed")
     return _deps
+
+
+logger = logging.getLogger("autoreviewer.durable")
 
 
 def workflow_id(pull: PullRequestUpdated) -> str:
@@ -103,10 +107,42 @@ async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResu
         return await queue.enqueue_async(review_workflow, pull)
 
 
-async def enqueue_review(pull: PullRequestUpdated) -> bool:
-    """Queue a review of this head (a no-op if one exists); True if it had already finished."""
+_ENDED_WITHOUT_RESULT = frozenset(
+    status.value
+    for status in (
+        WorkflowStatusString.CANCELLED,
+        WorkflowStatusString.ERROR,
+        WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED,
+    )
+)
+
+
+async def enqueue_review(pull: PullRequestUpdated, *, retry_failed: bool = False) -> bool:
+    """Queue a review of this head (a no-op if one exists); True if it had already finished.
+
+    With `retry_failed` (an explicit request, never a redelivered push), a review of this head that was
+    cancelled, crashed, or parked after repeated crashes is resumed instead of left as it is.
+    """
     handle = await enqueue(pull)
-    return (await handle.get_status()).status == WorkflowStatusString.SUCCESS.value
+    status = (await handle.get_status()).status
+    if retry_failed and status in _ENDED_WITHOUT_RESULT:
+        await _retry(handle.workflow_id, status)
+        return False
+    return status == WorkflowStatusString.SUCCESS.value
+
+
+async def _retry(workflow_id: str, status: str) -> None:
+    """Run an ended review again from its first failed step. Resuming would replay a recorded failure, so a
+    failed step means a fork (a new workflow keeping the steps before it, e.g. the check run); with no
+    failure recorded (cancelled, or crashed mid-step) it resumes where it stopped."""
+    steps = await DBOS.list_workflow_steps_async(workflow_id)
+    failed = [step["function_id"] for step in steps if step["error"] is not None]
+    if failed:
+        logger.info("retrying the %s review %s from step %d", status.lower(), workflow_id, min(failed))
+        await DBOS.fork_workflow_async(workflow_id, min(failed), queue_name=QUEUE)
+    else:
+        logger.info("resuming the %s review %s", status.lower(), workflow_id)
+        await DBOS.resume_workflow_async(workflow_id)
 
 
 def shutdown() -> None:
