@@ -124,8 +124,9 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
     )
 
 
-MAX_DRY_POSTED = 3
-"""The eval's clean 786-line commit drew 8 DRY comments, mostly true but too many to read: keep 3."""
+MAX_DRY_POSTED = 5
+"""The eval's clean 786-line commit drew 8 DRY comments, mostly true but too many to read. 3 dropped real
+findings for little gain; 5 keeps most of them while a PR's blocking findings stay easy to see (Mike, Nov 18)."""
 
 
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:

@@ -162,8 +162,8 @@ dependency the project already declares, or other code in the same PR. Not new d
 look-alikes that behave differently, not a second copy with no helper yet (the rule of three), not test
 files, and not unused imports or other leftovers (linters and the correctness lens cover those).
 `prompts/dry_verifier.md` checks the existing thing is real and covers this use, edge cases included.
-DRY findings never block (`ADVISORY_KINDS`), at most 3 are verified and posted per review (counting only
-findings past the free filters), and a continued review only looks at files changed since the last one.
+DRY findings never block (`ADVISORY_KINDS`), at most 5 (`MAX_DRY_POSTED`) are verified and posted per review,
+the lens's best 5 by its own ranking (counting only findings past the free filters), and a continued review only looks at files changed since the last one.
 `AUTOREVIEWER_DRY=false` turns it off.
 
 Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
