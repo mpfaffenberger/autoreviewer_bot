@@ -187,9 +187,12 @@ class FakeGitHub:
     check_update_delay: float = 0.0
     fail_start_check: bool = False
     check_attempts: int = 0
+    fail_get_pull: bool = False
     fail_reactions: bool = False
 
     async def get_pull(self, repo: Repo, number: int) -> PullRequestState:
+        if self.fail_get_pull:
+            raise RuntimeError("GitHub is down")
         heads = self.head_shas or [self.repo.head]
         head = heads.pop(0) if len(heads) > 1 else heads[0]
         return PullRequestState(

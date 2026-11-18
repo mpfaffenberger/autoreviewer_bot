@@ -66,6 +66,10 @@ async def _finish_check(pull: PullRequestUpdated, check_id: int, result: job.Che
     await job.finish_check(_require_deps(), pull, check_id, result)
 
 
+REVIEW_STEP = 2
+"""review_workflow's second step (_review_and_post): a re-run starts there, keeping the check run."""
+
+
 @DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
 async def review_workflow(pull: PullRequestUpdated) -> job.CheckResult:
     check_id = await _start_check(pull)
@@ -118,15 +122,24 @@ _ENDED_WITHOUT_RESULT = frozenset(
 
 
 async def enqueue_review(pull: PullRequestUpdated, *, retry_failed: bool = False) -> bool:
-    """Queue a review of this head (a no-op if one exists); True if it had already finished.
+    """Queue a review of this head (a no-op if one exists); True if it had already finished with a verdict.
 
     With `retry_failed` (an explicit request, never a redelivered push), a review of this head that was
-    cancelled, crashed, or parked after repeated crashes is resumed instead of left as it is.
+    cancelled, crashed, parked after repeated crashes, or finished without a verdict runs again.
     """
     handle = await enqueue(pull)
     status = (await handle.get_status()).status
     if retry_failed and status in _ENDED_WITHOUT_RESULT:
         await _retry(handle.workflow_id, status)
+        return False
+    if (
+        retry_failed
+        and status == WorkflowStatusString.SUCCESS.value
+        and (await handle.get_result()).conclusion == "neutral"
+    ):
+        # Finished without a verdict (partially reviewed, timed out, failed): what "push again or ask again" promises.
+        logger.info("re-running %s, which ended without a verdict", handle.workflow_id)
+        await DBOS.fork_workflow_async(handle.workflow_id, REVIEW_STEP, queue_name=QUEUE)
         return False
     return status == WorkflowStatusString.SUCCESS.value
 

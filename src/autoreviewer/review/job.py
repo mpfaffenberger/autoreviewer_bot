@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -49,6 +49,8 @@ from autoreviewer.web.routing import PullRequestUpdated
 
 logger = logging.getLogger("autoreviewer.job")
 
+SUPERSEDED_CHECK_S = 60.0
+"""How often a running review checks whether its PR moved on (a newer push, or closed)."""
 PROGRESS_INTERVAL_S = 30.0
 """How often a running review updates its check run, at most (GitHub rate-limits App writes)."""
 
@@ -429,24 +431,30 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
     )
     try:
         async with asyncio.timeout(deps.hard_deadline_s):
-            result = await review_change(
-                reader=deps.github,
-                source=deps.source,
-                agents=deps.agents,
-                work_dir=deps.work_dir,
-                repo=repo,
-                number=pull.number,
-                state=state,
-                head_sha=pull.head_sha,
-                memory=deps.memory,
-                lens_version=deps.lens_version,
-                block_at=deps.block_at,
-                progress=progress,
-                simplifier=deps.simplifier,
-                lenses=deps.lenses,
-                publish=publisher,
-                deadline=Deadline(deps.soft_deadline_s),
+            result = await _unless_superseded(
+                deps,
+                repo,
+                pull,
+                review_change(
+                    reader=deps.github,
+                    source=deps.source,
+                    agents=deps.agents,
+                    work_dir=deps.work_dir,
+                    repo=repo,
+                    number=pull.number,
+                    state=state,
+                    head_sha=pull.head_sha,
+                    memory=deps.memory,
+                    lens_version=deps.lens_version,
+                    block_at=deps.block_at,
+                    progress=progress,
+                    simplifier=deps.simplifier,
+                    lenses=deps.lenses,
+                    publish=publisher,
+                    deadline=Deadline(deps.soft_deadline_s),
+                ),
             )
+
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
         raise
@@ -476,6 +484,41 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         posted=publisher.posted,
     )
     return _summary(result.outcome)
+
+
+async def _unless_superseded(
+    deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, review: Awaitable[Reviewed | CheckResult]
+) -> Reviewed | CheckResult:
+    """Run `review`, cancelling it as soon as the PR moves on (a newer push, or closed): its result would be
+    thrown away, and the newer head's review may be waiting for this slot."""
+    reviewing = asyncio.ensure_future(review)
+    watching = asyncio.ensure_future(_moved_on(deps, repo, pull))
+    try:
+        await asyncio.wait({reviewing, watching}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (reviewing, watching):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(reviewing, watching, return_exceptions=True)
+    if watching.done() and not watching.cancelled() and watching.result():
+        raise Superseded
+    return reviewing.result()
+
+
+async def _moved_on(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> bool:
+    """Return True once the PR's head is no longer `pull.head_sha` or the PR is closed; check every minute."""
+    while True:
+        await asyncio.sleep(SUPERSEDED_CHECK_S)
+        try:
+            state = await deps.github.get_pull(repo, pull.number)
+        except Exception:  # a GitHub hiccup is no reason to stop a review
+            logger.warning("could not check whether %s/%s#%d moved on", pull.owner, pull.repo, pull.number)
+            continue
+        if state.head_sha != pull.head_sha or state.state != "open":
+            logger.info(
+                "%s/%s#%d moved on from %s; stopping its review", pull.owner, pull.repo, pull.number, pull.head_sha[:7]
+            )
+            return True
 
 
 async def _forget_if_closed(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, conversation: str) -> None:

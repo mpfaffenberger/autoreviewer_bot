@@ -109,6 +109,23 @@ async def test_an_explicit_request_resumes_a_cancelled_review_on_its_check_run(l
     assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1
 
 
+async def test_an_explicit_request_reruns_a_review_that_ended_without_a_verdict(launch: Launch) -> None:
+    github = await launch([])
+    github.fail_get_pull = True  # the review fails: "Review failed", a neutral check and no verdict
+    pull = pull_for(github.repo)
+    result = await (await durable.enqueue(pull)).get_result()
+    assert result.title == "Review failed" and github.reviews == []
+    assert await durable.enqueue_review(pull) is True  # a redelivered push: finished, left alone
+
+    github.fail_get_pull = False
+    assert await durable.enqueue_review(pull, retry_failed=True) is False
+    for _ in range(200):
+        if github.reviews:
+            break
+        await asyncio.sleep(0.05)
+    assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1  # same check run
+
+
 def test_workflow_ids_are_per_head_and_case_insensitive() -> None:
     other_head = PullRequestUpdated(1, "mpfaffenberger", "demo", 7, "b" * 40)
     shouted = PullRequestUpdated(1, "MPFAFFENBERGER", "Demo", 7, HEAD)
