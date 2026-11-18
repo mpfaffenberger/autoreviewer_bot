@@ -16,7 +16,7 @@ from githubkit.webhooks import verify
 from autoreviewer.web.config import Settings
 
 if TYPE_CHECKING:
-    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.models import Model
 
     from autoreviewer.review.job import AgentFactory, Lens
     from autoreviewer.review.schemas import LensKind
@@ -98,12 +98,17 @@ def create_app(
     return app
 
 
-def _models(settings: Settings) -> tuple[OpenAIChatModel, OpenAIChatModel]:
-    """(the lens's model, the verifier's model) on Boodleton."""
+def _models(settings: Settings) -> tuple[Model, Model]:
+    """(the lens's model, the verifier's model) on Boodleton, each limited to its lanes."""
     from autoreviewer.review.agents import boodleton_model
 
-    def model(name: str) -> OpenAIChatModel:
-        return boodleton_model(name, base_url=settings.boodleton_base_url, api_key=settings.boodleton_api_key)
+    def model(name: str) -> Model:
+        return boodleton_model(
+            name,
+            base_url=settings.boodleton_base_url,
+            api_key=settings.boodleton_api_key,
+            lanes=settings.model_lanes.get(name),
+        )
 
     return model(settings.lens_model), model(settings.verifier_model)
 

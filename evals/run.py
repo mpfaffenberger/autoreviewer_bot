@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models import Model
 
 from autoreviewer.github import PullRequestState, Repo
 from autoreviewer.review.agents import (
@@ -37,6 +37,7 @@ from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
+from autoreviewer.web.config import DEFAULT_MODEL_LANES, parse_lanes
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
@@ -91,15 +92,19 @@ def build_repo(case: Case, parent: Path) -> tuple[GitRepo, list[int]]:
     return GitRepo(path, base, head), lines
 
 
-def models_from_env() -> tuple[OpenAIChatModel, OpenAIChatModel]:
-    """(lens model, verifier model) on Boodleton, as configured for the bot."""
+def models_from_env() -> tuple[Model, Model]:
+    """(lens model, verifier model) on Boodleton, as configured for the bot, with the bot's lanes."""
     base_url = os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1")
     key = os.environ["BOODLETON_API_KEY"]
+    configured = os.environ.get("AUTOREVIEWER_MODEL_LANES")
+    lanes = parse_lanes(configured) if configured else DEFAULT_MODEL_LANES
+
+    def model(name: str) -> Model:
+        return boodleton_model(name, base_url=base_url, api_key=key, lanes=lanes.get(name))
+
     lens = os.environ.get("AUTOREVIEWER_LENS_MODEL", "qwen3.8-flash-next")
     verifier = os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", "deepseek-v4.1-flash")
-    return boodleton_model(lens, base_url=base_url, api_key=key), boodleton_model(
-        verifier, base_url=base_url, api_key=key
-    )
+    return model(lens), model(verifier)
 
 
 def hits(findings: list[Finding], case: Case, lines: list[int]) -> bool:
