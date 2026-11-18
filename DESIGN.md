@@ -159,10 +159,12 @@ blocking. If it fails, the review fails (no verdict); approving without it would
 
 `prompts/dry.md`: new code that re-implements an existing helper in the repo, the standard library, a
 dependency the project already declares, or other code in the same PR. Not new dependencies, not
-look-alikes that behave differently, not a second copy with no helper yet (the rule of three).
+look-alikes that behave differently, not a second copy with no helper yet (the rule of three), not test
+files, and not unused imports or other leftovers (linters and the correctness lens cover those).
 `prompts/dry_verifier.md` checks the existing thing is real and covers this use, edge cases included.
-DRY findings never block (`ADVISORY_KINDS`), and a continued review only looks at files changed since
-the last one. `AUTOREVIEWER_DRY=false` turns it off.
+DRY findings never block (`ADVISORY_KINDS`), at most 3 are verified and posted per review (counting only
+findings past the free filters), and a continued review only looks at files changed since the last one.
+`AUTOREVIEWER_DRY=false` turns it off.
 
 Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
 `agents.lens_pair()`, optional run instructions, and whether a continued review re-reads the whole PR.

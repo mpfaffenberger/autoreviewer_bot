@@ -32,6 +32,7 @@ from autoreviewer.review.lint import LintError, type_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
+    MAX_FINDINGS,
     Continuation,
     Outcome,
     Publish,
@@ -65,6 +66,8 @@ class Lens:
     agents: AgentFactory
     instructions: Callable[[Sequence[str]], str] | None = None
     """Run instructions from the paths it reviews (e.g. the security lens's language references)."""
+    max_posted: int = MAX_FINDINGS
+    """Verify and post at most this many of its findings: advice should stay short."""
     whole_pr: bool = True
     """On a continued review: the whole PR again (required for a lens that blocks, or a finding from an
     earlier commit would quietly stop blocking), or only files changed since the last review."""
@@ -96,6 +99,7 @@ async def _run_lens(
             block_at=block_at,
             publish=publish,
             capabilities=[deadline.watch(spec.kind)] if deadline else (),
+            max_posted=spec.max_posted,
         )
     except Exception:
         if spec.kind not in ADVISORY_KINDS:
