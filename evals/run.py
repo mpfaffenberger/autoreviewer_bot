@@ -37,7 +37,7 @@ from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.web.config import DEFAULT_MODEL_LANES, parse_lanes
+from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
@@ -45,7 +45,8 @@ from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results")
-CONCURRENCY = 2
+CONCURRENCY = Settings.max_concurrent_jobs
+"""Cases at once: as many as the bot runs reviews, so cases don't queue behind each other's model lanes."""
 
 
 def _snapshot(path: Path, commit: str) -> None:

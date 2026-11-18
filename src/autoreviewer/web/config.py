@@ -67,11 +67,7 @@ class Settings:
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
             max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
-            **(
-                {"model_lanes": parse_lanes(env["AUTOREVIEWER_MODEL_LANES"])}
-                if "AUTOREVIEWER_MODEL_LANES" in env
-                else {}
-            ),
+            model_lanes=parse_lanes(env.get("AUTOREVIEWER_MODEL_LANES", "")) or dict(DEFAULT_MODEL_LANES),
             soft_deadline_minutes=float(env.get("AUTOREVIEWER_SOFT_DEADLINE_MINUTES", cls.soft_deadline_minutes)),
             hard_deadline_minutes=float(env.get("AUTOREVIEWER_HARD_DEADLINE_MINUTES", cls.hard_deadline_minutes)),
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
@@ -105,7 +101,8 @@ def parse_bool(env: Mapping[str, str], name: str, *, default: bool) -> bool:
 
 
 def parse_lanes(value: str) -> dict[str, int]:
-    """ "model=3,other=4" -> {"model": 3, "other": 4}; a malformed entry stops startup."""
+    """ "model=3,other=4" -> {"model": 3, "other": 4}; a malformed entry stops startup. Blank -> {}: the caller
+    falls back to the defaults (a placeholder line must never switch the limits off)."""
     lanes: dict[str, int] = {}
     for item in filter(None, (part.strip() for part in value.split(","))):
         name, _, count = item.rpartition("=")

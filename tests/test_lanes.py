@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.review.agents import with_lanes
-from autoreviewer.web.config import DEFAULT_MODEL_LANES, parse_lanes
+from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
 
 pytestmark = pytest.mark.anyio
 
@@ -40,3 +40,12 @@ def test_lanes_parse_strictly() -> None:
 
 def test_the_defaults_match_the_model_servers() -> None:
     assert DEFAULT_MODEL_LANES == {"qwen3.8-flash-next": 3, "deepseek-v4.1-flash": 4}
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_a_missing_or_blank_setting_keeps_the_default_lanes(value: str | None) -> None:
+    env = {"GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "s", "GITHUB_WEBHOOK_SECRET": "w", "BOODLETON_API_KEY": "b",
+           "AUTOREVIEWER_PRIVATE_KEY_PATH": __file__}  # fmt: skip
+    if value is not None:
+        env["AUTOREVIEWER_MODEL_LANES"] = value
+    assert Settings.from_env(env).model_lanes == DEFAULT_MODEL_LANES
