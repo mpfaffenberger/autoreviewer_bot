@@ -18,7 +18,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.toolsets import FunctionToolset
 
-from autoreviewer.review.agents import LENS_LIMITS, LENS_RULES, REPORT_TOOL, VERIFIER_LIMITS
+from autoreviewer.review.agents import FOCUS, LENS_LIMITS, LENS_RULES, REPORT_TOOL, VERIFIER_LIMITS
 from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
@@ -306,10 +306,11 @@ LensRun = Callable[[list[FunctionToolset[None]]], Awaitable[AgentRunResult[LensR
 """Starts a lens run with these extra toolsets."""
 
 
-async def _run_judged(judge: Judge, run: LensRun) -> AgentRunResult[LensReport]:
-    """Run a lens with `report_finding`, then judge its final report; no verification outlives a failure."""
+async def _run_judged(judge: Judge, run: LensRun, *, report_as_you_go: bool = True) -> AgentRunResult[LensReport]:
+    """Run a lens (with `report_finding` if it reports as it goes), then judge its final report; no verification
+    outlives a failure."""
     try:
-        result = await run([judge.toolset()])
+        result = await run([judge.toolset()] if report_as_you_go else [])
         await judge.finish(result.output.findings)
     except BaseException:
         judge.cancel()
@@ -330,13 +331,16 @@ async def review_lens(
     capabilities: Sequence[AbstractCapability[None]] = (),
     max_posted: int = MAX_FINDINGS,
 ) -> Outcome:
-    """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier. Only its first
-    `max_posted` findings past the free filters are verified (and so posted)."""
+    """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier.
+
+    With a `max_posted` cap, only its best findings are verified (and so posted): it doesn't report as it goes,
+    so the cut is made on its ranked final report rather than on whatever it found first."""
     outcome = Outcome(block_at=block_at)
     judge = Judge(
         pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish, limit=max_posted
     )
-    combined = "\n\n".join(part for part in (instructions, LENS_RULES) if part)
+    report_as_you_go = max_posted >= MAX_FINDINGS
+    combined = "\n\n".join(part for part in (instructions, LENS_RULES if report_as_you_go else FOCUS) if part)
     run = await _run_judged(
         judge,
         lambda toolsets: lens.run(
@@ -346,6 +350,7 @@ async def review_lens(
             capabilities=[*capabilities, progress.watch(kind)],
             usage_limits=LENS_LIMITS,
         ),
+        report_as_you_go=report_as_you_go,
     )
     logger.info("%s: %d requests, %d posted", kind, run.usage.requests, len(outcome.posted))
     return outcome

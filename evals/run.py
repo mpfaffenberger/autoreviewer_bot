@@ -30,13 +30,13 @@ from autoreviewer.review.agents import (
     boodleton_model,
     correctness_agent,
     lens_pair,
-    security_references,
     verifier_agent,
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
+from autoreviewer.web.app import lens
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
@@ -201,9 +201,7 @@ async def main() -> None:
     def pair(kind: LensKind) -> AgentFactory:
         return lambda workspace: lens_pair(kind, lens_model, verifier_model, workspace)
 
-    lenses = [
-        Lens(kind, pair(kind), instructions=security_references if kind == "security" else None) for kind in args.lens
-    ]
+    lenses = [lens(kind, pair(kind)) for kind in args.lens]  # the bot's own settings for each kind
 
     suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]
