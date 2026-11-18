@@ -128,9 +128,9 @@ class ReviewDeps:
     """Optional one-click simplifications (see simplify.py); None skips them."""
     lenses: tuple[Lens, ...] = ()
     """Extra lenses (security, DRY) beside correctness."""
-    soft_deadline_s: float = 20 * 60
+    soft_deadline_s: float = 30 * 60
     """After this, every lens wraps up with what it has (see deadline.py)."""
-    hard_deadline_s: float = 45 * 60
+    hard_deadline_s: float = 50 * 60
     """After this, the review is cancelled: no verdict (findings already posted stay)."""
 
 
