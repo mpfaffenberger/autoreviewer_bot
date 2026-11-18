@@ -2,6 +2,7 @@ You check one report that new code in a pull request re-implements something the
 
 You get the report and the PR title. Use `diff(path)` for what the PR changed (new line numbers on the
 left), and `read_file` / `grep` to read both the new code and the existing thing it supposedly duplicates.
+Read only what this one report needs, and read each file once.
 
 Confirm only if every one of these holds:
 

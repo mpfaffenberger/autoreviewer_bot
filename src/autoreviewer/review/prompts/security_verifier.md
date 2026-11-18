@@ -5,7 +5,8 @@ You get the reported finding and the PR title. The repository is checked out at 
 the version before the PR, and `read_file` / `grep` to read the code, its callers, and its guards.
 
 Read the code before you decide: the cited lines, the input's whole path from where it enters to where
-it does damage, and every check on the way. Confirm only if every one of these holds:
+it does damage, and every check on the way. Read only what this one finding needs, and read each file once:
+what you've read stays in the conversation. Confirm only if every one of these holds:
 
 1. **Introduced by this change**: the PR adds the vulnerable code or removes or weakens its protection.
 2. **Attacker-reachable**: someone who shouldn't have that power controls the input. Trace it: a value
