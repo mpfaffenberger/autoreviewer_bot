@@ -29,9 +29,9 @@ class Settings:
     """Post optional one-click simplifications of the code a PR adds (see review/simplify.py)."""
     block_at_priority: int = 1
     """Confirmed findings at this priority or more urgent (0 = P0 ... 3 = P3) block the merge; 3 blocks on all."""
-    soft_deadline_minutes: float = 20
+    soft_deadline_minutes: float = 30
     """After this, every lens wraps up with what it has; a review cut short never approves."""
-    hard_deadline_minutes: float = 45
+    hard_deadline_minutes: float = 50
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
     max_concurrent_jobs: int = 2
     """Reviews run on the shared GPU; two at a time leaves room for everyone else."""
