@@ -111,6 +111,7 @@ async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResu
         return await queue.enqueue_async(review_workflow, pull)
 
 
+_RUNNING = frozenset({WorkflowStatusString.PENDING.value, WorkflowStatusString.ENQUEUED.value})
 _ENDED_WITHOUT_RESULT = frozenset(
     status.value
     for status in (
@@ -129,19 +130,28 @@ async def enqueue_review(pull: PullRequestUpdated, *, retry_failed: bool = False
     """
     handle = await enqueue(pull)
     status = (await handle.get_status()).status
-    if retry_failed and status in _ENDED_WITHOUT_RESULT:
+    if not retry_failed:
+        return status == WorkflowStatusString.SUCCESS.value
+    # Retries are forks of this workflow: one at a time, and none once one has reached a verdict.
+    forks = await DBOS.list_workflows_async(forked_from=handle.workflow_id)
+    if any(fork.status in _RUNNING for fork in forks):
+        return False  # already being retried
+    if any(fork.status == WorkflowStatusString.SUCCESS.value and _has_verdict(fork.output) for fork in forks):
+        return True
+    if status in _ENDED_WITHOUT_RESULT:
         await _retry(handle.workflow_id, status)
         return False
-    if (
-        retry_failed
-        and status == WorkflowStatusString.SUCCESS.value
-        and (await handle.get_result()).conclusion == "neutral"
-    ):
+    if status == WorkflowStatusString.SUCCESS.value and not _has_verdict(await handle.get_result()):
         # Finished without a verdict (partially reviewed, timed out, failed): what "push again or ask again" promises.
         logger.info("re-running %s, which ended without a verdict", handle.workflow_id)
         await DBOS.fork_workflow_async(handle.workflow_id, REVIEW_STEP, queue_name=QUEUE)
         return False
     return status == WorkflowStatusString.SUCCESS.value
+
+
+def _has_verdict(result: object) -> bool:
+    """A finished review that approved or requested changes (not partial, timed out, failed, or superseded)."""
+    return getattr(result, "conclusion", "neutral") != "neutral"
 
 
 async def _retry(workflow_id: str, status: str) -> None:

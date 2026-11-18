@@ -33,7 +33,9 @@ so a marker an attacker plants in the PR (and gets quoted) can't make a real fin
 
 def fingerprint(head_sha: str, finding: Finding) -> str:
     """Identifies a finding's comment on one commit, so replaying a review never posts it twice."""
-    return hashlib.sha256(f"{head_sha}|{finding.kind}|{finding.path}|{finding.line}".encode()).hexdigest()[:16]
+    # Priority too: a more urgent restatement of a finding already posted is a new comment, not a repeat.
+    key = f"{head_sha}|{finding.kind}|{finding.path}|{finding.line}|{finding.priority}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def inline_comment(finding: Finding, *, head_sha: str, block_at: int) -> ReviewComment:
@@ -61,8 +63,10 @@ class Publisher:
 
     async def __call__(self, finding: Finding) -> None:
         key = fingerprint(self._head_sha, finding)
-        try:
-            async with self._lock:
+        # One post at a time, decided and recorded under the lock: two reports of one defect arriving together
+        # must not both see "not posted yet". (Posts are few and quick.)
+        async with self._lock:
+            try:
                 if self._existing is None:
                     bodies = await self._github.review_comment_bodies(self._repo, self._number, author=self._author)
                     self._existing = {match[1] for body in bodies if (match := _MARKER.search(body))}
@@ -73,17 +77,17 @@ class Publisher:
                 if any(same_defect(f, finding) and f.priority <= finding.priority for f in self._findings):
                     self.posted.add(key)
                     return
-            comment = inline_comment(finding, head_sha=self._head_sha, block_at=self._block_at)
-            await self._github.create_review_comment(
-                self._repo, self._number, commit_sha=self._head_sha, comment=comment
-            )
-        except Exception:
-            logger.warning(
-                "could not post %s:%s now; it goes in the final review", finding.path, finding.line, exc_info=True
-            )
-            return
-        self.posted.add(key)
-        self._findings.append(finding)  # only once its comment exists can it stand in for a duplicate
+                comment = inline_comment(finding, head_sha=self._head_sha, block_at=self._block_at)
+                await self._github.create_review_comment(
+                    self._repo, self._number, commit_sha=self._head_sha, comment=comment
+                )
+            except Exception:
+                logger.warning(
+                    "could not post %s:%s now; it goes in the final review", finding.path, finding.line, exc_info=True
+                )
+                return
+            self.posted.add(key)
+            self._findings.append(finding)  # only once its comment exists can it stand in for a duplicate
 
 
 async def post_review(

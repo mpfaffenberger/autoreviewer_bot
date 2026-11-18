@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
@@ -143,8 +145,13 @@ async def test_the_verdict_body_names_posted_findings_when_inline_comments_are_r
     assert "`stats.py:5`" in review["body"] and "`stats.py:3`" in review["body"]
 
 
-async def _scripted_review(workspace: Workspace, mid_run: dict[str, object], final: list[dict[str, object]]) -> Outcome:
-    """A lens that reports `mid_run` with report_finding, then ends with `final`; everything is confirmed."""
+async def _scripted_review(
+    workspace: Workspace,
+    mid_run: dict[str, object],
+    final: list[dict[str, object]],
+    confirm: Callable[[dict[str, Any]], bool] = lambda f: True,
+) -> Outcome:
+    """A lens that reports `mid_run` with report_finding, then ends with `final`; `confirm` judges each."""
 
     def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if not any(isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, "parts", [])):
@@ -154,7 +161,7 @@ async def _scripted_review(workspace: Workspace, mid_run: dict[str, object], fin
 
     agent, verifier = (
         correctness_agent(FunctionModel(lens), workspace),
-        verifier_agent(verifier_model(lambda f: True), workspace),
+        verifier_agent(verifier_model(confirm), workspace),
     )
     return await review(await pr_text(workspace), agent, verifier)
 
@@ -170,3 +177,28 @@ async def test_a_filtered_finding_repeated_in_the_final_report_is_recorded_once(
     hunch = finding(3, confidence=2)
     outcome = await _scripted_review(workspace, hunch, [hunch])
     assert [f.line for f in outcome.low_confidence] == [3]
+
+
+async def test_two_reports_of_one_defect_arriving_together_post_once(repo: GitRepo) -> None:
+    github = FakeGitHub(repo, comment_delay=0.05)
+    publish = publisher(github)
+    await asyncio.gather(publish(confirmed(kind="security")), publish(confirmed()))
+    assert len(github.review_comments) == 1
+
+
+async def test_a_more_urgent_restatement_of_the_same_kind_is_posted(repo: GitRepo) -> None:
+    github = FakeGitHub(repo)
+    publish = publisher(github)
+    await publish(confirmed(priority=3))
+    await publish(confirmed(priority=1))
+    assert [c["comment"].body.startswith("**[P1]") for c in github.review_comments] == [False, True]
+
+
+async def test_a_superseded_report_leaves_no_record_behind(workspace: Workspace) -> None:
+    def confirm(reported: dict[str, Any]) -> bool:
+        if reported["priority"] == 3:
+            raise RuntimeError("model server down")  # the earlier, less urgent report can't be verified
+        return True
+
+    outcome = await _scripted_review(workspace, finding(5, priority=3), [finding(5, priority=1)], confirm)
+    assert [f.priority for f in outcome.posted] == [1] and outcome.unverified == [] and outcome.rejected == []
