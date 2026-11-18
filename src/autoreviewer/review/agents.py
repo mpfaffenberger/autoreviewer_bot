@@ -22,6 +22,7 @@ from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
 from autoreviewer.review.schemas import LensKind, LensReport, SimplifyReport, SimplifyVerdict, Verification
 from autoreviewer.review.workspace import Workspace
+from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, QWEN_CONTEXT_WINDOW
 
 PROMPTS = Path(__file__).parent / "prompts"
 PSTACK = PROMPTS / "vendor" / "pstack"
@@ -71,11 +72,6 @@ def _lanes(name: str, lanes: int) -> ConcurrencyLimiter:
 def _read_only_repo(root: Path) -> list[LocalWorkspace[None] | FileSystem[None]]:
     """The checkout, readable and searchable, and nothing else: no writes, no shell, no network."""
     return [LocalWorkspace(root, read_only=True), FileSystem(read_only=True, tools=sorted(READ_ONLY_TOOL_NAMES))]
-
-
-QWEN_CONTEXT_WINDOW = 262_144
-DEEPSEEK_CONTEXT_WINDOW = 1_048_576
-"""As reported by the serving engines' /v1/models (max_model_len), 2026-11-16."""
 
 
 def _agent[OutputT](

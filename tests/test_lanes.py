@@ -39,7 +39,7 @@ def test_lanes_parse_strictly() -> None:
 
 
 def test_the_defaults_match_the_model_servers() -> None:
-    assert DEFAULT_MODEL_LANES == {"qwen3.8-flash-next": 3, "deepseek-v4.1-flash": 4}
+    assert DEFAULT_MODEL_LANES == {"qwen3.8-flash-next": 4, "deepseek-v4.1-flash": 4}
 
 
 @pytest.mark.parametrize("value", [None, "", "  "])

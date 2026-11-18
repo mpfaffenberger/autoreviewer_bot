@@ -7,8 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, DEFAULT_MODEL_LANES, QWEN_CONTEXT_WINDOW
+
 DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
-DEFAULT_MODEL_LANES = {"qwen3.8-flash-next": 3, "deepseek-v4.1-flash": 4}
 
 
 @dataclass(frozen=True)
@@ -45,8 +46,8 @@ class Settings:
     boodleton_api_key: str = field(default="", repr=False)
     lens_model: str = "qwen3.8-flash-next"
     verifier_model: str = "deepseek-v4.1-flash"
-    lens_context_window: int = 262_144
-    verifier_context_window: int = 1_048_576
+    lens_context_window: int = QWEN_CONTEXT_WINDOW
+    verifier_context_window: int = DEEPSEEK_CONTEXT_WINDOW
     """Each model's context window in tokens; compaction keeps conversations under 60% of it."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
