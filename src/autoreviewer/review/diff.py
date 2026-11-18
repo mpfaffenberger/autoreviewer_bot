@@ -27,6 +27,13 @@ class ChangedPath:
     added: int | None
     removed: int | None
     """None for binary files."""
+    old_path: str | None = None
+    """The path in the merge-base, for renames and copies."""
+
+    @property
+    def base_path(self) -> str | None:
+        """Where this file was in the merge-base; None for a file the PR adds."""
+        return None if self.status == "A" else self.old_path or self.path
 
     @property
     def reviewable(self) -> bool:
@@ -43,14 +50,13 @@ class Selection:
 
 def parse_changes(name_status_z: str, numstat_z: str) -> list[ChangedPath]:
     """Combine `git diff --name-status -z -M` and `git diff --numstat -z -M` output."""
-    statuses: dict[str, str] = {}
+    statuses: dict[str, tuple[str, str | None]] = {}
     fields = iter(name_status_z.split("\0"))
     for status in fields:
         if not status:
             continue
-        if status[0] in "RC":  # rename/copy: old path, then new path
-            next(fields)
-        statuses[next(fields)] = status[0]
+        old = next(fields) if status[0] in "RC" else None  # rename/copy: old path, then new path
+        statuses[next(fields)] = (status[0], old)
 
     counts: dict[str, tuple[int | None, int | None]] = {}
     fields = iter(numstat_z.split("\0"))
@@ -63,7 +69,10 @@ def parse_changes(name_status_z: str, numstat_z: str) -> list[ChangedPath]:
             path = next(fields)
         counts[path] = (None, None) if added == "-" else (int(added), int(removed))
 
-    return [ChangedPath(path, status, *counts.get(path, (None, None))) for path, status in statuses.items()]
+    return [
+        ChangedPath(path, status, *counts.get(path, (None, None)), old_path=old)
+        for path, (status, old) in statuses.items()
+    ]
 
 
 def select(changes: list[ChangedPath]) -> Selection:

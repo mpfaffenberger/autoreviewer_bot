@@ -162,8 +162,8 @@ dependency the project already declares, or other code in the same PR. Not new d
 look-alikes that behave differently, not a second copy with no helper yet (the rule of three), not test
 files, and not unused imports or other leftovers (linters and the correctness lens cover those).
 `prompts/dry_verifier.md` checks the existing thing is real and covers this use, edge cases included.
-DRY findings never block (`ADVISORY_KINDS`), at most 3 are verified and posted per review (counting only
-findings past the free filters), and a continued review only looks at files changed since the last one.
+DRY findings never block (`ADVISORY_KINDS`), at most 5 (`MAX_DRY_POSTED`) are verified and posted per review,
+the lens's best 5 by its own ranking (counting only findings past the free filters), and a continued review only looks at files changed since the last one.
 `AUTOREVIEWER_DRY=false` turns it off.
 
 Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
@@ -238,6 +238,13 @@ justified. ruff only parses files and runs with `--isolated`, so the repo's own 
 `per-file-ignores`) can't switch the rules off. These findings skip the verifier, are labelled
 "(types)", and aren't kept in the lens's memory, since they're recomputed every review. This repo applies
 the same rules to itself (`pyproject.toml`). TypeScript (oxlint) is next once a TS repo is subscribed.
+
+Unused imports (`F401`) are the other exception to "lines the PR adds": deleting an import's last use
+leaves the import line untouched. So an unused import anywhere in a changed file is reported when the
+same message isn't already raised at the merge-base, where ruff is run on `git show base:path`. New,
+copied and renamed files have no base, so every unused import in them counts. These are P3 `lint`
+findings and never block (`ADVISORY_KINDS`): failing the build is CI's job. The lens prompts tell
+correctness and DRY to leave them alone; correctness once posted one as a blocking P1.
 A type *checker* (`ty`) would need the PR's dependencies installed, which means running the PR's
 build code, so it waits for the sandbox.
 

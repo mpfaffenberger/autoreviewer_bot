@@ -26,7 +26,7 @@ CONFIDENCE_HELP = (
 
 LensKind = Literal["security", "dry"]
 """Lenses beyond correctness: each reviews the PR fresh and has its own verifier."""
-ADVISORY_KINDS = frozenset({"simplify", "dry"})
+ADVISORY_KINDS = frozenset({"simplify", "dry", "lint"})
 """Findings of these kinds are suggestions: they never block a merge, at any priority."""
 
 
@@ -46,7 +46,7 @@ class Finding(BaseModel):
         description='"security" if an attacker who controls some input can exploit it; otherwise "correctness"',
     )
     """The model's claim. In a combined lens, code takes the finding's `kind` (and so its verifier) from it."""
-    kind: SkipJsonSchema[Literal["correctness", "types", "simplify"] | LensKind] = "correctness"
+    kind: SkipJsonSchema[Literal["correctness", "types", "lint", "simplify"] | LensKind] = "correctness"
     """Which check found it. Not in the lens's schema: the lens only ever produces correctness findings."""
     start_line: SkipJsonSchema[int | None] = None
     """With `replacement`: the first line of a one-click GitHub suggestion that ends at `line`."""

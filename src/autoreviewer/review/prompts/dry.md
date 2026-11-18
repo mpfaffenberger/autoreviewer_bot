@@ -26,7 +26,7 @@ New code (lines this PR adds) that re-implements:
   three), so only report it if the copies are long or already diverging.
 - Anything in test files (`tests/`, `test_*.py`, `*_test.go`, `*.spec.ts`, ...): repetition in tests often
   keeps each test readable on its own.
-- Unused imports, dead code, or leftovers: linters and the correctness reviewer cover those.
+- Unused imports (a linter reports those), dead code, or leftovers (the correctness reviewer covers those).
 
 ## Findings
 
