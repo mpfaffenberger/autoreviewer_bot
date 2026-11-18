@@ -99,7 +99,8 @@ async def post_review(
         logger.info("%s/%s#%d at %s already reviewed; not posting again", repo.owner, repo.name, number, head_sha[:7])
         return
     footer = f"<sub>autoreviewer · {models_note} · `{head_sha[:7]}`</sub>"
-    event = "REQUEST_CHANGES" if outcome.blocking else "APPROVE"
+    # A review cut short by the time limit never approves: it hasn't seen the whole change.
+    event = "REQUEST_CHANGES" if outcome.blocking else "COMMENT" if outcome.cut_short else "APPROVE"
     unposted = [f for f in outcome.inline if fingerprint(head_sha, f) not in posted]
     try:
         await github.create_review(

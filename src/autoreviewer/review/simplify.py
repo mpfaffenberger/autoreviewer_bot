@@ -11,11 +11,12 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability
 
 from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
 from autoreviewer.review.diff import added_lines
@@ -57,12 +58,14 @@ async def suggest(
     *,
     paths: Collection[str] | None = None,
     publish: Publish | None = None,
+    capabilities: Sequence[AbstractCapability[None]] = (),
 ) -> list[Finding]:
     """Checked suggestions for the PR's added lines, limited to `paths` if given (e.g. what changed since
     the last review, so each push doesn't repeat the same suggestions). Never raises: suggestions are
     optional, so any failure here costs only them, never the review."""
     try:
-        return (await simplify(pr, simplifier, root, progress, paths=paths, publish=publish)).posted
+        run = await simplify(pr, simplifier, root, progress, paths=paths, publish=publish, capabilities=capabilities)
+        return run.posted
     except Exception:
         logger.warning("simplifications failed; posting none", exc_info=True)
         return []
@@ -76,6 +79,7 @@ async def simplify(
     *,
     paths: Collection[str] | None = None,
     publish: Publish | None = None,
+    capabilities: Sequence[AbstractCapability[None]] = (),
 ) -> SimplifyRun:
     """One unguarded pass with its full accounting (the eval reads it; the bot uses `suggest`)."""
     result = SimplifyRun()
@@ -85,7 +89,7 @@ async def simplify(
     run = await simplifier.propose.run(
         lens_prompt(replace(pr, reviewable=scoped)),
         usage_limits=LENS_LIMITS,
-        capabilities=[progress.watch("simplifier")],
+        capabilities=[*capabilities, progress.watch("simplifier")],
     )
 
     allowed = {change.path for change in scoped}

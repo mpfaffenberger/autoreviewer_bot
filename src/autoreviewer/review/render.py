@@ -53,11 +53,21 @@ def comment_body(finding: Finding, *, blocking: bool = True) -> str:
 def review_body(outcome: Outcome, *, footer: str) -> str:
     """The review's summary: blocking findings first, advisory ones after, then where they are."""
     posted = outcome.posted
+    cut_short = (
+        "**Partially reviewed:** the review hit its time limit before covering the whole change, so it doesn't "
+        "approve. Push again or comment a review request to retry.\n\n"
+        if outcome.cut_short
+        else ""
+    )
     if not posted:
-        return f"No issues found.\n\n{footer}"
+        return (
+            f"{cut_short}No issues found in the part reviewed.\n\n{footer}"
+            if cut_short
+            else f"No issues found.\n\n{footer}"
+        )
     blocking = [f for f in posted if outcome.is_blocking(f)]
     advisory = [f for f in posted if not outcome.is_blocking(f)]
-    lines = []
+    lines = [cut_short.rstrip()] if cut_short else []
     if blocking:
         lines.append(f"Found {_count(blocking)} to fix before merging.")
     simplify = [f for f in advisory if f.kind == "simplify"]

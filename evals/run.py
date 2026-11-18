@@ -33,7 +33,8 @@ from autoreviewer.review.agents import (
     security_references,
     verifier_agent,
 )
-from autoreviewer.review.job import AgentFactory, CheckResult, Lens, Reviewed, review_change
+from autoreviewer.review.deadline import Deadline
+from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
 from evals.cases import CASES, HIT_TOLERANCE, Case
@@ -118,6 +119,8 @@ class Result:
     error: str | None = None
     blocking_hit: bool = False
     """The seeded bug was posted at a priority that blocks the merge."""
+    cut_short: bool = False
+    """A lens hit the soft deadline and wrapped up early."""
     kinds_hit: list[str] = field(default_factory=list[str])
     """Which lenses posted the seeded bug (correctness, security, dry, ...)."""
     findings: list[str] = field(default_factory=list[str])
@@ -132,10 +135,14 @@ async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], wor
             head_sha=repo.head, base_sha=repo.base, state="open", draft=False, title=case.title, body=""
         )
         try:
-            result = await review_change(
-                reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),
-                repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head, lenses=lenses,
-            )  # fmt: skip
+            async with asyncio.timeout(ReviewDeps.hard_deadline_s):  # the bot's limits
+                result = await review_change(
+                    reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),
+                    repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head, lenses=lenses,
+                    deadline=Deadline(ReviewDeps.soft_deadline_s),
+                )  # fmt: skip
+        except TimeoutError:
+            return Result(case.name, case.clean, False, False, 0, 0, 0, time.monotonic() - started, "timed out")
         except Exception as error:  # a crashed case is reported, not fatal to the run
             return Result(case.name, case.clean, False, False, 0, 0, 0, time.monotonic() - started, repr(error)[:300])
     seconds = time.monotonic() - started
@@ -164,6 +171,7 @@ async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], wor
         seconds,
         blocking_hit=hits([f for f in posted if blocks(f)], case, lines),
         kinds_hit=sorted({f.kind for f in posted if hits([f], case, lines)}),
+        cut_short=outcome.cut_short,
         findings=[f"{f.path}:{f.line} {_grade(f)} {f.title} [{fate}]" for f, fate in fates],
     )
 
