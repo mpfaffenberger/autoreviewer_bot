@@ -75,6 +75,15 @@ def _agent[OutputT](
     )
 
 
+REPORT_AS_YOU_GO = """# Reporting
+
+Call `report_finding` the moment you are sure enough of a finding to include it in your report: it is
+verified and posted to the PR right away, so the author can start fixing it while you keep reviewing.
+Then carry on. Your final report must still list every finding, including those you already reported."""
+REPORT_TOOL = "report_finding"
+"""The tool a lens calls to hand over a finding mid-run (pipeline.Judge)."""
+
+
 def lens_version(model_name: str) -> str:
     """Fingerprint of what shapes a lens conversation; a saved one is only continued if it matches."""
     material = "\n".join(
@@ -82,7 +91,8 @@ def lens_version(model_name: str) -> str:
             _prompt("correctness.md"),
             model_name,
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
-            ",".join(sorted(READ_ONLY_TOOL_NAMES)),
+            ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
+            REPORT_AS_YOU_GO,
         ]
     )
     return hashlib.sha256(material.encode()).hexdigest()[:16]

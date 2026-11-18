@@ -206,7 +206,7 @@ async def test_a_bug_requests_changes_with_an_inline_comment(repo: GitRepo, tmp_
 
     [posted] = github.reviews
     assert posted["event"] == "REQUEST_CHANGES" and posted["commit_sha"] == repo.head
-    assert [(c.path, c.line) for c in posted["comments"]] == [("stats.py", 5)]
+    assert [(c.path, c.line) for c in github.inline_comments] == [("stats.py", 5)]
     assert (result.conclusion, result.title) == ("failure", "1 blocking issue(s)")
 
 
@@ -295,8 +295,8 @@ async def test_advisory_findings_are_posted_but_approve(repo: GitRepo, tmp_path:
     github = FakeGitHub(repo)
     result = await review_and_post(job_deps(github, tmp_path, [finding(5, priority=2)]), pull(repo))
     [posted] = github.reviews
-    assert posted["event"] == "APPROVE" and len(posted["comments"]) == 1
-    assert "(correctness, non-blocking)" in posted["comments"][0].body
+    assert posted["event"] == "APPROVE" and len(github.inline_comments) == 1
+    assert "(correctness, non-blocking)" in github.inline_comments[0].body
     assert result.conclusion == "success" and "1 advisory (non-blocking) finding(s) posted." in result.summary
 
 
@@ -305,7 +305,7 @@ async def test_the_verifier_can_raise_a_findings_priority(repo: GitRepo, tmp_pat
     deps = job_deps(github, tmp_path, [finding(5, priority=3)], priority=lambda f: 0)
     await review_and_post(deps, pull(repo))
     assert github.reviews[0]["event"] == "REQUEST_CHANGES"
-    assert github.reviews[0]["comments"][0].body.startswith("**[P0] ")
+    assert github.inline_comments[0].body.startswith("**[P0] ")
 
 
 async def test_low_confidence_findings_never_reach_the_verifier(workspace: Workspace) -> None:

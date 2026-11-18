@@ -31,7 +31,7 @@ async def test_dry_findings_are_advice_at_any_priority(repo: GitRepo, tmp_path: 
     result = await review_and_post(deps, pull(repo))
     [review] = github.reviews
     assert review["event"] == "APPROVE" and result.conclusion == "success"
-    assert review["comments"][0].body.startswith("**[P1] Use statistics.mean** (dry, non-blocking)")
+    assert github.inline_comments[0].body.startswith("**[P1] Use statistics.mean** (dry, non-blocking)")
 
 
 async def test_a_continued_review_only_looks_at_what_changed(repo: GitRepo, tmp_path: Path) -> None:

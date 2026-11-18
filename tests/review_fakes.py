@@ -179,6 +179,9 @@ class FakeGitHub:
     reviews: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     checks: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
+    review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    fail_review_comments: bool = False
+    """Inline comments posted on their own, as findings are confirmed."""
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_check_updates: bool = False
     check_update_delay: float = 0.0
@@ -237,6 +240,21 @@ class FakeGitHub:
         if self.fail_reactions:
             raise RuntimeError("GitHub is down")
         self.reactions.append((comment_id, content))
+
+    async def create_review_comment(self, repo: Repo, number: int, *, commit_sha: str, comment: ReviewComment) -> None:
+        if self.fail_review_comments:
+            raise RuntimeError("secondary rate limit")
+        if self.reject_inline:
+            raise ReviewRejected("Unprocessable Entity: line must be part of the diff")
+        self.review_comments.append({"commit_sha": commit_sha, "comment": comment, "author": BOT})
+
+    @property
+    def inline_comments(self) -> list[ReviewComment]:
+        """Every inline comment, posted on its own or inside a review."""
+        return [c["comment"] for c in self.review_comments] + [c for r in self.reviews for c in r["comments"]]
+
+    async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
+        return [c["comment"].body for c in self.review_comments if c["author"] == author]
 
     async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
         return any(r["commit_sha"] == commit_sha and r["author"] == author for r in self.reviews)

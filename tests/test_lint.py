@@ -89,7 +89,7 @@ async def test_a_pr_adding_untyped_code_gets_a_blocking_types_comment(repo: GitR
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
     [review] = github.reviews
     assert review["event"] == "REQUEST_CHANGES"
-    [comment] = review["comments"]
+    [comment] = github.inline_comments
     assert (comment.path, comment.line) == ("scale.py", 1)
     assert comment.body.startswith("**[P1] Add the missing type annotations** (types)")
 

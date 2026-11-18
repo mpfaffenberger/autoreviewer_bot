@@ -191,6 +191,21 @@ posted suggestion is applied and the full test suite run on the result). v1, 202
 planted lines cut (93%)**, 4 of 4 bloated cases simplified, **0 test failures**, 0 suggestions on the
 tight control case, about 13 GPU-minutes.
 
+### Posting as findings are confirmed
+
+Every lens has a `report_finding` tool (code-side only: the model still never touches GitHub). A
+reported finding is verified at once, in parallel with the ongoing review, and posted as its own inline
+comment the moment it's confirmed (`review/posting.py: Publisher`), so the author can start fixing while
+the review continues. The final report only adds what wasn't reported along the way; type findings post
+immediately, simplifications as each is checked.
+
+The verdict still comes last: one review (REQUEST_CHANGES or APPROVE) whose inline comments are only the
+findings that couldn't be posted early. Each early comment carries a hidden fingerprint
+(`head|kind|path|line`), so a review replayed after a crash never posts one twice. When correctness and
+security report one defect, a less urgent second report isn't posted; a more urgent one is. Findings
+posted on a head that a newer push supersedes stay (GitHub marks them outdated), but that head gets no
+verdict.
+
 ### Deterministic checks (no model)
 
 Rules a tool can decide exactly are a linter's job, not a lens's. `review/lint.py` runs ruff on the

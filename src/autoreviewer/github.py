@@ -98,6 +98,14 @@ class PullRequests(PullRequestReader, Protocol):
         """Whether `author` already reviewed this exact commit (makes posting safe to replay)."""
         ...
 
+    async def create_review_comment(self, repo: Repo, number: int, *, commit_sha: str, comment: ReviewComment) -> None:
+        """One inline comment outside any review: a finding posted the moment it's confirmed."""
+        ...
+
+    async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
+        """The bodies of every inline comment `author` left on the PR."""
+        ...
+
 
 async def _get_pull(github: GitHub, repo: Repo, number: int) -> PullRequestState:
     pull = (await github.rest.pulls.async_get(repo.owner, repo.name, number)).parsed_data
@@ -241,6 +249,46 @@ class GitHubApp:
         await github.rest.reactions.async_create_for_issue_comment(
             repo.owner, repo.name, comment_id, data={"content": content}
         )
+
+    async def create_review_comment(self, repo: Repo, number: int, *, commit_sha: str, comment: ReviewComment) -> None:
+        github = self._as_installation(repo.installation_id)
+        c = comment
+        try:
+            await github.rest.pulls.async_create_review_comment(
+                repo.owner,
+                repo.name,
+                number,
+                data={
+                    "body": c.body,
+                    "commit_id": commit_sha,
+                    "path": c.path,
+                    "line": c.line,
+                    "side": "RIGHT",
+                    "start_line": c.start_line,
+                    "start_side": "RIGHT",
+                }
+                if c.start_line is not None and c.start_line < c.line
+                else {"body": c.body, "commit_id": commit_sha, "path": c.path, "line": c.line, "side": "RIGHT"},
+            )
+        except RequestFailed as error:
+            if error.response.status_code == 422:
+                raise ReviewRejected(str(error)) from error
+            raise
+
+    async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
+        github = self._as_installation(repo.installation_id)
+        bodies: list[str] = []
+        page = 1
+        while True:
+            # Raw JSON, not githubkit's models: only two fields matter.
+            response = await github.rest.pulls.async_list_review_comments(
+                repo.owner, repo.name, number, per_page=100, page=page
+            )
+            comments = response.json()
+            bodies += [str(c.get("body") or "") for c in comments if (c.get("user") or {}).get("login") == author]
+            if len(comments) < 100:
+                return bodies
+            page += 1
 
     async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
         github = self._as_installation(repo.installation_id)
