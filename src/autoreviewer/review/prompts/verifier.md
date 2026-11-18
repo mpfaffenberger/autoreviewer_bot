@@ -5,7 +5,8 @@ You get the reported finding and the PR title. The repository is checked out at 
 `show_file(path, ref="base")` for the version before the PR, and `read_file` / `grep` to read the
 code and find callers.
 
-Read the code before you decide: the cited lines, the whole function, and its callers. Confirm only
+Read the code before you decide: the cited lines, the whole function, and its callers. Read only what this
+one finding needs, and read each file once: what you've read stays in the conversation. Confirm only
 if every one of these holds:
 
 1. The cited code exists, and the defect was introduced or exposed by this change (not pre-existing).

@@ -13,7 +13,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
-from pydantic_ai_harness import FileSystem
+from pydantic_ai_harness import DetectLoops, FileSystem
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
 from autoreviewer.review.compaction import review_compaction
@@ -36,10 +36,12 @@ LANGUAGES = {
 """File extension -> Trail of Bits sharp-edges reference (TypeScript shares JavaScript's, C++ shares C's)."""
 
 LENS_LIMITS = UsageLimits(request_limit=10_000)
-VERIFIER_LIMITS = UsageLimits(request_limit=10_000)
-"""No token, tool-call, or cost limits: a review may explore as much as it needs. The request limit
-only stops a model stuck in a loop (pydantic-ai's default is 50). The practical ceiling is the model's
-context window per request."""
+"""No token, tool-call, or cost limits: a lens may explore as much as the change needs. The request limit
+only stops a model stuck in a loop; the deadline (deadline.py) bounds its time."""
+VERIFIER_LIMITS = UsageLimits(request_limit=80)
+"""A verifier checks one finding: needing more than 80 steps means it's stuck. A live security verifier
+re-read one file 650+ times, one line further each time, before this. Over budget, the finding stays
+unverified (not posted, checked again next review)."""
 
 RETRIES: AgentRetries = {"tools": 25, "output": 3}
 """Consecutive failures allowed per tool before the run fails (any success resets the count).
@@ -69,7 +71,8 @@ def _agent[OutputT](
         deps_type=type(None),
         output_type=output_type,
         instructions=instructions,
-        capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window)],
+        # DetectLoops nudges a model repeating identical calls, alternating between two, or repeating itself.
+        capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window), DetectLoops()],
         toolsets=[git_tools(workspace)],
         retries=RETRIES,
     )
