@@ -247,6 +247,9 @@ class Judge:
             return "Below the confidence needed to verify it: not reported."
         if current is None and len(self._latest) >= self._limit:
             return f"You have reported {self._limit} findings, the most that are checked: not reported."
+        if current is not None:  # superseded: its verdict (if any) no longer counts
+            self._outcome.unverified[:] = [(f, why) for f, why in self._outcome.unverified if (f.path, f.line) != key]
+            self._outcome.rejected[:] = [(f, why) for f, why in self._outcome.rejected if (f.path, f.line) != key]
         self._latest[key] = finding
         self._tasks.append(asyncio.create_task(self._verify(finding)))
         self._progress.note(f"reported: {finding.title}")
@@ -279,7 +282,8 @@ class Judge:
                 verdict = (await self._verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])).output
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
-                self._outcome.unverified.append((finding, f"verification failed: {type(error).__name__}"))
+                if self._latest.get((finding.path, finding.line)) is reported:  # not superseded meanwhile
+                    self._outcome.unverified.append((finding, f"verification failed: {type(error).__name__}"))
                 return
         self._progress.note(f"{'confirmed' if verdict.confirmed else 'rejected'}: {finding.title}")
         if self._latest.get((finding.path, finding.line)) is not reported:

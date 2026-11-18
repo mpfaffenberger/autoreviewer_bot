@@ -127,6 +127,25 @@ async def test_an_explicit_request_reruns_a_review_that_ended_without_a_verdict(
     assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1  # same check run
 
 
+async def test_asking_again_while_a_retry_runs_or_after_it_succeeded_changes_nothing(launch: Launch) -> None:
+    github = await launch([])
+    github.fail_get_pull = True  # "Review failed": no verdict
+    pull = pull_for(github.repo)
+    original = await durable.enqueue(pull)
+    await original.get_result()
+    github.fail_get_pull = False
+    assert await durable.enqueue_review(pull, retry_failed=True) is False
+    assert await durable.enqueue_review(pull, retry_failed=True) is False  # asked twice: still one retry
+    for _ in range(200):
+        if github.reviews:
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.2)
+    assert await durable.enqueue_review(pull, retry_failed=True) is True  # the retry reached a verdict: done
+    forks = await DBOS.list_workflows_async(forked_from=original.workflow_id)
+    assert len(forks) == 1 and [r["event"] for r in github.reviews] == ["APPROVE"]
+
+
 def test_workflow_ids_are_per_head_and_case_insensitive() -> None:
     other_head = PullRequestUpdated(1, "mpfaffenberger", "demo", 7, "b" * 40)
     shouted = PullRequestUpdated(1, "MPFAFFENBERGER", "Demo", 7, HEAD)
