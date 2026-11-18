@@ -157,7 +157,7 @@ async def test_simplifications_never_block_and_post_as_multi_line_suggestions(re
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
     [review] = github.reviews
     assert review["event"] == "APPROVE"  # even with block_at=3, where every other finding blocks
-    [comment] = review["comments"]
+    [comment] = github.inline_comments
     assert (comment.path, comment.start_line, comment.line) == ("parity.py", 2, 7)
     assert "```suggestion\n" + TIGHT + "\n```" in comment.body
     summary = "1 optional one-click simplification(s), cutting 5 line(s) (56% of the 9 added)."  # 2 added elsewhere

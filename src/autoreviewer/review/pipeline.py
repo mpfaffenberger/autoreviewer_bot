@@ -9,14 +9,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, AgentRunResult, Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai.toolsets import FunctionToolset
 
-from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
+from autoreviewer.review.agents import LENS_LIMITS, REPORT_AS_YOU_GO, REPORT_TOOL, VERIFIER_LIMITS
 from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
@@ -43,6 +45,11 @@ class PullRequestText:
     skipped: list[ChangedPath]
     patches: dict[str, str]
     """Hunks per reviewable path, from git: decides which lines take an inline comment."""
+
+
+def blocks(finding: Finding, block_at: int) -> bool:
+    """Whether a confirmed finding blocks the merge: urgent enough, and not merely advice."""
+    return finding.kind not in ADVISORY_KINDS and finding.priority <= block_at
 
 
 @dataclass
@@ -78,13 +85,13 @@ class Outcome:
         self.low_confidence += other.low_confidence
         for target, findings in ((self.inline, other.inline), (self.general, other.general)):
             for finding in findings:
-                if (same := next((f for f in target if _same_defect(f, finding)), None)) is None:
+                if (same := next((f for f in target if same_defect(f, finding)), None)) is None:
                     target.append(finding)
                 elif finding.priority < same.priority:
                     target[target.index(same)] = finding
 
     def is_blocking(self, finding: Finding) -> bool:
-        return finding.kind not in ADVISORY_KINDS and finding.priority <= self.block_at
+        return blocks(finding, self.block_at)
 
     @property
     def blocking(self) -> bool:
@@ -162,7 +169,8 @@ def verifier_prompt(pr: PullRequestText, finding: Finding) -> str:
     )
 
 
-def _same_defect(a: Finding, b: Finding) -> bool:
+def same_defect(a: Finding, b: Finding) -> bool:
+    """Correctness and security findings on one line: likely one defect seen by two lenses."""
     return {a.kind, b.kind} <= {"correctness", "security"} and (a.path, a.line) == (b.path, b.line)
 
 
@@ -177,58 +185,108 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
     return unique[:MAX_FINDINGS]
 
 
-def place(outcome: Outcome, finding: Finding, patch: str) -> None:
-    (outcome.inline if finding.line in commentable_lines(patch) else outcome.general).append(finding)
+def place(outcome: Outcome, finding: Finding, patch: str) -> bool:
+    """File `finding` as inline (on a line GitHub can comment on) or general; True if inline."""
+    inline = finding.line in commentable_lines(patch)
+    (outcome.inline if inline else outcome.general).append(finding)
+    return inline
 
 
-async def _judge(
-    findings: list[Finding],
-    pr: PullRequestText,
-    verifier: Agent[None, Verification],
-    progress: Progress,
-    outcome: Outcome,
-    *,
-    label: str,
-) -> None:
-    """Filter a lens's findings, have `verifier` check the rest, and sort each into `outcome`."""
-    reviewable = {change.path for change in pr.reviewable}
-    candidates = []
-    for finding in _dedupe(findings):
-        if finding.path not in reviewable:  # hallucinated or out of scope, not worth a verifier call
-            outcome.rejected.append((finding, "path is not among the changed files"))
-        elif finding.confidence < MIN_CONFIDENCE:
-            outcome.low_confidence.append(finding)
-        else:
-            candidates.append(finding)
+Publish = Callable[[Finding], Awaitable[None]]
+"""Post one confirmed inline finding right away (see posting.Publisher). Must not raise."""
 
-    slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
-    if candidates:
-        progress.set_phase(f"Verifying {len(candidates)} candidate finding(s)")
 
-    async def verify(finding: Finding) -> Verification | str:
-        """The verdict, or why there is none."""
-        async with slots:
+class Judge:
+    """Verifies a lens's findings as they arrive (from `report_finding` mid-run, then the final report) and
+    sorts each into `outcome`. Each confirmed inline finding is handed to `publish` at once."""
+
+    def __init__(
+        self,
+        pr: PullRequestText,
+        verifier: Agent[None, Verification],
+        progress: Progress,
+        outcome: Outcome,
+        *,
+        kind: Literal["correctness"] | LensKind = "correctness",
+        label: str,
+        publish: Publish | None = None,
+    ) -> None:
+        self._pr, self._verifier, self._progress, self._outcome = pr, verifier, progress, outcome
+        self._kind, self._label, self._publish = kind, label, publish
+        self._reviewable = {change.path for change in pr.reviewable}
+        self._slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
+        self._tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
+
+    def toolset(self) -> FunctionToolset[None]:
+        async def report(finding: Finding) -> str:
+            """Report one finding now, while you keep reviewing. Same fields as a finding in the final report."""
+            return self.submit(finding)
+
+        return FunctionToolset([Tool(report, name=REPORT_TOOL)])
+
+    def submit(self, finding: Finding) -> str:
+        """Start verifying `finding` unless it's out of scope, a hunch, or its line was already reported."""
+        finding = finding.model_copy(update={"kind": self._kind})
+        if (key := (finding.path, finding.line)) in self._tasks:
+            return "Already reported for this line. Keep reviewing."
+        if finding.path not in self._reviewable:  # hallucinated or out of scope, not worth a verifier call
+            self._outcome.rejected.append((finding, "path is not among the changed files"))
+            return f"{finding.path} is not among the changed files: not reported."
+        if finding.confidence < MIN_CONFIDENCE:
+            self._outcome.low_confidence.append(finding)
+            return "Below the confidence needed to verify it: not reported."
+        if len(self._tasks) >= MAX_FINDINGS:
+            return f"You have reported {MAX_FINDINGS} findings, the most that are checked: not reported."
+        self._tasks[key] = asyncio.create_task(self._verify(finding))
+        self._progress.note(f"reported: {finding.title}")
+        return "Recorded: it is being verified now and will be posted if confirmed. Keep reviewing."
+
+    async def finish(self, findings: list[Finding]) -> None:
+        """Verify the final report's findings that weren't reported along the way, and wait for every verdict."""
+        for finding in _dedupe(findings):
+            self.submit(finding)
+        if pending := [task for task in self._tasks.values() if not task.done()]:
+            self._progress.set_phase(f"Verifying {len(pending)} candidate finding(s)")
+        await asyncio.gather(*self._tasks.values())
+
+    def cancel(self) -> None:
+        for task in self._tasks.values():
+            task.cancel()
+
+    async def _verify(self, finding: Finding) -> None:
+        async with self._slots:
             try:
-                watch = progress.watch(f"{label} ({finding.path}:{finding.line})")
-                prompt = verifier_prompt(pr, finding)
-                run = await verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])
-                progress.note(f"{'confirmed' if run.output.confirmed else 'rejected'}: {finding.title}")
-                return run.output
+                watch = self._progress.watch(f"{self._label} ({finding.path}:{finding.line})")
+                prompt = verifier_prompt(self._pr, finding)
+                verdict = (await self._verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])).output
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
-                return f"verification failed: {type(error).__name__}"
+                self._outcome.unverified.append((finding, f"verification failed: {type(error).__name__}"))
+                return
+        self._progress.note(f"{'confirmed' if verdict.confirmed else 'rejected'}: {finding.title}")
+        if not verdict.confirmed:
+            self._outcome.rejected.append((finding, verdict.reason))
+            return
+        # The verifier read the code too: its corrections win.
+        corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
+        finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
+        if place(self._outcome, finding, self._pr.patches.get(finding.path, "")) and self._publish is not None:
+            await self._publish(finding)
 
-    verdicts = await asyncio.gather(*(verify(finding) for finding in candidates))
-    for finding, verdict in zip(candidates, verdicts, strict=True):
-        if isinstance(verdict, str):
-            outcome.unverified.append((finding, verdict))
-        elif not verdict.confirmed:
-            outcome.rejected.append((finding, verdict.reason))
-        else:
-            # The verifier read the code too: its corrections win.
-            corrections = {"priority": verdict.priority, "explanation": verdict.explanation}
-            finding = finding.model_copy(update={k: v for k, v in corrections.items() if v is not None})
-            place(outcome, finding, pr.patches.get(finding.path, ""))
+
+LensRun = Callable[[list[FunctionToolset[None]]], Awaitable[AgentRunResult[LensReport]]]
+"""Starts a lens run with these extra toolsets."""
+
+
+async def _run_judged(judge: Judge, run: LensRun) -> AgentRunResult[LensReport]:
+    """Run a lens with `report_finding`, then judge its final report; no verification outlives a failure."""
+    try:
+        result = await run([judge.toolset()])
+        await judge.finish(result.output.findings)
+    except BaseException:
+        judge.cancel()
+        raise
+    return result
 
 
 async def review_lens(
@@ -240,15 +298,23 @@ async def review_lens(
     instructions: str | None,
     progress: Progress,
     block_at: int = BLOCK_AT_PRIORITY,
+    publish: Publish | None = None,
 ) -> Outcome:
     """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier."""
-    run = await lens.run(
-        lens_prompt(pr), instructions=instructions, capabilities=[progress.watch(kind)], usage_limits=LENS_LIMITS
-    )
-    findings = [finding.model_copy(update={"kind": kind}) for finding in run.output.findings]
     outcome = Outcome(block_at=block_at)
-    await _judge(findings, pr, verifier, progress, outcome, label=f"{kind} verifier")
-    logger.info("%s: %d requests, %d found, %d posted", kind, run.usage.requests, len(findings), len(outcome.posted))
+    judge = Judge(pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish)
+    combined = "\n\n".join(part for part in (instructions, REPORT_AS_YOU_GO) if part)
+    run = await _run_judged(
+        judge,
+        lambda toolsets: lens.run(
+            lens_prompt(pr),
+            instructions=combined,
+            toolsets=toolsets,
+            capabilities=[progress.watch(kind)],
+            usage_limits=LENS_LIMITS,
+        ),
+    )
+    logger.info("%s: %d requests, %d posted", kind, run.usage.requests, len(outcome.posted))
     return outcome
 
 
@@ -263,24 +329,33 @@ async def review(
     block_at: int = BLOCK_AT_PRIORITY,
     checked: Sequence[Finding] = (),
     progress: Progress | None = None,
+    publish: Publish | None = None,
 ) -> Outcome:
     progress = progress or Progress()
+    outcome = Outcome(block_at=block_at)
+    for finding in checked:  # proven by a tool, not a model: nothing to verify, so post at once
+        if place(outcome, finding, pr.patches.get(finding.path, "")) and publish is not None:
+            await publish(finding)
     prompt = continuation_prompt(pr, continuation) if continuation else lens_prompt(pr)
     progress.set_phase("Continuing the last review" if continuation else "Reviewing the change")
-    lens_run = await lens.run(
-        prompt,
-        message_history=continuation.history if continuation else None,
-        capabilities=[*lens_capabilities, progress.watch("reviewer")],
-        conversation_id=conversation,
-        # The history names the last review's checkout; this review has a new one (the new head).
-        workspace="new" if continuation else None,
-        usage_limits=LENS_LIMITS,
+    judge = Judge(pr, verifier, progress, outcome, label="verifier", publish=publish)
+    lens_run = await _run_judged(
+        judge,
+        lambda toolsets: lens.run(
+            prompt,
+            instructions=REPORT_AS_YOU_GO,
+            toolsets=toolsets,
+            message_history=continuation.history if continuation else None,
+            capabilities=[*lens_capabilities, progress.watch("reviewer")],
+            conversation_id=conversation,
+            # The history names the last review's checkout; this review has a new one (the new head).
+            workspace="new" if continuation else None,
+            usage_limits=LENS_LIMITS,
+        ),
     )
+
     report, usage = lens_run.output, lens_run.usage
-    outcome = Outcome(block_at=block_at, overall_correct=report.overall_correct, reviewed=report.reviewed)
-    await _judge(report.findings, pr, verifier, progress, outcome, label="verifier")
-    for finding in checked:  # proven by a tool, not a model: nothing for a verifier to judge
-        place(outcome, finding, pr.patches.get(finding.path, ""))
+    outcome.overall_correct, outcome.reviewed = report.overall_correct, report.reviewed
     compacted = compaction_stats(lens_run.all_messages())
     logger.info(
         "review: lens made %d requests and %d tool calls (compaction cleared %d, deduplicated %d results); "

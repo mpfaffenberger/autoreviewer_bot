@@ -60,7 +60,7 @@ async def test_a_confirmed_vulnerability_blocks_as_a_security_comment(repo: GitR
     await review_and_post(deps, pull(repo))
     [review] = github.reviews
     assert review["event"] == "REQUEST_CHANGES"
-    [comment] = review["comments"]
+    [comment] = github.inline_comments
     assert comment.body.startswith("**[P1] User input reaches a shell** (security)")
 
 
@@ -71,12 +71,14 @@ async def test_the_security_verifier_has_the_last_word(repo: GitRepo, tmp_path: 
     assert [r["event"] for r in github.reviews] == ["APPROVE"]
 
 
-async def test_one_line_reported_by_both_lenses_keeps_the_more_urgent(repo: GitRepo, tmp_path: Path) -> None:
+async def test_one_line_reported_by_both_lenses_posts_the_more_urgent(repo: GitRepo, tmp_path: Path) -> None:
+    """Whichever lens confirms first is posted at once; a more urgent report of the same defect is still posted
+    (a less urgent one after it isn't: see test_posting.py), and the verdict counts it once."""
     github = FakeGitHub(repo)
     deps = replace(job_deps(github, tmp_path, [finding(5, priority=2)]), lenses=security_lens([INJECTION]))
-    await review_and_post(deps, pull(repo))
-    [comment] = github.reviews[0]["comments"]
-    assert comment.body.startswith("**[P1] User input reaches a shell** (security)")
+    result = await review_and_post(deps, pull(repo))
+    assert any(c.body.startswith("**[P1] User input reaches a shell** (security)") for c in github.inline_comments)
+    assert (github.reviews[0]["event"], result.title) == ("REQUEST_CHANGES", "1 blocking issue(s)")
 
 
 async def test_a_failed_security_review_fails_closed(repo: GitRepo, tmp_path: Path) -> None:
@@ -135,7 +137,7 @@ async def test_a_lint_finding_on_the_same_line_never_hides_a_vulnerability(repo:
     vulnerability = finding(1, path="calc.py", title="eval of input")
     deps = replace(job_deps(github, tmp_path, []), lenses=security_lens([vulnerability]))
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
-    bodies = [comment.body for comment in github.reviews[0]["comments"]]
+    bodies = [comment.body for comment in github.inline_comments]
     assert any("(types)" in body for body in bodies) and any("(security)" in body for body in bodies)
 
 

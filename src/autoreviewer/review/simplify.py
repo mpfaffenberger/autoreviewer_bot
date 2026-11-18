@@ -19,7 +19,7 @@ from pydantic_ai import Agent
 
 from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
 from autoreviewer.review.diff import added_lines
-from autoreviewer.review.pipeline import PullRequestText, lens_prompt
+from autoreviewer.review.pipeline import Publish, PullRequestText, lens_prompt
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import has_secret
 from autoreviewer.review.schemas import Finding, SimplifyReport, SimplifyVerdict, Suggestion
@@ -50,20 +50,32 @@ class SimplifyRun:
 
 
 async def suggest(
-    pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, *, paths: Collection[str] | None = None
+    pr: PullRequestText,
+    simplifier: Simplifier,
+    root: Path,
+    progress: Progress,
+    *,
+    paths: Collection[str] | None = None,
+    publish: Publish | None = None,
 ) -> list[Finding]:
     """Checked suggestions for the PR's added lines, limited to `paths` if given (e.g. what changed since
     the last review, so each push doesn't repeat the same suggestions). Never raises: suggestions are
     optional, so any failure here costs only them, never the review."""
     try:
-        return (await simplify(pr, simplifier, root, progress, paths=paths)).posted
+        return (await simplify(pr, simplifier, root, progress, paths=paths, publish=publish)).posted
     except Exception:
         logger.warning("simplifications failed; posting none", exc_info=True)
         return []
 
 
 async def simplify(
-    pr: PullRequestText, simplifier: Simplifier, root: Path, progress: Progress, *, paths: Collection[str] | None = None
+    pr: PullRequestText,
+    simplifier: Simplifier,
+    root: Path,
+    progress: Progress,
+    *,
+    paths: Collection[str] | None = None,
+    publish: Publish | None = None,
 ) -> SimplifyRun:
     """One unguarded pass with its full accounting (the eval reads it; the bot uses `suggest`)."""
     result = SimplifyRun()
@@ -105,12 +117,17 @@ async def simplify(
             progress.note(f"{'kept' if verdict.confirmed else 'dropped'} simplification: {suggestion.title}")
             return verdict.confirmed
 
-    verdicts = await asyncio.gather(*(confirmed(suggestion) for suggestion in accepted))
-    for suggestion, ok in zip(accepted, verdicts, strict=True):
-        if ok:
-            result.posted.append(_finding(suggestion))
-        else:
+    async def check(suggestion: Suggestion) -> None:
+        """Check one suggestion and, if it holds, post it at once."""
+        if not await confirmed(suggestion):
             result.dropped_by_checker.append(suggestion)
+            return
+        finding = _finding(suggestion)
+        result.posted.append(finding)
+        if publish is not None:
+            await publish(finding)
+
+    await asyncio.gather(*(check(suggestion) for suggestion in accepted))
     return result
 
 

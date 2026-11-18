@@ -25,8 +25,6 @@ from autoreviewer.github import (
     PullRequests,
     PullRequestState,
     Repo,
-    ReviewComment,
-    ReviewRejected,
 )
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LintError, type_findings
@@ -35,13 +33,14 @@ from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
     Continuation,
     Outcome,
+    Publish,
     PullRequestText,
     place,
     review,
     review_lens,
 )
+from autoreviewer.review.posting import Publisher, post_review
 from autoreviewer.review.progress import Progress
-from autoreviewer.review.render import comment_body, review_body
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
@@ -69,7 +68,7 @@ class Lens:
 
 
 async def _run_lens(
-    spec: Lens, workspace: Workspace, pr: PullRequestText, *, progress: Progress, block_at: int
+    spec: Lens, workspace: Workspace, pr: PullRequestText, *, progress: Progress, block_at: int, publish: Publish | None
 ) -> Outcome:
     """One extra lens over `pr`. An advisory lens that fails costs only its advice; a lens that can block
     fails the review, since approving without it would fail open."""
@@ -78,7 +77,14 @@ async def _run_lens(
         paths = [change.path for change in pr.reviewable]
         instructions = spec.instructions(paths) if spec.instructions else None
         return await review_lens(
-            pr, lens, verifier, kind=spec.kind, instructions=instructions, progress=progress, block_at=block_at
+            pr,
+            lens,
+            verifier,
+            kind=spec.kind,
+            instructions=instructions,
+            progress=progress,
+            block_at=block_at,
+            publish=publish,
         )
     except Exception:
         if spec.kind not in ADVISORY_KINDS:
@@ -231,6 +237,7 @@ async def review_change(
     progress: Progress | None = None,
     simplifier: SimplifierFactory | None = None,
     lenses: Sequence[Lens] = (),
+    publish: Publish | None = None,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -291,18 +298,19 @@ async def review_change(
                     block_at=block_at,
                     checked=typed,
                     progress=progress,
+                    publish=publish,
                 )
             )
             extra = []
             for spec in lenses:
                 target = pr if spec.whole_pr or scope is None else _only(pr, scope)
                 if target.reviewable:
-                    run = _run_lens(spec, workspace, target, progress=progress, block_at=block_at)
+                    run = _run_lens(spec, workspace, target, progress=progress, block_at=block_at, publish=publish)
                     extra.append(lenses_group.create_task(run))
             simplify_task = None
             if simplifier is not None:
                 simplify_task = lenses_group.create_task(
-                    suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope)
+                    suggest(pr, simplifier(workspace), workspace.root, progress, paths=scope, publish=publish)
                 )
         outcome = correctness.result()
         for task in extra:
@@ -369,6 +377,9 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
 async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
     state = await _current(deps, repo, pull)
     conversation = conversation_id(repo, pull.number)
+    publisher = Publisher(
+        deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, block_at=deps.block_at
+    )
     try:
         result = await review_change(
             reader=deps.github,
@@ -385,6 +396,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
             progress=progress,
             simplifier=deps.simplifier,
             lenses=deps.lenses,
+            publish=publisher,
         )
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
@@ -404,7 +416,16 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         deps.memory.remember(conversation, result.remember)
     if latest.head_sha != pull.head_sha:
         raise Superseded
-    await _post(deps, repo, pull, result.outcome)
+    await post_review(
+        deps.github,
+        repo,
+        pull.number,
+        head_sha=pull.head_sha,
+        author=deps.bot_login,
+        models_note=deps.models_note,
+        outcome=result.outcome,
+        posted=publisher.posted,
+    )
     return _summary(result.outcome)
 
 
@@ -423,45 +444,6 @@ async def _current(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated) -> Pu
     if state.head_sha != pull.head_sha or state.state != "open":
         raise Superseded
     return state
-
-
-async def _post(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, outcome: Outcome) -> None:
-    if await deps.github.has_review(repo, pull.number, commit_sha=pull.head_sha, author=deps.bot_login):
-        # A replay after a crash between posting and checkpointing: the review is already there.
-        logger.info(
-            "%s/%s#%d at %s already reviewed; not posting again", pull.owner, pull.repo, pull.number, pull.head_sha[:7]
-        )
-        return
-    footer = f"<sub>autoreviewer · {deps.models_note} · `{pull.head_sha[:7]}`</sub>"
-    # The verdict is computed, never generated: a confirmed finding at the blocking priority blocks the
-    # merge; advisory findings are posted as comments on an approval.
-    event = "REQUEST_CHANGES" if outcome.blocking else "APPROVE"
-    try:
-        await deps.github.create_review(
-            repo,
-            pull.number,
-            commit_sha=pull.head_sha,
-            event=event,
-            body=review_body(outcome, footer=footer),
-            comments=[
-                ReviewComment(f.path, f.line, comment_body(f, blocking=outcome.is_blocking(f)), f.start_line)
-                for f in outcome.inline
-            ],
-        )
-    except ReviewRejected:
-        # GitHub's diff view can differ from ours (e.g. files it doesn't render). Keep every finding,
-        # just not inline: same verdict, findings listed in the review body.
-        logger.warning(
-            "inline comments rejected for %s/%s#%d; posting findings in the body", pull.owner, pull.repo, pull.number
-        )
-        await deps.github.create_review(
-            repo,
-            pull.number,
-            commit_sha=pull.head_sha,
-            event=event,
-            body=review_body(replace(outcome, inline=[], general=outcome.posted), footer=footer),
-            comments=[],
-        )
 
 
 def _summary(outcome: Outcome) -> CheckResult:
