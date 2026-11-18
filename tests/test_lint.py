@@ -10,9 +10,11 @@ import pytest
 from autoreviewer.review import lint
 from autoreviewer.review.diff import ChangedPath, added_lines
 from autoreviewer.review.job import review_and_post
-from autoreviewer.review.lint import type_findings
+from autoreviewer.review.lint import lint_findings
+from autoreviewer.review.pipeline import blocks
+from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import FakeGitHub, GitRepo, add_commit, job_deps
+from tests.review_fakes import FakeGitHub, GitRepo, add_commit, git, job_deps
 
 pytestmark = pytest.mark.anyio
 
@@ -33,7 +35,7 @@ def test_added_lines_are_only_the_plus_lines() -> None:
 
 
 async def test_a_new_untyped_function_blocks(tmp_path: Path) -> None:
-    [finding] = await type_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))
+    [finding] = await lint_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))
     assert (finding.path, finding.line, finding.priority, finding.kind) == ("scale.py", 1, 1, "types")
     assert finding.title == "Add the missing type annotations"
     assert {"`ANN001`", "`ANN201`"} <= {part.rstrip(")") for part in finding.explanation.split() if "ANN" in part}
@@ -50,35 +52,35 @@ async def test_a_new_untyped_function_blocks(tmp_path: Path) -> None:
     ],
 )
 async def test_any_and_blanket_ignores_are_advisory(tmp_path: Path, source: str, title: str) -> None:
-    [finding] = await type_findings(tmp_path, *new_file(tmp_path, "load.py", source))
+    [finding] = await lint_findings(tmp_path, *new_file(tmp_path, "load.py", source))
     assert (finding.priority, finding.title) == (2, title)
 
 
 async def test_a_typed_function_and_init_without_return_type_pass(tmp_path: Path) -> None:
     source = "class Box:\n    def __init__(self, size: int):\n        self.size = size\n"
-    assert await type_findings(tmp_path, *new_file(tmp_path, "box.py", source)) == []
+    assert await lint_findings(tmp_path, *new_file(tmp_path, "box.py", source)) == []
 
 
 async def test_untouched_lines_are_never_blamed(tmp_path: Path) -> None:
     (tmp_path / "scale.py").write_text(UNTYPED + "\nLIMIT = 3\n")
     patch = "@@ -1,2 +1,4 @@\n def scale(xs, factor):\n     return [x * factor for x in xs]\n+\n+LIMIT = 3\n"
-    assert await type_findings(tmp_path, [ChangedPath("scale.py", "M", 2, 0)], {"scale.py": patch}) == []
+    assert await lint_findings(tmp_path, [ChangedPath("scale.py", "M", 2, 0)], {"scale.py": patch}) == []
 
 
 async def test_the_prs_own_ruff_config_cannot_switch_the_rules_off(tmp_path: Path) -> None:
     # per-file-ignores, unlike `ignore`, would beat our --select: only --isolated stops it.
     (tmp_path / "pyproject.toml").write_text('[tool.ruff.lint.per-file-ignores]\n"*.py" = ["ANN"]\n')
-    assert len(await type_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))) == 1
+    assert len(await lint_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))) == 1
 
 
 async def test_non_python_files_are_skipped(tmp_path: Path) -> None:
-    assert await type_findings(tmp_path, *new_file(tmp_path, "notes.md", "def f(x): pass\n")) == []
+    assert await lint_findings(tmp_path, *new_file(tmp_path, "notes.md", "def f(x): pass\n")) == []
 
 
 async def test_findings_are_capped_most_urgent_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lint, "MAX_TYPE_FINDINGS", 2)
+    monkeypatch.setattr(lint, "MAX_LINT_FINDINGS", 2)
     source = "from typing import Any\n\n\ndef a(x: Any) -> int: ...\ndef b(x): ...\ndef c(x): ...\n"
-    findings = await type_findings(tmp_path, *new_file(tmp_path, "many.py", source))
+    findings = await lint_findings(tmp_path, *new_file(tmp_path, "many.py", source))
     assert [(f.line, f.priority) for f in findings] == [(5, 1), (6, 1)]
 
 
@@ -97,13 +99,13 @@ async def test_a_pr_adding_untyped_code_gets_a_blocking_types_comment(repo: GitR
 async def test_broken_python_is_not_a_typing_finding(tmp_path: Path) -> None:
     """ruff reports invalid-syntax whatever is selected; that's the lens's business, not "add annotations"."""
     source = "def scale(xs: list[int]) -> int\n    return len(xs)\n"  # missing colon: an error on line 1
-    assert await type_findings(tmp_path, *new_file(tmp_path, "wip.py", source)) == []
+    assert await lint_findings(tmp_path, *new_file(tmp_path, "wip.py", source)) == []
 
 
 async def test_a_broken_linter_skips_the_type_checks_not_the_review(
     repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def broken(root: Path, paths: list[str]) -> list[lint.Diagnostic]:
+    async def broken(root: Path, paths: list[str], **options: str | None) -> list[lint.Diagnostic]:
         raise lint.LintError("ruff timed out")
 
     monkeypatch.setattr(lint, "_ruff", broken)
@@ -116,4 +118,50 @@ async def test_a_broken_linter_skips_the_type_checks_not_the_review(
 async def test_a_missing_ruff_binary_is_a_lint_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lint, "find_ruff_bin", lambda: str(tmp_path / "no-such-ruff"))
     with pytest.raises(lint.LintError, match="could not start ruff"):
-        await type_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))
+        await lint_findings(tmp_path, *new_file(tmp_path, "scale.py", UNTYPED))
+
+
+def edited(root: Path, name: str, base: str, head: str) -> tuple[list[ChangedPath], dict[str, str]]:
+    """`name` as a file the PR edits: `base` committed on the merge-base branch, `head` checked out."""
+    git(root, "init", "-q", "-b", "base")
+    (root / name).write_text(base)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "base")
+    (root / name).write_text(head)
+    patch = git(root, "diff", "--unified=0", "--", name).split("\n", 4)[-1]  # from the first @@ hunk on
+    return [ChangedPath(name, "M", 1, 1)], {name: patch + "\n"}
+
+
+async def test_an_import_left_unused_is_reported_though_its_line_is_untouched(tmp_path: Path) -> None:
+    """Deleting an import's last use leaves the import line as it was: the lens used to flag these, at P1."""
+    changes = edited(tmp_path, "util.py", "import os\n\nSEP = os.sep\n", "import os\n\nSEP = '/'\n")
+    [finding] = await lint_findings(tmp_path, *changes)
+    assert (finding.path, finding.line, finding.priority, finding.kind) == ("util.py", 1, 3, "lint")
+    assert "`os` imported but unused" in finding.explanation
+
+
+async def test_imports_already_unused_at_the_base_are_not_the_prs_problem(tmp_path: Path) -> None:
+    changes = edited(tmp_path, "util.py", "import os\n\nSEP = '/'\n", "import os\n\nSEP = '\\\\'\n")
+    assert await lint_findings(tmp_path, *changes) == []
+
+
+async def test_unused_names_on_one_line_are_one_finding(tmp_path: Path) -> None:
+    """Fingerprints are per line: two findings on one line would post only the first."""
+    [finding] = await lint_findings(tmp_path, *new_file(tmp_path, "util.py", "from os import path, sep\n"))
+    assert finding.explanation.count("imported but unused") == 2
+
+
+def test_unused_imports_never_block() -> None:
+    finding = Finding(path="a.py", line=1, priority=3, confidence=10, title="t", explanation="e", kind="lint")
+    assert not blocks(finding, 3)
+
+
+async def test_a_pr_leaving_an_unused_import_is_approved_with_advice(repo: GitRepo, tmp_path: Path) -> None:
+    base = add_commit(repo, {"util.py": "import os\n\nSEP = os.sep\n"})
+    head = add_commit(repo, {"util.py": "import os\n\nSEP = '/'\n"})
+    github = FakeGitHub(replace(repo, base=base, head=head))
+    await review_and_post(job_deps(github, tmp_path, []), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
+    assert [r["event"] for r in github.reviews] == ["APPROVE"]
+    [comment] = github.inline_comments
+    assert (comment.path, comment.line) == ("util.py", 1)
+    assert comment.body.startswith("**[P3] Remove the unused import** (lint")
