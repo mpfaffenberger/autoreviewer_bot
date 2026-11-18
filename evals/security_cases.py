@@ -11,7 +11,7 @@ from evals.cases import CASES as CORRECTNESS_CASES
 from evals.cases import Case
 
 SECURITY_CORPUS = "d5e9888"
-SUBTLE_CORPUS = "4819d10"
+SUBTLE_CORPUS = "4156bde"
 """Has posting.py, the read-only workspace, and sanitized progress (#21/#22)."""
 """A snapshot that has every file below."""
 
