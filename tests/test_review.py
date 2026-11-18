@@ -21,6 +21,7 @@ from autoreviewer.review.diff import (
 from autoreviewer.review.gittools import git_tools
 from autoreviewer.review.job import _summary, review_and_post
 from autoreviewer.review.pipeline import PullRequestText, lens_prompt, review
+from autoreviewer.review.posting import VERDICT_MARKER
 from autoreviewer.review.render import comment_body, sanitize
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import BASE, HEAD, Workspace, read_changes, run_git
@@ -228,11 +229,19 @@ async def test_rejected_inline_comments_fall_back_to_the_body(repo: GitRepo, tmp
 async def test_a_commit_already_reviewed_is_not_reviewed_again(repo: GitRepo, tmp_path: Path) -> None:
     # What a replay looks like after a crash between posting the review and checkpointing the step.
     github = FakeGitHub(repo)
+    verdict = f"Found 1 issue.\n\n{VERDICT_MARKER}"
     github.reviews.append(
-        {"commit_sha": repo.head, "event": "REQUEST_CHANGES", "body": "", "comments": [], "author": BOT}
+        {"commit_sha": repo.head, "event": "REQUEST_CHANGES", "body": verdict, "comments": [], "author": BOT}
     )
     await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
     assert len(github.reviews) == 1
+
+
+async def test_early_comments_do_not_count_as_the_verdict(repo: GitRepo, tmp_path: Path) -> None:
+    """GitHub wraps each early comment in an empty COMMENTED review; the verdict must still be posted (live on #21)."""
+    github = FakeGitHub(repo)
+    await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
+    assert len(github.review_comments) == 1 and [r["event"] for r in github.reviews] == ["REQUEST_CHANGES"]
 
 
 async def test_a_push_during_the_review_supersedes_it(repo: GitRepo, tmp_path: Path) -> None:

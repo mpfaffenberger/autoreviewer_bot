@@ -261,8 +261,11 @@ class FakeGitHub:
     async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
         return [c["comment"].body for c in self.review_comments if c["author"] == author]
 
-    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
-        return any(r["commit_sha"] == commit_sha and r["author"] == author for r in self.reviews)
+    async def review_bodies(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> list[str]:
+        """Like GitHub: each single inline comment comes wrapped in an empty COMMENTED review of its own."""
+        verdicts = [r["body"] for r in self.reviews if r["commit_sha"] == commit_sha and r["author"] == author]
+        wrappers = ["" for c in self.review_comments if c["commit_sha"] == commit_sha and c["author"] == author]
+        return verdicts + wrappers
 
 
 def job_deps(
