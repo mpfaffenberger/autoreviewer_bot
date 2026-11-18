@@ -30,14 +30,14 @@ from autoreviewer.review.agents import (
     boodleton_model,
     correctness_agent,
     lens_pair,
-    security_references,
     verifier_agent,
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
+from autoreviewer.web.app import lens
+from autoreviewer.web.config import Settings, model_lanes_from
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
@@ -97,8 +97,7 @@ def models_from_env() -> tuple[Model, Model]:
     """(lens model, verifier model) on Boodleton, as configured for the bot, with the bot's lanes."""
     base_url = os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1")
     key = os.environ["BOODLETON_API_KEY"]
-    configured = os.environ.get("AUTOREVIEWER_MODEL_LANES")
-    lanes = parse_lanes(configured) if configured else DEFAULT_MODEL_LANES
+    lanes = model_lanes_from(os.environ)  # the bot's rule, blank included
 
     def model(name: str) -> Model:
         return boodleton_model(name, base_url=base_url, api_key=key, lanes=lanes.get(name))
@@ -207,9 +206,7 @@ async def main() -> None:
     def pair(kind: LensKind) -> AgentFactory:
         return lambda workspace: lens_pair(kind, lens_model, verifier_model, workspace)
 
-    lenses = [
-        Lens(kind, pair(kind), instructions=security_references if kind == "security" else None) for kind in args.lens
-    ]
+    lenses = [lens(kind, pair(kind)) for kind in args.lens]  # the bot's own settings for each kind
 
     suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]

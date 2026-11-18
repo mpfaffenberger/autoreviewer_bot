@@ -124,11 +124,13 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
     )
 
 
+MAX_DRY_POSTED = 3
+"""The eval's clean 786-line commit drew 8 DRY comments, mostly true but too many to read: keep 3."""
+
+
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:
-    """The enabled lenses beside correctness, on the same models. Security reviews the whole PR every time
-    (it can block); DRY findings are advice, so a continued review only looks at what changed."""
-    from autoreviewer.review.agents import lens_pair, security_references
-    from autoreviewer.review.job import Lens
+    """The enabled lenses beside correctness, on the same models."""
+    from autoreviewer.review.agents import lens_pair
 
     lens_model, verifier_model = _models(settings)
 
@@ -142,12 +144,23 @@ def build_lenses(settings: Settings) -> tuple[Lens, ...]:
             verifier_window=settings.verifier_context_window,
         )
 
-    lenses = []
+    kinds: list[LensKind] = []
     if settings.security:
-        lenses.append(Lens("security", agents("security"), instructions=security_references))
+        kinds.append("security")
     if settings.dry:
-        lenses.append(Lens("dry", agents("dry"), whole_pr=False))
-    return tuple(lenses)
+        kinds.append("dry")
+    return tuple(lens(kind, agents(kind)) for kind in kinds)
+
+
+def lens(kind: LensKind, agents: AgentFactory) -> Lens:
+    """A lens with its production settings, for the bot and the evals alike. Security reviews the whole PR every
+    time (it can block); DRY is advice: the changed files only when continuing, and at most MAX_DRY_POSTED."""
+    from autoreviewer.review.agents import security_references
+    from autoreviewer.review.job import Lens
+
+    if kind == "security":
+        return Lens("security", agents, instructions=security_references)
+    return Lens("dry", agents, whole_pr=False, max_posted=MAX_DRY_POSTED)
 
 
 def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:

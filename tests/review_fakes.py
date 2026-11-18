@@ -181,6 +181,7 @@ class FakeGitHub:
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
     review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_review_comments: bool = False
+    comment_delay: float = 0.0
     """Inline comments posted on their own, as findings are confirmed."""
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_check_updates: bool = False
@@ -250,6 +251,7 @@ class FakeGitHub:
         self.reactions.append((comment_id, content))
 
     async def create_review_comment(self, repo: Repo, number: int, *, commit_sha: str, comment: ReviewComment) -> None:
+        await asyncio.sleep(self.comment_delay)
         if self.fail_review_comments:
             raise RuntimeError("secondary rate limit")
         if self.reject_inline:
