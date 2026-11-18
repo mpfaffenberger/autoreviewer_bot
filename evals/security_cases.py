@@ -11,6 +11,8 @@ from evals.cases import CASES as CORRECTNESS_CASES
 from evals.cases import Case
 
 SECURITY_CORPUS = "d5e9888"
+SUBTLE_CORPUS = "4819d10"
+"""Has posting.py, the read-only workspace, and sanitized progress (#21/#22)."""
 """A snapshot that has every file below."""
 
 _SIGNATURE = (
@@ -88,6 +90,39 @@ CASES: list[Case] = [
         _LOG_REDACTION,
         "Trace with Logfire: pydantic-ai agent runs, webhook requests, and logs",
         host="2ac3ec1",
+    ),
+    # --- subtle: plausible tidy-ups that open a hole a correctness read can miss -----------------------
+    Case(
+        "subtle_marker_unanchored",
+        "src/autoreviewer/review/posting.py",
+        '_MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) -->\\Z")',
+        '_MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) -->")',
+        "Simplify the fingerprint pattern",
+        corpus=SUBTLE_CORPUS,
+    ),
+    Case(
+        "subtle_writable_checkout",
+        "src/autoreviewer/review/agents.py",
+        "    return [LocalWorkspace(root, read_only=True), FileSystem(read_only=True, tools=sorted(READ_ONLY_TOOL_NAMES))]",  # noqa: E501
+        "    return [LocalWorkspace(root), FileSystem()]",
+        "Use the harness defaults for repository access",
+        corpus=SUBTLE_CORPUS,
+    ),
+    Case(
+        "subtle_unsanitized_comment",
+        "src/autoreviewer/review/render.py",
+        '    body = sanitize("\\n\\n".join(parts))',
+        '    body = "\\n\\n".join(parts)',
+        "Keep the model's formatting intact in comments",
+        corpus=SUBTLE_CORPUS,
+    ),
+    Case(
+        "subtle_unsanitized_progress",
+        "src/autoreviewer/review/progress.py",
+        '    return "```text\\n" + sanitize(text, limit=MAX_DETAILS).replace("```", "``\\u200b`") + "\\n```"',
+        '    return "```text\\n" + text[:MAX_DETAILS].replace("```", "``\\u200b`") + "\\n```"',
+        "Show progress text verbatim",
+        corpus=SUBTLE_CORPUS,
     ),
     # --- clean: security code changed, behaviour identical ----------------------------------------------
     Case(
