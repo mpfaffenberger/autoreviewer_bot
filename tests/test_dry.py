@@ -121,10 +121,10 @@ async def test_hunches_and_out_of_scope_findings_dont_use_up_the_cap(repo: GitRe
     assert sorted(asked) == [3, 4]
 
 
-def test_dry_posts_at_most_three() -> None:
+def test_dry_posts_at_most_five() -> None:
     settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
     [dry] = [lens for lens in build_lenses(settings) if lens.kind == "dry"]
-    assert dry.max_posted == 3
+    assert dry.max_posted == 5
 
 
 @pytest.mark.parametrize(("max_posted", "reports_as_it_goes"), [(3, False), (MAX_FINDINGS, True)])
