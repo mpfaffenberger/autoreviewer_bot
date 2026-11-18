@@ -41,7 +41,7 @@ async def test_each_finding_is_posted_once_even_when_a_review_is_replayed(repo: 
     replayed = publisher(github)  # a fresh process recovering the same review
     await replayed(confirmed())
     assert len(github.review_comments) == 1
-    assert replayed.posted == {fingerprint(repo.head, confirmed())}  # so the final review won't repeat it
+    assert replayed.posted == {fingerprint(repo.head, confirmed()): 1}  # so the final review won't repeat it
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,7 @@ async def test_the_verdict_body_names_posted_findings_when_inline_comments_are_r
     outcome = Outcome(inline=[early, late])
     await post_review(
         github, REPO, 7, head_sha=repo.head, author=BOT, models_note="m", outcome=outcome,
-        posted={fingerprint(repo.head, early)},
+        posted={fingerprint(repo.head, early): early.priority},
     )  # fmt: skip
     [review] = github.reviews
     assert "`stats.py:5`" in review["body"] and "`stats.py:3`" in review["body"]
@@ -202,3 +202,12 @@ async def test_a_superseded_report_leaves_no_record_behind(workspace: Workspace)
 
     outcome = await _scripted_review(workspace, finding(5, priority=3), [finding(5, priority=1)], confirm)
     assert [f.priority for f in outcome.posted] == [1] and outcome.unverified == [] and outcome.rejected == []
+
+
+@pytest.mark.parametrize(("replayed_priority", "comments"), [(2, 1), (1, 1), (0, 2)])
+async def test_a_replay_posts_again_only_if_more_urgent(repo: GitRepo, replayed_priority: int, comments: int) -> None:
+    """A replay's verifier may rank the same finding differently: only an escalation is worth a new comment."""
+    github = FakeGitHub(repo)
+    await publisher(github)(confirmed(priority=1))
+    await publisher(github)(confirmed(priority=replayed_priority))  # a fresh process, the same finding
+    assert len(github.review_comments) == comments
