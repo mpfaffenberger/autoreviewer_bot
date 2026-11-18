@@ -94,8 +94,9 @@ class PullRequests(PullRequestReader, Protocol):
         self, repo: Repo, number: int, *, commit_sha: str, event: ReviewEvent, body: str, comments: list[ReviewComment]
     ) -> None: ...
 
-    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
-        """Whether `author` already reviewed this exact commit (makes posting safe to replay)."""
+    async def review_bodies(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> list[str]:
+        """The bodies of `author`'s reviews of this exact commit, including the empty COMMENTED reviews GitHub
+        creates around single inline comments."""
         ...
 
     async def create_review_comment(self, repo: Repo, number: int, *, commit_sha: str, comment: ReviewComment) -> None:
@@ -290,17 +291,21 @@ class GitHubApp:
                 return bodies
             page += 1
 
-    async def has_review(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> bool:
+    async def review_bodies(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> list[str]:
         github = self._as_installation(repo.installation_id)
+        bodies: list[str] = []
         page = 1
         while True:
-            # Raw JSON, not githubkit's models: only two fields matter and the full schema is large.
+            # Raw JSON, not githubkit's models: only three fields matter and the full schema is large.
             response = await github.rest.pulls.async_list_reviews(
                 repo.owner, repo.name, number, per_page=100, page=page
             )
             reviews = response.json()
-            if any((r.get("user") or {}).get("login") == author and r.get("commit_id") == commit_sha for r in reviews):
-                return True
+            bodies += [
+                str(r.get("body") or "")
+                for r in reviews
+                if (r.get("user") or {}).get("login") == author and r.get("commit_id") == commit_sha
+            ]
             if len(reviews) < 100:
-                return False
+                return bodies
             page += 1

@@ -21,6 +21,8 @@ from autoreviewer.review.schemas import Finding
 
 logger = logging.getLogger("autoreviewer.posting")
 
+VERDICT_MARKER = "<!-- autoreviewer:verdict -->"
+"""Ends every verdict review, telling it apart from the empty reviews GitHub creates around single comments."""
 _MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) -->\Z")
 """Only the marker that ends a comment counts: code appends it last, after any model text or suggestion code,
 so a marker an attacker plants in the PR (and gets quoted) can't make a real finding look already posted."""
@@ -94,11 +96,13 @@ async def post_review(
 ) -> None:
     """The verdict, computed and never generated: a confirmed finding at the blocking priority blocks the
     merge. Inline findings already posted (`posted` fingerprints) aren't repeated."""
-    if await github.has_review(repo, number, commit_sha=head_sha, author=author):
-        # A replay after a crash between posting and checkpointing: the review is already there.
+    bodies = await github.review_bodies(repo, number, commit_sha=head_sha, author=author)
+    if any(body.endswith(VERDICT_MARKER) for body in bodies):
+        # A replay after a crash between posting and checkpointing: the verdict is already there. (Only the
+        # verdict counts: GitHub wraps each early inline comment in an empty review of its own.)
         logger.info("%s/%s#%d at %s already reviewed; not posting again", repo.owner, repo.name, number, head_sha[:7])
         return
-    footer = f"<sub>autoreviewer · {models_note} · `{head_sha[:7]}`</sub>"
+    footer = f"<sub>autoreviewer · {models_note} · `{head_sha[:7]}`</sub>\n\n{VERDICT_MARKER}"
     # A review cut short by the time limit never approves: it hasn't seen the whole change.
     event = "REQUEST_CHANGES" if outcome.blocking else "COMMENT" if outcome.cut_short else "APPROVE"
     unposted = [f for f in outcome.inline if fingerprint(head_sha, f) not in posted]

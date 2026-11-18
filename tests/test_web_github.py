@@ -24,6 +24,7 @@ pytestmark = pytest.mark.anyio
 
 APP_ID = 5786748
 REPO = Repo(installation_id=182623847, owner="mpfaffenberger", name="demo")
+BOT_LOGIN = "chaos-emerald-reviewer[bot]"
 HEAD = "a" * 40
 
 
@@ -84,6 +85,21 @@ class FakeGitHub:
         if method == "PATCH" and path == f"{base}/check-runs/99":
             self.writes.append(("finish_check", path, json.loads(request.content)))
             return httpx2.Response(200, json={"id": 99, "name": CHECK_NAME})
+        if method == "GET" and path == f"{base}/pulls/7/reviews":
+            return httpx2.Response(200, json=[
+                {"user": {"login": BOT_LOGIN}, "commit_id": HEAD, "body": "verdict"},
+                {"user": {"login": BOT_LOGIN}, "commit_id": HEAD, "body": None},  # wraps a single comment
+                {"user": {"login": BOT_LOGIN}, "commit_id": "d" * 40, "body": "older head"},
+                {"user": {"login": "someone"}, "commit_id": HEAD, "body": "human"},
+            ])  # fmt: skip
+        if method == "GET" and path == f"{base}/pulls/7/comments":
+            return httpx2.Response(200, json=[
+                {"user": {"login": BOT_LOGIN}, "body": "finding <!-- autoreviewer:0123456789abcdef -->"},
+                {"user": {"login": "someone"}, "body": "reply"},
+            ])  # fmt: skip
+        if method == "POST" and path == f"{base}/pulls/7/comments":
+            self.writes.append(("create_review_comment", path, json.loads(request.content)))
+            return httpx2.Response(201, json={"id": 2})
         if method == "POST" and path == f"{base}/pulls/7/reviews":
             if self.reject_reviews:
                 return httpx2.Response(
@@ -168,3 +184,22 @@ async def test_check_run_lifecycle_and_review_payloads(fake_and_app: tuple[FakeG
             },
         ],
     }
+
+
+async def test_single_comments_and_review_listings(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
+    fake, app = fake_and_app
+    comment = ReviewComment("f1.py", 7, "```suggestion\nx\n```", start_line=4)
+    await app.create_review_comment(REPO, 7, commit_sha=HEAD, comment=comment)
+    assert fake.writes[-1][2] == {
+        "body": "```suggestion\nx\n```",
+        "commit_id": HEAD,
+        "path": "f1.py",
+        "line": 7,
+        "side": "RIGHT",
+        "start_line": 4,
+        "start_side": "RIGHT",
+    }
+    assert await app.review_bodies(REPO, 7, commit_sha=HEAD, author=BOT_LOGIN) == ["verdict", ""]
+    assert await app.review_comment_bodies(REPO, 7, author=BOT_LOGIN) == [
+        "finding <!-- autoreviewer:0123456789abcdef -->"
+    ]
