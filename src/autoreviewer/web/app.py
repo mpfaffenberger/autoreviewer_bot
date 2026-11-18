@@ -18,7 +18,7 @@ from autoreviewer.web.config import Settings
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
-    from autoreviewer.review.job import AgentFactory, Lens
+    from autoreviewer.review.job import AgentFactory, Lens, VerifierFactory
     from autoreviewer.review.schemas import LensKind
     from autoreviewer.review.simplify import SimplifierFactory
 from autoreviewer.web.routing import (
@@ -118,14 +118,32 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
     from autoreviewer.review.agents import correctness_agent, verifier_agent
 
     lens_model, verifier_model = _models(settings)
+    fused = settings.security and settings.fused_security
     return lambda workspace: (
-        correctness_agent(lens_model, workspace, context_window=settings.lens_context_window),
+        correctness_agent(lens_model, workspace, context_window=settings.lens_context_window, fused=fused),
         verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
     )
 
 
 MAX_DRY_POSTED = 3
 """The eval's clean 786-line commit drew 8 DRY comments, mostly true but too many to read: keep 3."""
+
+
+def build_security_verifier(settings: Settings) -> VerifierFactory | None:
+    """The security verifier for a combined correctness and security lens; None without one."""
+    from autoreviewer.review.agents import lens_pair
+
+    if not (settings.security and settings.fused_security):
+        return None
+    lens_model, verifier_model = _models(settings)
+    return lambda workspace: lens_pair(
+        "security",
+        lens_model,
+        verifier_model,
+        workspace,
+        lens_window=settings.lens_context_window,
+        verifier_window=settings.verifier_context_window,
+    )[1]
 
 
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:
@@ -145,7 +163,7 @@ def build_lenses(settings: Settings) -> tuple[Lens, ...]:
         )
 
     kinds: list[LensKind] = []
-    if settings.security:
+    if settings.security and not settings.fused_security:  # combined: the correctness lens covers it
         kinds.append("security")
     if settings.dry:
         kinds.append("dry")
@@ -214,10 +232,11 @@ def main() -> None:
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
-        lens_version=lens_version(settings.lens_model),
+        lens_version=lens_version(settings.lens_model, fused=settings.security and settings.fused_security),
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
         lenses=build_lenses(settings),
+        security_verifier=build_security_verifier(settings),
         soft_deadline_s=settings.soft_deadline_minutes * 60,
         hard_deadline_s=settings.hard_deadline_minutes * 60,
     )

@@ -213,10 +213,14 @@ class Judge:
         label: str,
         publish: Publish | None = None,
         limit: int = MAX_FINDINGS,
+        security_verifier: Agent[None, Verification] | None = None,
     ) -> None:
-        """`limit`: how many findings are verified at most, counting only those past the free filters."""
+        """`limit`: how many findings are verified at most, counting only those past the free filters. With
+        `security_verifier` (a combined correctness and security lens), each finding's own `category` decides its
+        kind, and security findings are checked by the security verifier."""
         self._pr, self._verifier, self._progress, self._outcome = pr, verifier, progress, outcome
         self._kind, self._label, self._publish, self._limit = kind, label, publish, limit
+        self._security_verifier = security_verifier
         self._reviewable = {change.path for change in pr.reviewable}
         self._slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
         self._tasks: list[asyncio.Task[None]] = []
@@ -234,7 +238,8 @@ class Judge:
     def submit(self, finding: Finding) -> str:
         """Start verifying `finding`, unless it's out of scope, a hunch, or not more urgent than what was
         already reported for its line (a strictly more urgent report replaces the earlier one)."""
-        finding = finding.model_copy(update={"kind": self._kind})
+        kind = finding.category if self._security_verifier is not None else self._kind
+        finding = finding.model_copy(update={"kind": kind})
         key = (finding.path, finding.line)
         current = self._latest.get(key)
         if current is not None and finding.priority >= current.priority:
@@ -277,9 +282,12 @@ class Judge:
         finding = reported
         async with self._slots:
             try:
-                watch = self._progress.watch(f"{self._label} ({finding.path}:{finding.line})")
+                verifier, label = self._verifier, self._label
+                if finding.kind == "security" and self._security_verifier is not None:
+                    verifier, label = self._security_verifier, "security verifier"
+                watch = self._progress.watch(f"{label} ({finding.path}:{finding.line})")
                 prompt = verifier_prompt(self._pr, finding)
-                verdict = (await self._verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])).output
+                verdict = (await verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])).output
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
                 if self._latest.get((finding.path, finding.line)) is reported:  # not superseded meanwhile
@@ -368,7 +376,10 @@ async def review(
     checked: Sequence[Finding] = (),
     progress: Progress | None = None,
     publish: Publish | None = None,
+    security_verifier: Agent[None, Verification] | None = None,
+    instructions: str | None = None,
 ) -> Outcome:
+    """The correctness lens (combined with security when `security_verifier` is given; see Judge)."""
     progress = progress or Progress()
     outcome = Outcome(block_at=block_at)
     for finding in checked:  # proven by a tool, not a model: nothing to verify, so post at once
@@ -376,12 +387,14 @@ async def review(
             await publish(finding)
     prompt = continuation_prompt(pr, continuation) if continuation else lens_prompt(pr)
     progress.set_phase("Continuing the last review" if continuation else "Reviewing the change")
-    judge = Judge(pr, verifier, progress, outcome, label="verifier", publish=publish)
+    judge = Judge(
+        pr, verifier, progress, outcome, label="verifier", publish=publish, security_verifier=security_verifier
+    )
     lens_run = await _run_judged(
         judge,
         lambda toolsets: lens.run(
             prompt,
-            instructions=LENS_RULES,
+            instructions="\n\n".join(part for part in (instructions, LENS_RULES) if part),
             toolsets=toolsets,
             message_history=continuation.history if continuation else None,
             capabilities=[*lens_capabilities, progress.watch("reviewer")],

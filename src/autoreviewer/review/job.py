@@ -26,6 +26,7 @@ from autoreviewer.github import (
     PullRequestState,
     Repo,
 )
+from autoreviewer.review.agents import security_references
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LintError, type_findings
@@ -56,6 +57,7 @@ PROGRESS_INTERVAL_S = 30.0
 """How often a running review updates its check run, at most (GitHub rate-limits App writes)."""
 
 AgentFactory = Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]
+VerifierFactory = Callable[[Workspace], Agent[None, Verification]]
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,8 @@ class ReviewDeps:
     """Optional one-click simplifications (see simplify.py); None skips them."""
     lenses: tuple[Lens, ...] = ()
     """Extra lenses (security, DRY) beside correctness."""
+    security_verifier: VerifierFactory | None = None
+    """Set when the correctness lens also covers security (a combined lens): it checks the security findings."""
     soft_deadline_s: float = 30 * 60
     """After this, every lens wraps up with what it has (see deadline.py)."""
     hard_deadline_s: float = 50 * 60
@@ -266,6 +270,7 @@ async def review_change(
     lenses: Sequence[Lens] = (),
     publish: Publish | None = None,
     deadline: Deadline | None = None,
+    security_verifier: VerifierFactory | None = None,
 ) -> Reviewed | CheckResult:
     """Review one PR head: check it out, find what changed, run lens and verifier.
 
@@ -330,6 +335,10 @@ async def review_change(
                     checked=typed,
                     progress=progress,
                     publish=publish,
+                    security_verifier=security_verifier(workspace) if security_verifier else None,
+                    instructions=(
+                        security_references(change.path for change in pr.reviewable) if security_verifier else None
+                    ),
                 )
             )
             extra = []
@@ -456,6 +465,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
                     lenses=deps.lenses,
                     publish=publisher,
                     deadline=Deadline(deps.soft_deadline_s),
+                    security_verifier=deps.security_verifier,
                 ),
             )
 

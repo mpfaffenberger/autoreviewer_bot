@@ -24,6 +24,9 @@ class Settings:
     """Send prompts, model output, and tool results (the reviewed code) to Logfire with each trace."""
     security: bool = True
     """Run the security lens alongside correctness (see review/pipeline.py, review_lens)."""
+    fused_security: bool = False
+    """Review security inside the correctness lens (one agent, a security addendum, its findings checked by
+    the security verifier) instead of a separate security lens. Off until the eval says it's as good."""
     dry: bool = True
     """Run the DRY lens: new code that re-implements an existing helper, the stdlib, or a dependency."""
     simplify: bool = True
@@ -74,6 +77,7 @@ class Settings:
             simplify=parse_bool(env, "AUTOREVIEWER_SIMPLIFY", default=True),
             security=parse_bool(env, "AUTOREVIEWER_SECURITY", default=True),
             dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True),
+            fused_security=parse_bool(env, "AUTOREVIEWER_FUSED_SECURITY", default=False),
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],

@@ -33,7 +33,16 @@ from autoreviewer.review.agents import (
     verifier_agent,
 )
 from autoreviewer.review.deadline import Deadline
-from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
+from autoreviewer.review.job import (
+    AgentFactory,
+    CheckResult,
+    Lens,
+    ReviewDeps,
+    Reviewed,
+    VerifierFactory,
+    review_change,
+)
+from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.app import lens
@@ -126,14 +135,23 @@ class Result:
     """The seeded bug was posted at a priority that blocks the merge."""
     cut_short: bool = False
     """A lens hit the soft deadline and wrapped up early."""
+    model_requests: int = 0
+    tool_calls: int = 0
+    """Work across every agent: the cost measure that doesn't depend on what else is using the GPU."""
     kinds_hit: list[str] = field(default_factory=list[str])
     """Which lenses posted the seeded bug (correctness, security, dry, ...)."""
     findings: list[str] = field(default_factory=list[str])
     """Every raw finding and its fate, for triaging "false alarms" that may be real bugs in the host commit."""
 
 
-async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], work: Path) -> Result:
-    started = time.monotonic()
+async def run_case(
+    case: Case,
+    agents: AgentFactory,
+    lenses: Sequence[Lens],
+    work: Path,
+    security_verifier: VerifierFactory | None = None,
+) -> Result:
+    started, progress = time.monotonic(), Progress()
     with tempfile.TemporaryDirectory(dir=work) as scratch:
         repo, lines = build_repo(case, Path(scratch))
         state = PullRequestState(
@@ -144,7 +162,8 @@ async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], wor
                 result = await review_change(
                     reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),
                     repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head, lenses=lenses,
-                    deadline=Deadline(ReviewDeps.soft_deadline_s),
+                    deadline=Deadline(ReviewDeps.soft_deadline_s), progress=progress,
+                    security_verifier=security_verifier,
                 )  # fmt: skip
         except TimeoutError:
             return Result(case.name, case.clean, False, False, 0, 0, 0, time.monotonic() - started, "timed out")
@@ -177,6 +196,8 @@ async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], wor
         blocking_hit=hits([f for f in posted if blocks(f)], case, lines),
         kinds_hit=sorted({f.kind for f in posted if hits([f], case, lines)}),
         cut_short=outcome.cut_short,
+        model_requests=progress.requests,
+        tool_calls=progress.tool_calls,
         findings=[f"{f.path}:{f.line} {_grade(f)} {f.title} [{fate}]" for f, fate in fates],
     )
 
@@ -193,19 +214,26 @@ async def main() -> None:
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--suite", choices=("correctness", "security", "dry"), default="correctness")
     parser.add_argument("--lens", action="append", choices=("security", "dry"), default=[], help="extra lens to run")
+    parser.add_argument(
+        "--fused", action="store_true", help="security inside the correctness lens (not with --lens security)"
+    )
     args = parser.parse_args()
 
     lens_model, verifier_model = models_from_env()
 
     def agents(workspace: Workspace) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
         return (
-            correctness_agent(lens_model, workspace, context_window=QWEN_CONTEXT_WINDOW),
+            correctness_agent(lens_model, workspace, context_window=QWEN_CONTEXT_WINDOW, fused=args.fused),
             verifier_agent(verifier_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),
         )
 
     def pair(kind: LensKind) -> AgentFactory:
         return lambda workspace: lens_pair(kind, lens_model, verifier_model, workspace)
 
+    def security_check(workspace: Workspace) -> Agent[None, Verification]:
+        return lens_pair("security", lens_model, verifier_model, workspace)[1]
+
+    security_verifier = security_check if args.fused else None
     lenses = [lens(kind, pair(kind)) for kind in args.lens]  # the bot's own settings for each kind
 
     suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
@@ -215,7 +243,7 @@ async def main() -> None:
 
         async def bounded(case: Case) -> Result:
             async with slots:
-                result = await run_case(case, agents, lenses, Path(work))
+                result = await run_case(case, agents, lenses, Path(work), security_verifier)
                 kind = "clean" if case.clean else "bug  "
                 print(
                     f"  {case.name:26} {kind} lens_hit={result.lens_hit!s:5} posted_hit={result.posted_hit!s:5} "
@@ -242,6 +270,8 @@ async def main() -> None:
         "clean_cases_with_findings": sum(1 for r in clean if r.posted),
         "errors": sum(1 for r in results if r.error),
         "minutes": round(sum(r.seconds for r in results) / 60, 1),
+        "model_requests": sum(r.model_requests for r in results),
+        "tool_calls": sum(r.tool_calls for r in results),
     }
     print(json.dumps(summary, indent=2))
     RESULTS.mkdir(exist_ok=True)

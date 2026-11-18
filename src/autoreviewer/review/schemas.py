@@ -41,6 +41,11 @@ class Finding(BaseModel):
         "wrong. Matter-of-fact; don't overstate."
     )
     suggestion: str | None = Field(default=None, description="A concrete fix, if there is an obvious one")
+    category: Literal["correctness", "security"] = Field(
+        default="correctness",
+        description='"security" if an attacker who controls some input can exploit it; otherwise "correctness"',
+    )
+    """The model's claim. In a combined lens, code takes the finding's `kind` (and so its verifier) from it."""
     kind: SkipJsonSchema[Literal["correctness", "types", "simplify"] | LensKind] = "correctness"
     """Which check found it. Not in the lens's schema: the lens only ever produces correctness findings."""
     start_line: SkipJsonSchema[int | None] = None

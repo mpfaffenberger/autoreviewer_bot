@@ -113,11 +113,11 @@ REPORT_TOOL = "report_finding"
 """The tool a lens calls to hand over a finding mid-run (pipeline.Judge)."""
 
 
-def lens_version(model_name: str) -> str:
+def lens_version(model_name: str, *, fused: bool = False) -> str:
     """Fingerprint of what shapes a lens conversation; a saved one is only continued if it matches."""
     material = "\n".join(
         [
-            _prompt("correctness.md"),
+            correctness_instructions(fused=fused),
             model_name,
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
             ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
@@ -128,9 +128,16 @@ def lens_version(model_name: str) -> str:
 
 
 def correctness_agent(
-    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
+    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW, fused: bool = False
 ) -> Agent[None, LensReport]:
-    return _agent(model, workspace, LensReport, _prompt("correctness.md"), context_window)
+    """With `fused`, one lens for correctness and security (`security_focus.md`): its security findings go to
+    the security verifier, and it wants `security_references` as run instructions."""
+    return _agent(model, workspace, LensReport, correctness_instructions(fused=fused), context_window)
+
+
+def correctness_instructions(*, fused: bool = False) -> str:
+    base = _prompt("correctness.md")
+    return f"{base}\n\n{_prompt('security_focus.md')}" if fused else base
 
 
 def verifier_agent(
