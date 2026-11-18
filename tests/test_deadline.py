@@ -77,7 +77,7 @@ def pull(repo: GitRepo) -> PullRequestUpdated:
 
 async def test_a_review_cut_short_never_approves(repo: GitRepo, tmp_path: Path) -> None:
     github = FakeGitHub(repo)
-    deps = replace(job_deps(github, tmp_path, []), soft_deadline_s=0, memory=ReviewMemory(tmp_path / "steps"))
+    deps = replace(job_deps(github, tmp_path), soft_deadline_s=0, memory=ReviewMemory(tmp_path / "steps"))
     result = await review_and_post(deps, pull(repo))
     assert [r["event"] for r in github.reviews] == ["COMMENT"] and "Partially reviewed" in github.reviews[0]["body"]
     assert (result.conclusion, result.title) == ("neutral", "Partially reviewed")
@@ -149,3 +149,12 @@ async def test_a_push_mid_review_stops_it_instead_of_finishing(
     result = await review_and_post(deps, pull(repo))
     assert result.title == "Superseded" and github.reviews == [] and finished == []
     assert asyncio.get_running_loop().time() - started < 2
+
+
+async def test_a_retry_after_a_partial_review_posts_the_full_verdict(repo: GitRepo, tmp_path: Path) -> None:
+    """Live on #22: the partial COMMENT's marker made the retry's real verdict look already posted."""
+    github = FakeGitHub(repo)
+    await review_and_post(replace(job_deps(github, tmp_path), soft_deadline_s=0), pull(repo))  # cut short
+    await review_and_post(replace(job_deps(github, tmp_path), soft_deadline_s=0), pull(repo))  # cut short again
+    await review_and_post(job_deps(github, tmp_path), pull(repo))  # the retry gets through
+    assert [r["event"] for r in github.reviews] == ["COMMENT", "APPROVE"]  # one partial, then the verdict
