@@ -70,6 +70,8 @@ class Outcome:
     overall_correct: bool = True
     """The lens's overall verdict on the change (Codex-style), alongside its findings."""
     reviewed: list[str] = field(default_factory=list[str])
+    cut_short: bool = False
+    """A lens that can block hit the time limit before covering the whole change: never an approval."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
 
@@ -319,6 +321,7 @@ async def review_lens(
     progress: Progress,
     block_at: int = BLOCK_AT_PRIORITY,
     publish: Publish | None = None,
+    capabilities: Sequence[AbstractCapability[None]] = (),
 ) -> Outcome:
     """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier."""
     outcome = Outcome(block_at=block_at)
@@ -330,7 +333,7 @@ async def review_lens(
             lens_prompt(pr),
             instructions=combined,
             toolsets=toolsets,
-            capabilities=[progress.watch(kind)],
+            capabilities=[*capabilities, progress.watch(kind)],
             usage_limits=LENS_LIMITS,
         ),
     )

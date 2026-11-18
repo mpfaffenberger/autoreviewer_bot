@@ -206,6 +206,20 @@ security report one defect, a less urgent second report isn't posted; a more urg
 posted on a head that a newer push supersedes stay (GitHub marks them outdated), but that head gets no
 verdict.
 
+### Time limits and scope
+
+Every lens gets one shared scope rule (`agents.FOCUS`): review the lines the PR adds or removes and what they
+affect, and read the rest of the codebase only to understand them. Runaway reviews were scope drift.
+
+`review/deadline.py`: after the **soft deadline** (`AUTOREVIEWER_SOFT_DEADLINE_MINUTES`, 20) every lens
+wraps up. A capability removes its tools and tells it time is up, so it returns its final report with what
+it found. After the **hard deadline** (`AUTOREVIEWER_HARD_DEADLINE_MINUTES`, 45) the job cancels the review:
+"Review timed out", no verdict, and findings already posted stay. A review whose correctness or security
+lens was cut short **never approves**: it requests changes if it found blocking issues, and otherwise
+posts a neutral COMMENT ("partially reviewed") with a neutral check, and isn't remembered for continuing
+(files it never read wouldn't count as changed since). The CLI exits 3 for it, and the evals use the
+bot's limits.
+
 ### Deterministic checks (no model)
 
 Rules a tool can decide exactly are a linter's job, not a lens's. `review/lint.py` runs ruff on the

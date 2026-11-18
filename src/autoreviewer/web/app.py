@@ -198,6 +198,8 @@ def main() -> None:
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
         lenses=build_lenses(settings),
+        soft_deadline_s=settings.soft_deadline_minutes * 60,
+        hard_deadline_s=settings.hard_deadline_minutes * 60,
     )
     durable.configure(settings.database)
 

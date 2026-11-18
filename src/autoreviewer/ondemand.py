@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from autoreviewer.github import PublicGitHub, PullRequestReader, Repo
+from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, Reviewed, review_change
 from autoreviewer.review.pipeline import BLOCK_AT_PRIORITY, Outcome
 from autoreviewer.review.render import comment_body
@@ -66,14 +67,16 @@ class Report:
     def exit_code(self) -> int:
         if isinstance(self.result, CheckResult):  # no review ran; "success" means there was nothing to review
             return EXIT_APPROVE if self.result.conclusion == "success" else EXIT_NOT_REVIEWED
-        return EXIT_REQUEST_CHANGES if self.result.blocking else EXIT_APPROVE
+        if self.result.blocking:
+            return EXIT_REQUEST_CHANGES
+        return EXIT_NOT_REVIEWED if self.result.cut_short else EXIT_APPROVE  # cut short: never an approval
 
     def render(self) -> str:
         header = f"# {self.ref.owner}/{self.ref.repo}#{self.ref.number} at {self.head_sha[:7]}: {self.title}\n"
         if isinstance(self.result, CheckResult):
             return f"{header}\n**{self.result.title}**: {self.result.summary}\n"
         outcome = self.result
-        verdict = "REQUEST CHANGES" if outcome.blocking else "APPROVE"
+        verdict = "REQUEST CHANGES" if outcome.blocking else "PARTIALLY REVIEWED" if outcome.cut_short else "APPROVE"
         lines = [header, f"**Verdict: {verdict}** (nothing was posted to GitHub)\n"]
         for finding in outcome.posted:
             body = comment_body(finding, blocking=outcome.is_blocking(finding))
@@ -103,6 +106,7 @@ async def review_pr(
     block_at: int = BLOCK_AT_PRIORITY,
     simplifier: SimplifierFactory | None = None,
     lenses: Sequence[Lens] = (),
+    deadline: Deadline | None = None,
 ) -> Report:
     repo = Repo(installation_id=0, owner=ref.owner, name=ref.repo)  # no App installation involved
     state = await reader.get_pull(repo, ref.number)
@@ -118,6 +122,7 @@ async def review_pr(
         block_at=block_at,
         simplifier=simplifier,
         lenses=lenses,
+        deadline=deadline,
     )  # no memory: on-demand reviews always start fresh
     return Report(ref, state.head_sha, state.title, result.outcome if isinstance(result, Reviewed) else result)
 
@@ -142,18 +147,18 @@ def run(argv: list[str] | None = None) -> int:
         logs.configure(to_logfire=True)
         settings.work_dir.mkdir(parents=True, exist_ok=True)
         token = os.environ.get("GITHUB_TOKEN") or None  # optional: private repos, higher API rate limit
-        report = asyncio.run(
-            review_pr(
-                ref,
-                reader=PublicGitHub(token),
-                source=PublicSource(token),
-                agents=build_agent_factory(settings),
-                work_dir=settings.work_dir,
-                block_at=settings.block_at_priority,
-                simplifier=build_simplifier_factory(settings),
-                lenses=build_lenses(settings),
-            )
+        review = review_pr(
+            ref,
+            reader=PublicGitHub(token),
+            source=PublicSource(token),
+            agents=build_agent_factory(settings),
+            work_dir=settings.work_dir,
+            block_at=settings.block_at_priority,
+            simplifier=build_simplifier_factory(settings),
+            lenses=build_lenses(settings),
+            deadline=Deadline(settings.soft_deadline_minutes * 60),
         )
+        report = asyncio.run(asyncio.wait_for(review, settings.hard_deadline_minutes * 60))
     except Exception as error:  # any failure is an error, never a verdict
         logger.exception("on-demand review of %s failed", args.pr)
         print(f"error: could not review {args.pr}: {type(error).__name__}: {error}", file=sys.stderr)
