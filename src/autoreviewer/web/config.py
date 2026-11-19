@@ -6,10 +6,18 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, get_args
 
-from autoreviewer.servers import DEEPSEEK, DEEPSEEK_CONTEXT_WINDOW, DEFAULT_MODEL_LANES, QWEN, QWEN_CONTEXT_WINDOW
+from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, DEFAULT_MODEL_LANES, QWEN
 
 DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
+
+AgentKind = Literal["correctness", "security", "dry", "simplify"]
+"""Each kind has a finder (the role named after it) and a checker (`<kind>.verifier`)."""
+AGENT_KINDS: tuple[AgentKind, ...] = get_args(AgentKind)
+AGENT_ROLES = (*AGENT_KINDS, *(f"{kind}.verifier" for kind in AGENT_KINDS))
+DEFAULT_MODELS = {role: DEEPSEEK if role.endswith(".verifier") else QWEN for role in AGENT_ROLES}
+"""Finders on Qwen (fast), checkers on DeepSeek (better): pin any role to change it (AUTOREVIEWER_MODELS)."""
 
 
 @dataclass(frozen=True)
@@ -43,11 +51,8 @@ class Settings:
     (servers.DEFAULT_MODEL_LANES). Two at once left most requests waiting and pushed both past their deadline."""
     boodleton_base_url: str = "http://boodleton:8000/v1"
     boodleton_api_key: str = field(default="", repr=False)
-    lens_model: str = QWEN
-    verifier_model: str = DEEPSEEK
-    lens_context_window: int = QWEN_CONTEXT_WINDOW
-    verifier_context_window: int = DEEPSEEK_CONTEXT_WINDOW
-    """Each model's context window in tokens; compaction keeps conversations under 60% of it."""
+    models: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
+    """The model each agent role runs on (see models_from); its context window follows (servers.CONTEXT_WINDOWS)."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
     """DBOS system database: queued and in-flight reviews survive restarts here."""
@@ -77,10 +82,7 @@ class Settings:
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],
-            lens_model=env.get("AUTOREVIEWER_LENS_MODEL", cls.lens_model),
-            verifier_model=env.get("AUTOREVIEWER_VERIFIER_MODEL", cls.verifier_model),
-            lens_context_window=int(env.get("AUTOREVIEWER_LENS_CONTEXT_WINDOW", cls.lens_context_window)),
-            verifier_context_window=int(env.get("AUTOREVIEWER_VERIFIER_CONTEXT_WINDOW", cls.verifier_context_window)),
+            models=models_from(env),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
             steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
@@ -109,9 +111,37 @@ def model_lanes_from(env: Mapping[str, str]) -> dict[str, int]:
 def parse_lanes(value: str) -> dict[str, int]:
     """ "model=3,other=4" -> {"model": 3, "other": 4}; a malformed entry stops startup. Blank -> {}."""
     lanes: dict[str, int] = {}
-    for item in filter(None, (part.strip() for part in value.split(","))):
-        name, _, count = item.rpartition("=")
-        if not name or not count.isdigit() or int(count) < 1:
-            raise ValueError(f"AUTOREVIEWER_MODEL_LANES: expected model=lanes (lanes >= 1), got {item!r}")
+    for name, count in _pairs(value, "AUTOREVIEWER_MODEL_LANES", "model=lanes (lanes >= 1)"):
+        if not count.isdigit() or int(count) < 1:
+            raise ValueError(f"AUTOREVIEWER_MODEL_LANES: expected model=lanes (lanes >= 1), got {name}={count}")
         lanes[name] = int(count)
     return lanes
+
+
+def models_from(env: Mapping[str, str]) -> dict[str, str]:
+    """Each agent role's model: DEFAULT_MODELS, with AUTOREVIEWER_MODELS ("role=model,...", e.g.
+    "security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next") pinning roles. Stops startup on an unknown
+    role, a model without a known context window, or a finder on the same model as its checker (different models
+    make different mistakes; that's the point of checking). Shared by the bot and the evals."""
+    models = dict(DEFAULT_MODELS)
+    for role, model in _pairs(env.get("AUTOREVIEWER_MODELS", ""), "AUTOREVIEWER_MODELS", "role=model"):
+        if role not in models:
+            raise ValueError(f"AUTOREVIEWER_MODELS: unknown role {role!r}; roles: {', '.join(AGENT_ROLES)}")
+        if model not in CONTEXT_WINDOWS:
+            raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
+        models[role] = model
+    for kind in AGENT_KINDS:
+        if models[kind] == models[f"{kind}.verifier"]:
+            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {kind}.verifier are both {models[kind]!r}")
+    return models
+
+
+def _pairs(value: str, setting: str, expected: str) -> list[tuple[str, str]]:
+    """ "a=1, b=2," -> [("a", "1"), ("b", "2")]; blank entries are skipped, a malformed one stops startup."""
+    pairs = []
+    for item in filter(None, (part.strip() for part in value.split(","))):
+        key, _, val = item.rpartition("=")
+        if not key.strip() or not val.strip():
+            raise ValueError(f"{setting}: expected {expected}, got {item!r}")
+        pairs.append((key.strip(), val.strip()))
+    return pairs

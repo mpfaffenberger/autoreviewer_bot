@@ -333,11 +333,15 @@ lease. Don't build a distributed lock for a single box.
 
 | Role | Default model | Why |
 |---|---|---|
-| Lenses ×3 | `qwen3.8-flash-next` | 262k context, local on the RTX PRO 6000, MTP drafting makes it fast |
-| Verifier | `deepseek-v4.1-flash` | A *different* model, so its mistakes are less likely to match the lenses' |
-| Conversation | `deepseek-v4.1-flash` | Keeps the Qwen slots free for reviews |
+| Finders: `correctness`, `security`, `dry`, `simplify` | `qwen3.8-flash-next` | Local on the RTX PRO 6000, MTP drafting makes it fast |
+| Checkers: `<kind>.verifier` | `deepseek-v4.1-flash` | Better, and a *different* model, so its mistakes are less likely to match the finder's |
 
-All model choices live in config, not in code.
+**Pinning.** Any role can be pinned to another model with one setting, e.g.
+`AUTOREVIEWER_MODELS="security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next"`; unlisted roles keep
+the defaults (`config.models_from`). Each agent's context window follows its model (`servers.CONTEXT_WINDOWS`).
+Startup stops on an unknown role, a model without a known window, or a finder pinned to the same model as its
+checker. `web.app.ModelPlan` builds every agent's model, for the bot and the evals alike; the review footer names
+each finder/checker pair.
 
 **Capacity reality check:** Qwen serves about 3 concurrent 262k slots, and
 **you share them** with your own Boodleton/Code Puppy use. One review is about
