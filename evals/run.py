@@ -16,7 +16,7 @@ import os
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import get_args
@@ -26,7 +26,7 @@ from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind
 from autoreviewer.web.app import ModelPlan, correctness_agents, lens, lens_agents
-from autoreviewer.web.config import Settings, model_lanes_from, models_from, reasoning_from
+from autoreviewer.web.config import Settings, deadlines_from, model_lanes_from, models_from, reasoning_from
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.docs_cases import CASES as DOCS_CASES
 from evals.dry_cases import CASES as DRY_CASES
@@ -188,20 +188,27 @@ def _grade(finding: Finding) -> str:
     return f"P{priority} c{confidence}" if priority is not None else str(getattr(finding, "severity", ""))
 
 
-async def main() -> None:
+def arguments(argv: Sequence[str] | None = None, env: Mapping[str, str] = os.environ) -> argparse.Namespace:
+    """The command line, checked. The time limits default to the bot's own (config.deadlines_from), env included."""
+    soft, hard = deadlines_from(env)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", nargs="*", help="case names to run (default: all)")
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="cases at once")
-    parser.add_argument("--soft-minutes", type=float, default=Settings.soft_deadline_minutes)
-    parser.add_argument("--hard-minutes", type=float, default=Settings.hard_deadline_minutes)
+    parser.add_argument("--soft-minutes", type=float, default=soft)
+    parser.add_argument("--hard-minutes", type=float, default=hard)
     parser.add_argument("--suite", choices=SUITES, default="correctness")
     parser.add_argument("--lens", action="append", choices=get_args(LensKind), default=[], help="extra lens to run")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
     if not 0 < args.soft_minutes < args.hard_minutes:
-        parser.error("--soft-minutes must be positive and below --hard-minutes, or reviews never wrap up")
+        parser.error("--soft-minutes must be greater than 0 and below --hard-minutes")
+    return args
+
+
+async def main() -> None:
+    args = arguments()
 
     plan = plan_from_env()
     agents = correctness_agents(plan)
