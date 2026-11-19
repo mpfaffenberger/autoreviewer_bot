@@ -10,9 +10,9 @@ from __future__ import annotations
 from evals.cases import CLEAN_CONTROLS, Case
 
 SECURITY_CORPUS = "d5e9888"
+"""A snapshot that has every file below."""
 SUBTLE_CORPUS = "4156bde"
 """Has posting.py, the read-only workspace, and sanitized progress (#21/#22)."""
-"""A snapshot that has every file below."""
 
 _SIGNATURE = (
     "src/autoreviewer/web/app.py",
