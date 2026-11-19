@@ -12,7 +12,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from autoreviewer.review.agents import _lanes, with_lanes  # pyright: ignore[reportPrivateUsage]
 from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.app import ModelPlan
-from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, models_from, parse_lanes
+from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
 
 pytestmark = pytest.mark.anyio
 
@@ -55,7 +55,8 @@ def test_a_missing_or_blank_setting_keeps_the_default_lanes(value: str | None) -
 
 def test_every_planned_agent_waits_in_its_models_lanes() -> None:
     """From the bot's review of #41: the plan the bot builds attaches each model's process-wide limiter."""
-    plan = ModelPlan(models_from({}), "http://boodleton.invalid/v1", "k", dict(DEFAULT_MODEL_LANES), {})
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
+    plan = ModelPlan.from_settings(settings)  # the bot's own path, from its settings
     for kind in ("correctness", "docs"):
         for role, (model, _) in ((kind, plan.finder(kind)), (f"{kind}.verifier", plan.verifier(kind))):
             name = plan.models[role]
