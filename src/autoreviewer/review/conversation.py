@@ -10,7 +10,6 @@ MAX_ANSWERS per thread, which also ends a ping-pong between two bots.
 from __future__ import annotations
 
 import logging
-import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,7 +20,7 @@ from pydantic_ai import Agent
 
 from autoreviewer.github import Conversations, Repo, ThreadComment
 from autoreviewer.review.agents import CONVERSATION_LIMITS
-from autoreviewer.review.posting import finding_marker
+from autoreviewer.review.posting import WITHDRAWN_MARKER, answered, answered_marker, finding_marker, reconsider
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ThreadAnswer
 from autoreviewer.review.workspace import RepoSource, Workspace
@@ -39,15 +38,6 @@ ConversationAgents = Callable[[Workspace], Agent[None, ThreadAnswer]]
 Outcome = Literal["answered", "withdrawn", "not our thread", "already answered", "answer limit", "pr not open"]
 
 
-def answered_marker(comment_id: int) -> str:
-    return f"<!-- autoreviewer:answers {comment_id} -->"
-
-
-WITHDRAWN_MARKER = "<!-- autoreviewer:withdrawn -->"
-"""Ends an answer that withdrew the thread's finding (see the verdict)."""
-_ANSWERED = re.compile(r"<!-- autoreviewer:answers (\d+) -->")
-
-
 @dataclass(frozen=True)
 class ConversationDeps:
     github: Conversations
@@ -55,6 +45,7 @@ class ConversationDeps:
     agents: ConversationAgents
     work_dir: Path
     bot_login: str
+    block_at: int
 
 
 async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
@@ -65,7 +56,7 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
     if not thread or thread[0].author != deps.bot_login or finding_marker(thread[0].body) is None:
         return "not our thread"
     answers = [comment for comment in thread[1:] if comment.author == deps.bot_login]
-    if any(int(match[1]) == reply.comment_id for c in answers if (match := _ANSWERED.search(c.body))):
+    if any(answered(comment.body) == reply.comment_id for comment in answers):
         return "already answered"
     if len(answers) >= MAX_ANSWERS:
         logger.info("%s/%s#%d thread %d: %d answers already", reply.owner, reply.repo, reply.number, reply.root_id,
@@ -103,3 +94,9 @@ def _prompt(title: str, thread: list[ThreadComment], comment_id: int) -> str:
             f"Answer comment {comment_id}.",
         ]
     )
+
+
+async def reconsider_verdict(deps: ConversationDeps, reply: ThreadReply) -> bool:
+    """After a withdrawal: approve the PR's head if nothing blocking is left standing (posting.reconsider)."""
+    repo = Repo(reply.installation_id, reply.owner, reply.repo)
+    return await reconsider(deps.github, repo, reply.number, author=deps.bot_login, block_at=deps.block_at)

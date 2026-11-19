@@ -98,9 +98,17 @@ async def _answer(reply: ThreadReply) -> str:
     return await conversation.answer(_require_conversation_deps(), reply)
 
 
+@DBOS.step(retries_allowed=True, max_attempts=3)  # GitHub calls only, and it re-reads everything each time
+async def _reconsider(reply: ThreadReply) -> bool:
+    return await conversation.reconsider_verdict(_require_conversation_deps(), reply)
+
+
 @DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
 async def answer_workflow(reply: ThreadReply) -> str:
-    return await _answer(reply)
+    outcome = await _answer(reply)
+    if outcome == "withdrawn":
+        await _reconsider(reply)
+    return outcome
 
 
 async def enqueue_answer(reply: ThreadReply) -> None:

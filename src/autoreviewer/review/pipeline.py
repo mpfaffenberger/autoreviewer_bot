@@ -74,6 +74,9 @@ class Outcome:
     """A lens that can block hit the time limit before covering the whole change: never an approval."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
+    withdrawn: frozenset[tuple[str, int, str]] = frozenset()
+    """(path, line, kind) where a finding stands withdrawn in conversation (posting.withdrawn_placements): a
+    finding found there again is still posted (once) but doesn't block."""
 
     @property
     def posted(self) -> list[Finding]:
@@ -93,7 +96,7 @@ class Outcome:
                     target[target.index(same)] = finding
 
     def is_blocking(self, finding: Finding) -> bool:
-        return blocks(finding, self.block_at)
+        return blocks(finding, self.block_at) and (finding.path, finding.line, finding.kind) not in self.withdrawn
 
     @property
     def blocking(self) -> bool:

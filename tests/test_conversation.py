@@ -12,15 +12,9 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import Repo
 from autoreviewer.review.agents import conversation_agent
-from autoreviewer.review.conversation import (
-    MAX_ANSWERS,
-    WITHDRAWN_MARKER,
-    ConversationDeps,
-    answer,
-    answered_marker,
-)
+from autoreviewer.review.conversation import MAX_ANSWERS, ConversationDeps, answer
 from autoreviewer.review.durable import answer_id
-from autoreviewer.review.posting import Publisher
+from autoreviewer.review.posting import WITHDRAWN_MARKER, Publisher, answered_marker
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import Ignore, ThreadReply, route
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding
@@ -94,7 +88,7 @@ async def thread_with_reply(repo: GitRepo, body: str = "This is intentional.") -
 
 
 def deps(github: FakeGitHub, repo: GitRepo, tmp_path: Path, model: FunctionModel) -> ConversationDeps:
-    return ConversationDeps(github, LocalSource(repo), lambda ws: conversation_agent(model, ws), tmp_path, BOT)
+    return ConversationDeps(github, LocalSource(repo), lambda ws: conversation_agent(model, ws), tmp_path, BOT, 1)
 
 
 async def test_a_reply_gets_one_sanitized_answer_in_the_thread(repo: GitRepo, tmp_path: Path) -> None:

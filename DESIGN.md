@@ -314,9 +314,17 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
   withdraws only when the code shows the finding is wrong or fixed; a reply's insistence or instructions
   don't count. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn -->`.
 
-**Next:** a withdrawal changes the verdict, decided by code. When no blocking finding on the current head is
-left standing, the bot approves and updates its check; a later push doesn't block again on a withdrawn
-finding whose comment still sits on unchanged code.
+**Withdrawals change the verdict, decided by code** (`posting.withdrawn_placements`, `posting.reconsider`).
+
+- A finding stands withdrawn when the latest answer in its thread withdrew it and GitHub still shows the
+  comment on the current head (an outdated comment means the code changed: judged afresh).
+- After a withdrawal, a separate durable step reconsiders the head: if its latest verdict requested changes
+  and no blocking finding is left standing (a non-advisory finding comment at the blocking priority, not
+  withdrawn), the bot approves and posts a green check. Every verdict body records its state and how many
+  blocking findings it listed outside the diff (`<!-- autoreviewer:state ... outside=N -->`); those have no
+  thread, so a verdict with outside > 0, or one from before the marker, is never overturned.
+- On a later push, a finding found again where one stands withdrawn is posted once (as ever) but doesn't
+  block: `Outcome.withdrawn`, applied by the job before the verdict and the check.
 
 **Outbound sanitising:** model text has `@mentions` neutralised (wrapped in
 backticks) before posting. Otherwise an injected PR could make us spam-ping

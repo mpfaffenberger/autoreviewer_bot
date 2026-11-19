@@ -252,6 +252,7 @@ def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps
         agents=lambda workspace: conversation_agent(model, workspace, context_window=window),
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
+        block_at=settings.block_at_priority,
     )
 
 
