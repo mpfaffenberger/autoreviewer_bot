@@ -34,7 +34,8 @@ from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results")
 CONCURRENCY = Settings.max_concurrent_jobs
-"""Cases at once: as many as the bot runs reviews, so cases don't queue behind each other's model lanes."""
+"""Cases at once by default: as many as the bot runs reviews, so cases don't queue behind each other's model
+lanes. More (--concurrency) finishes sooner, but per-case times then include waiting for lanes."""
 
 
 def _snapshot(path: Path, commit: str) -> None:
@@ -116,7 +117,17 @@ class Result:
     """Every raw finding and its fate, for triaging "false alarms" that may be real bugs in the host commit."""
 
 
-async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], work: Path) -> Result:
+async def run_case(
+    case: Case,
+    agents: AgentFactory,
+    lenses: Sequence[Lens],
+    work: Path,
+    *,
+    soft_s: float = ReviewDeps.soft_deadline_s,
+    hard_s: float = ReviewDeps.hard_deadline_s,
+) -> Result:
+    """`soft_s`/`hard_s`: the bot's limits by default; raise them when runs share the models, so waiting for a
+    lane doesn't cut a case short."""
     started = time.monotonic()
     with tempfile.TemporaryDirectory(dir=work) as scratch:
         repo, lines = build_repo(case, Path(scratch))
@@ -124,11 +135,11 @@ async def run_case(case: Case, agents: AgentFactory, lenses: Sequence[Lens], wor
             head_sha=repo.head, base_sha=repo.base, state="open", draft=False, title=case.title, body=""
         )
         try:
-            async with asyncio.timeout(ReviewDeps.hard_deadline_s):  # the bot's limits
+            async with asyncio.timeout(hard_s):
                 result = await review_change(
                     reader=FakeGitHub(repo), source=LocalSource(repo), agents=agents, work_dir=Path(scratch),
                     repo=Repo(0, "eval", case.name), number=1, state=state, head_sha=repo.head, lenses=lenses,
-                    deadline=Deadline(ReviewDeps.soft_deadline_s),
+                    deadline=Deadline(soft_s),
                 )  # fmt: skip
         except TimeoutError:
             return Result(case.name, case.clean, False, False, 0, 0, 0, time.monotonic() - started, "timed out")
@@ -175,6 +186,9 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", nargs="*", help="case names to run (default: all)")
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="cases at once")
+    parser.add_argument("--soft-minutes", type=float, default=ReviewDeps.soft_deadline_s / 60)
+    parser.add_argument("--hard-minutes", type=float, default=ReviewDeps.hard_deadline_s / 60)
     parser.add_argument("--suite", choices=("correctness", "security", "dry"), default="correctness")
     parser.add_argument("--lens", action="append", choices=("security", "dry"), default=[], help="extra lens to run")
     args = parser.parse_args()
@@ -185,12 +199,14 @@ async def main() -> None:
 
     suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]
-    slots = asyncio.Semaphore(CONCURRENCY)
+    slots = asyncio.Semaphore(args.concurrency)
     with tempfile.TemporaryDirectory(prefix="autoreviewer-eval-") as work:
 
         async def bounded(case: Case) -> Result:
             async with slots:
-                result = await run_case(case, agents, lenses, Path(work))
+                result = await run_case(
+                    case, agents, lenses, Path(work), soft_s=args.soft_minutes * 60, hard_s=args.hard_minutes * 60
+                )
                 kind = "clean" if case.clean else "bug  "
                 print(
                     f"  {case.name:26} {kind} lens_hit={result.lens_hit!s:5} posted_hit={result.posted_hit!s:5} "
