@@ -26,7 +26,7 @@ from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
 from autoreviewer.review.schemas import Finding, LensKind
 from autoreviewer.web.app import ModelPlan, correctness_agents, lens, lens_agents
-from autoreviewer.web.config import Settings, model_lanes_from, models_from
+from autoreviewer.web.config import Settings, model_lanes_from, models_from, reasoning_from
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.docs_cases import CASES as DOCS_CASES
 from evals.dry_cases import CASES as DRY_CASES
@@ -87,12 +87,14 @@ def build_repo(case: Case, parent: Path) -> tuple[GitRepo, list[int]]:
 
 
 def plan_from_env() -> ModelPlan:
-    """The bot's models, pins (AUTOREVIEWER_MODELS) and lanes, read from the same environment, on Boodleton."""
+    """The bot's models, pins (AUTOREVIEWER_MODELS), lanes, and reasoning (AUTOREVIEWER_REASONING), read from the
+    same environment, on Boodleton."""
     return ModelPlan(
         models_from(os.environ),
         os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1"),
         os.environ["BOODLETON_API_KEY"],
         model_lanes_from(os.environ),
+        reasoning_from(os.environ),
     )
 
 

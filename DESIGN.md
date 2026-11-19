@@ -359,7 +359,9 @@ lease. Don't build a distributed lock for a single box.
 `AUTOREVIEWER_MODELS="security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next"`; unlisted roles keep
 the defaults (`config.models_from`). Each agent's context window follows its model (`servers.CONTEXT_WINDOWS`).
 Startup stops on an unknown role, a model without a known window, or a finder pinned to the same model as its
-checker. `web.app.ModelPlan` builds every agent's model, for the bot and the evals alike; the review footer names
+checker. `AUTOREVIEWER_REASONING="docs=high,tests=high"` sets a reasoning effort per role (low, medium, high).
+DeepSeek doesn't think unless a request asks for an effort (any effort turns it on); Qwen and Kimi think by
+default. Unlisted roles send none. `web.app.ModelPlan` builds every agent's model, for the bot and the evals alike; the review footer names
 each finder/checker pair.
 
 **Capacity reality check:** Qwen serves about 3 concurrent 262k slots, and
