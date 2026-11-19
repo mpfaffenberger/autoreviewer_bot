@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Tool
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import Repo
+from autoreviewer.review import durable
 from autoreviewer.review.agents import conversation_agent
 from autoreviewer.review.conversation import (
     MAX_ANSWERS,
@@ -22,6 +23,8 @@ from autoreviewer.review.conversation import (
 from autoreviewer.review.durable import answer_id
 from autoreviewer.review.posting import Publisher
 from autoreviewer.review.schemas import Finding
+from autoreviewer.web.app import thread_reply_handler
+from autoreviewer.web.config import Settings
 from autoreviewer.web.routing import Ignore, ThreadReply, route
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding
 
@@ -122,6 +125,14 @@ async def test_threads_the_bot_didnt_start_are_left_alone(repo: GitRepo, tmp_pat
     assert all(c["author"] != BOT for c in github.review_comments[1:])
 
 
+async def test_a_bot_comment_without_a_finding_marker_starts_no_conversation(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #37: only the bot's findings are answered, not its other comments."""
+    github, reply = await thread_with_reply(repo)
+    root = github.review_comments[0]["comment"]
+    github.review_comments[0]["comment"] = replace(root, body=root.body.rsplit("<!--", 1)[0])
+    assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "not our thread"
+
+
 async def test_a_thread_gets_at_most_a_few_answers(repo: GitRepo, tmp_path: Path) -> None:
     """Ends any bot-to-bot ping-pong."""
     github, reply = await thread_with_reply(repo)
@@ -150,3 +161,9 @@ def test_each_comment_is_its_own_answer() -> None:
     reply = ThreadReply(1, "mpfaffenberger", "demo", 7, 9, 4)
     assert answer_id(reply) == answer_id(ThreadReply(1, "mpfaffenberger", "demo", 7, 9, 4))
     assert answer_id(reply) != answer_id(replace(reply, comment_id=10))
+
+
+def test_replies_are_queued_only_with_conversations_on() -> None:
+    off = Settings(app_id=1, app_slug=SLUG, webhook_secret="w", private_key="k")
+    assert thread_reply_handler(off) is None
+    assert thread_reply_handler(replace(off, conversations=True)) is durable.enqueue_answer

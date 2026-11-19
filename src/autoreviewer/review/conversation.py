@@ -58,8 +58,9 @@ class ConversationDeps:
 
 
 async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
-    """Answer `reply` once, if it's under one of the bot's findings. Safe to run twice: an answer already in the
-    thread (say, posted just before a crash) is found by its marker."""
+    """Answer `reply` once, if it's under one of the bot's findings. A re-run (say, after a crash) finds an answer
+    already posted by its marker, so it doesn't answer twice; two runs for one comment that overlap could, which
+    the durable workflow's ID (one per comment) rules out."""
     repo = Repo(reply.installation_id, reply.owner, reply.repo)
     thread = await deps.github.thread(repo, reply.number, reply.root_id)
     if not thread or thread[0].author != deps.bot_login or finding_marker(thread[0].body) is None:

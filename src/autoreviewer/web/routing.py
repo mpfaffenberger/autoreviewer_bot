@@ -119,13 +119,10 @@ def _comment(payload: Mapping[str, Any], app_slug: str) -> Decision:
     issue, comment, repository = payload["issue"], payload["comment"], payload["repository"]
     if "pull_request" not in issue:
         return Ignore("comment on an issue, not a pull request")
-    author = comment["user"]["login"]
-    if author.lower() == f"{app_slug}[bot]".lower():
-        return Ignore("the bot's own comment")
+    if refusal := _refused(comment, issue["user"]["login"], app_slug):
+        return refusal
     if not is_review_command(comment.get("body") or "", app_slug):
         return Ignore("no command for the bot")
-    if author != issue["user"]["login"] and comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
-        return Ignore(f"{author} may not command the bot on someone else's pull request")
     return ReviewRequested(
         installation_id=payload["installation"]["id"],
         owner=repository["owner"]["login"],
@@ -135,6 +132,16 @@ def _comment(payload: Mapping[str, Any], app_slug: str) -> Decision:
     )
 
 
+def _refused(comment: Mapping[str, Any], pr_author: str, app_slug: str) -> Ignore | None:
+    """Whom the bot listens to on a PR: never itself; otherwise the PR's author (human or bot) or a maintainer."""
+    author = comment["user"]["login"]
+    if author.lower() == f"{app_slug}[bot]".lower():
+        return Ignore("the bot's own comment")
+    if author != pr_author and comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
+        return Ignore(f"{author} may not use the bot on someone else's pull request")
+    return None
+
+
 def _thread_reply(payload: Mapping[str, Any], app_slug: str) -> Decision:
     if payload["action"] != "created":
         return Ignore("only new comments are answered")  # an edit must not get a second answer
@@ -142,13 +149,10 @@ def _thread_reply(payload: Mapping[str, Any], app_slug: str) -> Decision:
     root = comment.get("in_reply_to_id")
     if root is None:
         return Ignore("not a reply in a thread")
-    author = comment["user"]["login"]
-    if author.lower() == f"{app_slug}[bot]".lower():
-        return Ignore("the bot's own comment")
+    if refusal := _refused(comment, pull["user"]["login"], app_slug):
+        return refusal
     if pull["state"] != "open":
         return Ignore("the pull request isn't open")
-    if author != pull["user"]["login"] and comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
-        return Ignore(f"{author} is neither the pull request's author nor a maintainer")
     return ThreadReply(
         installation_id=payload["installation"]["id"],
         owner=repository["owner"]["login"],

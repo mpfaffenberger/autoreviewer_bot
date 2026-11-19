@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync, WorkflowStatusString
 
@@ -89,7 +91,8 @@ async def review_workflow(pull: PullRequestUpdated) -> job.CheckResult:
 
 
 def answer_id(reply: ThreadReply) -> str:
-    """One answer per comment: redeliveries and duplicate events can never answer twice."""
+    """One durable workflow per comment: a redelivery or a duplicate event joins the run already there instead of
+    starting another, and a second reply in the same thread gets its own."""
     return f"answer:{reply.owner}/{reply.repo}#{reply.number}:{reply.comment_id}".lower()
 
 
@@ -103,12 +106,8 @@ async def answer_workflow(reply: ThreadReply) -> str:
     return await _answer(reply)
 
 
-async def enqueue_answer(reply: ThreadReply) -> None:
-    queue = await DBOS.retrieve_queue_async(ANSWER_QUEUE)
-    if queue is None:
-        raise RuntimeError("the answer queue is not registered; call durable.launch() first")
-    with SetWorkflowID(answer_id(reply)):
-        await queue.enqueue_async(answer_workflow, reply)
+async def enqueue_answer(reply: ThreadReply) -> WorkflowHandleAsync[str]:
+    return await _enqueue(ANSWER_QUEUE, answer_id(reply), answer_workflow, reply)
 
 
 def configure(database: Path) -> None:
@@ -140,11 +139,18 @@ async def launch(
 
 
 async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResult]:
-    queue = await DBOS.retrieve_queue_async(QUEUE)
+    return await _enqueue(QUEUE, workflow_id(pull), review_workflow, pull)
+
+
+async def _enqueue[Arg, Result](
+    queue_name: str, workflow_id: str, workflow: Callable[[Arg], Coroutine[Any, Any, Result]], arg: Arg
+) -> WorkflowHandleAsync[Result]:
+    """Run `workflow(arg)` on a registered queue under `workflow_id`: a second enqueue of an ID joins the first."""
+    queue = await DBOS.retrieve_queue_async(queue_name)
     if queue is None:
-        raise RuntimeError("the review queue is not registered; call durable.launch() first")
-    with SetWorkflowID(workflow_id(pull)):
-        return await queue.enqueue_async(review_workflow, pull)
+        raise RuntimeError(f"the {queue_name} queue is not registered; call durable.launch() first")
+    with SetWorkflowID(workflow_id):
+        return await queue.enqueue_async(workflow, arg)
 
 
 _RUNNING = frozenset({WorkflowStatusString.PENDING.value, WorkflowStatusString.ENQUEUED.value})

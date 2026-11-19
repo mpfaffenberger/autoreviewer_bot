@@ -289,7 +289,7 @@ REQUESTED = ReviewRequested(
         (comment_payload(commenter="mike", association="OWNER", pr_author="someone-else"), REQUESTED),
         (
             comment_payload(commenter="drive-by", association="CONTRIBUTOR", pr_author="someone-else"),
-            Ignore("drive-by may not command the bot on someone else's pull request"),
+            Ignore("drive-by may not use the bot on someone else's pull request"),
         ),
         (comment_payload(commenter="chaos-emerald-reviewer[bot]"), Ignore("the bot's own comment")),
         (comment_payload(action="edited"), Ignore("only new comments are read")),
