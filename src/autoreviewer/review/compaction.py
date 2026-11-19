@@ -38,9 +38,6 @@ from pydantic_ai_harness.tool_output_limits import (
     Truncate,
 )
 
-TARGET_FRACTION = 0.6
-"""Compact above 60% of the window: room for the next tool result and the model's reply."""
-
 KEEP_RECENT_TOOL_PAIRS = 6
 
 CLEARED = "[tool result cleared: call the tool again if you still need it]"
@@ -72,25 +69,25 @@ def same_call(call: ToolCallPart) -> str | None:
     return f"{call.tool_name}:{json.dumps(call.args_as_dict(), sort_keys=True, default=str)}"
 
 
-def review_compaction(context_window: int) -> TieredCompaction[None]:
+def review_compaction(compact_at: int) -> TieredCompaction[None]:
+    """Compaction for a reviewer whose history may grow to `compact_at` tokens (servers.COMPACT_AT)."""
     return TieredCompaction(
         tiers=[
-            ClampOversizedMessages(max_part_tokens=context_window // 4),
+            ClampOversizedMessages(max_part_tokens=compact_at // 4),
             # Inside TieredCompaction each tier's own trigger is bypassed; max_tokens=1 just satisfies
             # the "set a trigger" requirement, as in the harness's own example.
             DeduplicateFileReads(file_key=same_call, placeholder=SUPERSEDED, max_tokens=1),
             ClearToolResults(max_tokens=1, keep_pairs=KEEP_RECENT_TOOL_PAIRS, placeholder=CLEARED),
             SummarizingCompaction(max_tokens=1),  # model=None: summarize with the run's own model
         ],
-        target_fraction=TARGET_FRACTION,
-        context_window=context_window,
+        target_tokens=compact_at,
     )
 
 
-def max_result_tokens(context_window: int) -> int:
+def max_result_tokens(compact_at: int) -> int:
     """The most one tool result may cost: the results ClearToolResults keeps, plus a couple more arriving in
     the same step, fill at most the compaction target."""
-    return int(context_window * TARGET_FRACTION) // (KEEP_RECENT_TOOL_PAIRS + 2)
+    return compact_at // (KEEP_RECENT_TOOL_PAIRS + 2)
 
 
 SPILLS = LocalFileStore(cleanup_after=timedelta(days=7))
@@ -99,11 +96,11 @@ continued conversation may read an old handle again, and one that's gone (a week
 the container's /tmp isn't kept) just means calling the tool again."""
 
 
-def tool_output_limits(context_window: int) -> ToolOutputLimits[None]:
+def tool_output_limits(compact_at: int) -> ToolOutputLimits[None]:
     """Bound every tool result when it's produced: over `max_result_tokens`, it's spilled, and the reviewer gets
     a preview and a handle to page through the rest (lossless). If the spill can't be written, it's truncated."""
     return ToolOutputLimits(
-        bands=[Band(over=max_result_tokens(context_window), action=Spill(then=Truncate()))],
+        bands=[Band(over=max_result_tokens(compact_at), action=Spill(then=Truncate()))],
         over_tokens=True,
         store=SPILLS,
     )

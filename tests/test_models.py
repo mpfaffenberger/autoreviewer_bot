@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, QWEN
+from autoreviewer.servers import COMPACT_AT, DEEPSEEK, QWEN
 from autoreviewer.web.app import ModelPlan, build_agent_factory, build_lenses, build_simplifier_factory, models_note
 from autoreviewer.web.config import AGENT_ROLES, Settings, models_from
 
@@ -47,7 +47,7 @@ def test_a_bad_pin_stops_startup(value: str, error: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_each_agent_gets_its_pinned_model_and_that_models_window(workspace: Workspace) -> None:
+async def test_each_agent_gets_its_pinned_model_and_that_models_compaction_point(workspace: Workspace) -> None:
     pinned = settings(models=models_from(PINNED), dry=True)
     lenses = {spec.kind: spec.agents(workspace) for spec in build_lenses(pinned)}
     security, security_check = lenses["security"]
@@ -62,8 +62,8 @@ async def test_each_agent_gets_its_pinned_model_and_that_models_window(workspace
     assert (proposer.propose.model.model_name, proposer.check.model.model_name) == (DEEPSEEK, QWEN)  # type: ignore[union-attr]
     plan = ModelPlan.from_settings(pinned)
     assert (plan.finder("security")[1], plan.verifier("security")[1]) == (
-        CONTEXT_WINDOWS[DEEPSEEK],
-        CONTEXT_WINDOWS[QWEN],
+        COMPACT_AT[DEEPSEEK],
+        COMPACT_AT[QWEN],
     )
 
 

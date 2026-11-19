@@ -38,9 +38,11 @@ def scripted(calls: list[tuple[str, dict[str, Any]]], summaries: list[str]) -> F
     return FunctionModel(respond)
 
 
-async def run(workspace: Workspace, calls: list[tuple[str, dict[str, Any]]], window: int) -> tuple[dict[str, int], int]:
+async def run(
+    workspace: Workspace, calls: list[tuple[str, dict[str, Any]]], compact_at: int
+) -> tuple[dict[str, int], int]:
     summaries: list[str] = []
-    agent = correctness_agent(scripted(calls, summaries), workspace, context_window=window)
+    agent = correctness_agent(scripted(calls, summaries), workspace, compact_at=compact_at)
     result = await agent.run("Review the change.", usage_limits=LENS_LIMITS)
     assert result.output.findings == []
     return compaction_stats(result.all_messages()), len(summaries)
@@ -57,35 +59,35 @@ def test_same_call_keys_exact_read_only_calls() -> None:
 
 
 async def test_repeated_identical_calls_are_deduplicated(workspace: Workspace) -> None:
-    # Windows here are tiny because FunctionModel reports roughly word counts as tokens; the measured
-    # thresholds under it: dedupe alone at 2,400, all tiers by 1,400. Real models report real tokens.
-    stats, summaries = await run(workspace, [("diff", {})] * 12, window=2_400)
+    # Compaction points here are tiny because FunctionModel reports roughly word counts as tokens; the measured
+    # thresholds under it: dedupe alone at 1,440, all tiers by 840. Real models report real tokens.
+    stats, summaries = await run(workspace, [("diff", {})] * 12, compact_at=1_440)
     assert stats["superseded"] > 0 and summaries == 0
 
 
 async def test_old_distinct_results_are_cleared(workspace: Workspace) -> None:
     calls: list[tuple[str, dict[str, Any]]] = [("diff", {"limit": 100 + i}) for i in range(12)]  # all distinct
-    stats, _ = await run(workspace, calls, window=1_800)
+    stats, _ = await run(workspace, calls, compact_at=1_080)
     assert stats["cleared"] > 0 and stats["superseded"] == 0
 
 
 async def test_when_cheap_passes_are_not_enough_the_history_is_summarized(workspace: Workspace) -> None:
     calls: list[tuple[str, dict[str, Any]]] = [("diff", {"limit": 100 + i}) for i in range(14)]
-    _, summaries = await run(workspace, calls, window=1_200)
+    _, summaries = await run(workspace, calls, compact_at=720)
     assert summaries > 0  # and the run still finished with its structured output (asserted in run())
 
 
 async def test_the_review_still_works_without_any_compaction(workspace: Workspace) -> None:
-    stats, summaries = await run(workspace, [("diff", {}), ("changed_files", {})], window=1_000_000)
+    stats, summaries = await run(workspace, [("diff", {}), ("changed_files", {})], compact_at=600_000)
     assert stats == {"cleared": 0, "superseded": 0} and summaries == 0
 
 
-@pytest.mark.parametrize(("window", "spilled"), [(40_000, True), (400_000, False)])
+@pytest.mark.parametrize(("compact_at", "spilled"), [(24_000, True), (240_000, False)])
 async def test_a_big_tool_result_is_spilled_and_read_back_in_full(
-    workspace: Workspace, window: int, spilled: bool
+    workspace: Workspace, compact_at: int, spilled: bool
 ) -> None:
     """Nov 19: nothing bounded a tool result, and a 262,755-token prompt cost #41 its review. A result over its
-    share of the window is spilled: the history keeps a preview and a handle, and nothing is lost."""
+    share of the history is spilled: the history keeps a preview and a handle, and nothing is lost."""
     (workspace.root / "big.py").write_text("".join(f"# line {i}: abc abc abc abc abc abc abc\n" for i in range(4000)))
     returns: dict[str, str] = {}
 
@@ -102,11 +104,11 @@ async def test_a_big_tool_result_is_spilled_and_read_back_in_full(
         done = {"findings": [], "overall_correct": True, "reviewed": []}
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, done)])
 
-    agent = correctness_agent(FunctionModel(respond), workspace, context_window=window)
+    agent = correctness_agent(FunctionModel(respond), workspace, compact_at=compact_at)
     await agent.run("Review the change.", usage_limits=LENS_LIMITS)
-    if not spilled:  # ~12k tokens fit a 400k window's ~30k budget: passed through whole
+    if not spilled:  # ~12k tokens fit a 240k history's ~30k share: passed through whole
         assert "# line 700: abc" in returns["read_file"] and READ_TOOL_NAME not in returns
         return
-    assert len(returns["read_file"]) < max_result_tokens(window)  # in characters, so certainly in tokens
+    assert len(returns["read_file"]) < max_result_tokens(compact_at)  # in characters, so certainly in tokens
     assert "# line 700: abc" not in returns["read_file"]  # past the preview...
     assert "# line 700: abc" in returns[READ_TOOL_NAME]  # ...and still readable
