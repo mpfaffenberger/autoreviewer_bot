@@ -95,7 +95,7 @@ def withdrawals(comments: Iterable[PostedComment]) -> tuple[Withdrawal, ...]:
     found = []
     for root in withdrawn_threads(comments).values():
         match, title = finding_marker(root.body), posted_title(root.body)
-        if root.line is not None and match and match[3] and title:  # outdated, or from before kinds were recorded
+        if root.line is not None and match and match[3] and title is not None:  # outdated, or no kind recorded
             found.append(Withdrawal(root.path, root.line, match[3], int(match[2]), normal_title(title)))
     return tuple(found)
 
