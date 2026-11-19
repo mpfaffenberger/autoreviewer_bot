@@ -108,8 +108,8 @@ class Settings:
             private_key=key_path.read_text(),
             max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
             model_lanes=model_lanes_from(env),
-            soft_deadline_minutes=float(env.get("AUTOREVIEWER_SOFT_DEADLINE_MINUTES", cls.soft_deadline_minutes)),
-            hard_deadline_minutes=float(env.get("AUTOREVIEWER_HARD_DEADLINE_MINUTES", cls.hard_deadline_minutes)),
+            soft_deadline_minutes=(deadlines := deadlines_from(env))[0],
+            hard_deadline_minutes=deadlines[1],
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
             simplify=parse_bool(env, "AUTOREVIEWER_SIMPLIFY", default=True),
             security=parse_bool(env, "AUTOREVIEWER_SECURITY", default=True),
@@ -176,6 +176,13 @@ def models_from(env: Mapping[str, str]) -> dict[str, str]:
 DEFAULT_REASONING: dict[str, ReasoningEffort] = {CONVERSATION: "high"}
 """The conversation agent decides withdrawals, so it thinks. Thinking didn't help the docs or tests finders
 (evals docs-v3 and tests-v2, Nov 19: same recall, as much noise or more), so they don't."""
+
+
+def deadlines_from(env: Mapping[str, str]) -> tuple[float, float]:
+    """(soft, hard) review time limits in minutes: AUTOREVIEWER_SOFT_DEADLINE_MINUTES and
+    AUTOREVIEWER_HARD_DEADLINE_MINUTES over Settings' defaults. Shared by the bot and the evals."""
+    soft = float(env.get("AUTOREVIEWER_SOFT_DEADLINE_MINUTES", Settings.soft_deadline_minutes))
+    return soft, float(env.get("AUTOREVIEWER_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
 
 
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
