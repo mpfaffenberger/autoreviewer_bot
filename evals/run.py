@@ -19,16 +19,19 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import get_args
 
 from autoreviewer.github import PullRequestState, Repo
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
-from autoreviewer.review.schemas import Finding
+from autoreviewer.review.schemas import Finding, LensKind
 from autoreviewer.web.app import ModelPlan, correctness_agents, lens, lens_agents
 from autoreviewer.web.config import Settings, model_lanes_from, models_from
 from evals.cases import CASES, HIT_TOLERANCE, Case
+from evals.docs_cases import CASES as DOCS_CASES
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
+from evals.tests_cases import CASES as TESTS_CASES
 from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -189,15 +192,22 @@ async def main() -> None:
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="cases at once")
     parser.add_argument("--soft-minutes", type=float, default=ReviewDeps.soft_deadline_s / 60)
     parser.add_argument("--hard-minutes", type=float, default=ReviewDeps.hard_deadline_s / 60)
-    parser.add_argument("--suite", choices=("correctness", "security", "dry"), default="correctness")
-    parser.add_argument("--lens", action="append", choices=("security", "dry"), default=[], help="extra lens to run")
+    parser.add_argument("--suite", choices=("correctness", "security", "dry", "docs", "tests"), default="correctness")
+    parser.add_argument("--lens", action="append", choices=get_args(LensKind), default=[], help="extra lens to run")
     args = parser.parse_args()
 
     plan = plan_from_env()
     agents = correctness_agents(plan)
     lenses = [lens(kind, lens_agents(plan, kind)) for kind in args.lens]  # the bot's own settings for each kind
 
-    suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
+    suites = {
+        "correctness": CASES,
+        "security": SECURITY_CASES,
+        "dry": DRY_CASES,
+        "docs": DOCS_CASES,
+        "tests": TESTS_CASES,
+    }
+    suite = suites[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]
     slots = asyncio.Semaphore(args.concurrency)
     with tempfile.TemporaryDirectory(prefix="autoreviewer-eval-") as work:

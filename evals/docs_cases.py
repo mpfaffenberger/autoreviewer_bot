@@ -1,0 +1,40 @@
+"""Seeded docs and contract drift in this repo's own code: a change leaves a docstring, design doc, error message,
+or documented setting saying something the code no longer does. Each change works; the text is what's wrong.
+Clean controls change code without making any text untrue, plus the correctness suite's clean controls.
+"""
+
+from __future__ import annotations
+
+from evals.cases import CASES as CORRECTNESS_CASES
+from evals.cases import Case
+
+DOCS_CORPUS = "d284fe8"
+"""main after #32: servers.py, model pins, and DESIGN.md documenting the DRY cap, lanes, and switches."""
+
+APP, CONFIG, SERVERS = "src/autoreviewer/web/app.py", "src/autoreviewer/web/config.py", "src/autoreviewer/servers.py"
+
+CASES: list[Case] = [
+    # Its docstring (right below) and DESIGN.md both say 5.
+    Case("docs_dry_cap", APP, "MAX_DRY_POSTED = 5\n", "MAX_DRY_POSTED = 8\n", "Let DRY post a few more findings",
+         corpus=DOCS_CORPUS),
+    # DESIGN.md §7: "default Qwen 4 and DeepSeek 4".
+    Case("docs_lanes_default", SERVERS, "DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4}",
+         "DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 2}", "Leave DeepSeek more room for other users",
+         corpus=DOCS_CORPUS),
+    # DESIGN.md: "`AUTOREVIEWER_DRY=false` turns it off": a contract the env file relies on.
+    Case("docs_env_rename", CONFIG, 'dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True)',
+         'dry=parse_bool(env, "AUTOREVIEWER_DRY_LENS", default=True)', "Name the DRY switch after the lens",
+         corpus=DOCS_CORPUS),
+    # The error message on the next line still says "lanes >= 1".
+    Case("docs_error_message", CONFIG, "        if not count.isdigit() or int(count) < 1:",
+         "        if not count.isdigit() or int(count) < 0:", "Allow pausing a model with zero lanes",
+         corpus=DOCS_CORPUS),
+    # Its docstring says "4 streams of 224k tokens"; DESIGN.md §7 too.
+    Case("docs_window", SERVERS, "QWEN_CONTEXT_WINDOW = 229_376", "QWEN_CONTEXT_WINDOW = 196_608",
+         "Match Qwen's window to the server", corpus=DOCS_CORPUS),
+    Case("docs_clean_helper_name", APP, "_and(", "_join_names(", "Name the footer helper", replace_all=True,
+         clean=True, corpus=DOCS_CORPUS),
+    Case("docs_clean_concat", CONFIG, 'return f"{kind}.verifier"', 'return kind + ".verifier"',
+         "Build role names by concatenation", clean=True, corpus=DOCS_CORPUS),
+    *(case for case in CORRECTNESS_CASES if case.clean),
+]  # fmt: skip

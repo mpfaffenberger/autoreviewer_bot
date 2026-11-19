@@ -145,20 +145,30 @@ def correctness_agents(plan: ModelPlan) -> AgentFactory:
     )
 
 
-MAX_DRY_POSTED = 5
-"""The eval's clean 786-line commit drew 8 DRY comments, mostly true but too many to read. 3 dropped real
-findings for little gain; 5 keeps most of them while a PR's blocking findings stay easy to see (Mike, Nov 18)."""
+MAX_ADVISORY_POSTED = 5
+"""Each advisory lens (DRY, docs, tests) posts at most its 5 best findings. The eval's clean 786-line commit drew 8
+DRY comments, mostly true but too many to read; 3 dropped real findings for little gain; 5 keeps most of them
+while a PR's blocking findings stay easy to see (Mike, Nov 18)."""
+
+LENS_NAMES: dict[LensKind, str] = {"security": "security", "dry": "DRY", "docs": "docs", "tests": "tests"}
+"""How the review footer names each lens."""
+
+
+def enabled_lenses(settings: Settings) -> list[LensKind]:
+    """The lenses switched on beside correctness, in the order they're listed in reviews."""
+    switches: tuple[tuple[LensKind, bool], ...] = (
+        ("security", settings.security),
+        ("dry", settings.dry),
+        ("docs", settings.docs),
+        ("tests", settings.tests),
+    )
+    return [kind for kind, on in switches if on]
 
 
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:
     """The enabled lenses beside correctness, each on its own models (Settings.models)."""
     plan = ModelPlan.from_settings(settings)
-    kinds: list[LensKind] = []
-    if settings.security:
-        kinds.append("security")
-    if settings.dry:
-        kinds.append("dry")
-    return tuple(lens(kind, lens_agents(plan, kind)) for kind in kinds)
+    return tuple(lens(kind, lens_agents(plan, kind)) for kind in enabled_lenses(settings))
 
 
 def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
@@ -174,13 +184,14 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
 
 def lens(kind: LensKind, agents: AgentFactory) -> Lens:
     """A lens with its production settings, for the bot and the evals alike. Security reviews the whole PR every
-    time (it can block); DRY is advice: the changed files only when continuing, and at most MAX_DRY_POSTED."""
+    time (it can block); the others are advice: the changed files only when continuing, and at most
+    MAX_ADVISORY_POSTED."""
     from autoreviewer.review.agents import security_references
     from autoreviewer.review.job import Lens
 
     if kind == "security":
         return Lens("security", agents, instructions=security_references)
-    return Lens("dry", agents, whole_pr=False, max_posted=MAX_DRY_POSTED)
+    return Lens(kind, agents, whole_pr=False, max_posted=MAX_ADVISORY_POSTED)
 
 
 def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
@@ -203,11 +214,10 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
 
 def models_note(settings: Settings) -> str:
     """The review footer's "correctness and security by `a`, verified by `b`", one clause per pair of models."""
-    enabled: list[tuple[AgentKind, str]] = [("correctness", "correctness")]
-    if settings.security:
-        enabled.append(("security", "security"))
-    if settings.dry:
-        enabled.append(("dry", "DRY"))
+    enabled: list[tuple[AgentKind, str]] = [
+        ("correctness", "correctness"),
+        *((kind, LENS_NAMES[kind]) for kind in enabled_lenses(settings)),
+    ]
     groups: dict[tuple[str, str], list[str]] = {}
     for kind, name in enabled:
         groups.setdefault((settings.models[kind], settings.models[verifier_role(kind)]), []).append(name)

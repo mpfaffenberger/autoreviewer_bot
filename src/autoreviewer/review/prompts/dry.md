@@ -27,6 +27,7 @@ New code (lines this PR adds) that re-implements:
 - Anything in test files (`tests/`, `test_*.py`, `*_test.go`, `*.spec.ts`, ...): repetition in tests often
   keeps each test readable on its own.
 - Unused imports (a linter reports those), dead code, or leftovers (the correctness reviewer covers those).
+- Stale docs or comments (the docs reviewer covers those).
 
 ## Findings
 

@@ -166,6 +166,21 @@ DRY findings never block (`ADVISORY_KINDS`), at most 5 (`MAX_DRY_POSTED`) are ve
 the lens's best 5 by its own ranking (counting only findings past the free filters), and a continued review only looks at files changed since the last one.
 `AUTOREVIEWER_DRY=false` turns it off.
 
+**Docs and tests lenses** (Nov 18, off until their evals are in: `AUTOREVIEWER_DOCS`, `AUTOREVIEWER_TESTS`). Both
+are advisory like DRY: never block, at most `MAX_ADVISORY_POSTED` (5) each, only files changed since the last
+review when continuing. Both are found by DeepSeek and checked by Kimi K3.1 Pro (Moonshot's hosted plan via
+Boodleton, 2 lanes), so they add no Qwen load.
+- *docs*: text the change makes untrue: docstrings, comments, docs, config comments and documented settings,
+  error and log messages, and contracts callers rely on (renamed flags, env vars, endpoints). The stale text
+  is often in a file the PR didn't touch, so a finding cites the changed line that made it untrue and quotes
+  the stale text with its location.
+- *tests*: behaviour changes no test would catch breaking (the reviewer imagines the smallest break and reads
+  the assertions), tests that can't fail, and weakened tests. It can't run tests; a sandbox could later make
+  the mutations for real.
+
+Evals: `--suite docs --lens docs` and `--suite tests --lens tests` (`evals/docs_cases.py`, `evals/tests_cases.py`):
+5 seeded cases each on `d284fe8`, their own clean controls, and the correctness suite's.
+
 Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
 `agents.lens_pair()`, optional run instructions, and whether a continued review re-reads the whole PR.
 Adding a lens is a prompt pair plus one line in `web/app.py: build_lenses`.

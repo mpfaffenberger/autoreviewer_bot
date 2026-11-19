@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, QWEN
+from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, KIMI, QWEN
 from autoreviewer.web.app import ModelPlan, build_agent_factory, build_lenses, build_simplifier_factory, models_note
 from autoreviewer.web.config import AGENT_ROLES, Settings, models_from
 
@@ -18,8 +18,11 @@ def settings(**changes: object) -> Settings:
     return Settings(**{**base.__dict__, **changes})  # type: ignore[arg-type]
 
 
-def test_finders_run_on_qwen_and_checkers_on_deepseek_by_default() -> None:
-    assert models_from({}) == {role: DEEPSEEK if role.endswith(".verifier") else QWEN for role in AGENT_ROLES}
+def test_default_models() -> None:
+    """Finders on Qwen and checkers on DeepSeek, except docs and tests: found by DeepSeek, checked by Kimi."""
+    expected = {role: DEEPSEEK if role.endswith(".verifier") else QWEN for role in AGENT_ROLES}
+    expected |= {"docs": DEEPSEEK, "docs.verifier": KIMI, "tests": DEEPSEEK, "tests.verifier": KIMI}
+    assert models_from({}) == expected
 
 
 def test_a_pin_moves_only_the_roles_it_names() -> None:

@@ -138,6 +138,8 @@ def verifier_agent(
 LENS_PROMPTS: dict[LensKind, tuple[str, str]] = {
     "security": ("security.md", "security_verifier.md"),
     "dry": ("dry.md", "dry_verifier.md"),
+    "docs": ("docs.md", "docs_verifier.md"),
+    "tests": ("tests.md", "tests_verifier.md"),
 }
 """Each extra lens's (lens prompt, verifier prompt)."""
 
