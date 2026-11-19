@@ -131,8 +131,9 @@ class ModelPlan:
         return self._build(verifier_role(kind))
 
     def _build(self, role: str) -> tuple[Model, int]:
-        """The role's model on Boodleton (with its lanes and reasoning), falling back to FALLBACKS' model when it
-        fails; the context window is the smaller one, since a conversation may move to the fallback mid-run."""
+        """The role's model on Boodleton, with its lanes and the role's reasoning, and the context window its agent
+        gets. A model in FALLBACKS becomes a FallbackModel that moves to the fallback when it fails; the window is
+        then the smaller of the two, since a conversation may move mid-run."""
         from pydantic_ai.models.fallback import FallbackModel
 
         from autoreviewer.review.agents import boodleton_model

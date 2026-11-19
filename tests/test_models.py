@@ -36,7 +36,7 @@ def test_a_pin_moves_only_the_roles_it_names() -> None:
     [
         (f"securty={DEEPSEEK}", "unknown role 'securty'"),
         ("security=gpt-9", "no known context window for 'gpt-9'"),
-        (f"dry={DEEPSEEK}", "dry and dry.verifier are both"),  # its checker is DeepSeek by default
+        (f"dry={DEEPSEEK}", "dry and dry.verifier could both run on"),  # its checker is DeepSeek by default
         ("security", "expected role=model"),
     ],
 )
