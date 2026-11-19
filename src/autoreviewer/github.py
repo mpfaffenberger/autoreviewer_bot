@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from githubkit import AppAuthStrategy, GitHub, TokenAuthStrategy, UnauthAuthStrategy
 from githubkit.exception import RequestFailed
@@ -72,6 +73,7 @@ class ThreadComment:
     id: int
     author: str
     body: str
+    path: str = ""
 
 
 class CommitNotFound(Exception):
@@ -310,23 +312,19 @@ class GitHubApp:
             raise
 
     async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
-        github = self._as_installation(repo.installation_id)
-        found: list[ThreadComment] = []
-        page = 1
-        while True:
-            # Raw JSON, not githubkit's models: only a few fields matter. Sorted oldest first by GitHub.
-            response = await github.rest.pulls.async_list_review_comments(
-                repo.owner, repo.name, number, per_page=100, page=page
+        comments = [
+            c for c in await self._review_comments(repo, number) if root_id in (c.get("id"), c.get("in_reply_to_id"))
+        ]
+        found = [
+            ThreadComment(
+                int(c["id"]),
+                str((c.get("user") or {}).get("login") or ""),
+                str(c.get("body") or ""),
+                str(c.get("path") or ""),
             )
-            comments = response.json()
-            found += [
-                ThreadComment(int(c["id"]), str((c.get("user") or {}).get("login") or ""), str(c.get("body") or ""))
-                for c in comments
-                if c.get("id") == root_id or c.get("in_reply_to_id") == root_id
-            ]
-            if len(comments) < 100:
-                return sorted(found, key=lambda comment: comment.id != root_id)  # stable: the root, then replies
-            page += 1
+            for c in comments
+        ]
+        return sorted(found, key=lambda comment: comment.id != root_id)  # stable: the root, then replies in order
 
     async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None:
         github = self._as_installation(repo.installation_id)
@@ -335,26 +333,30 @@ class GitHubApp:
         )
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
+        return [
+            PostedComment(
+                str(c.get("path") or ""),
+                c.get("line"),
+                str(c.get("body") or ""),
+                int(c.get("id") or 0),
+                c.get("in_reply_to_id"),
+            )
+            for c in await self._review_comments(repo, number)
+            if (c.get("user") or {}).get("login") == author
+        ]
+
+    async def _review_comments(self, repo: Repo, number: int) -> list[Mapping[str, Any]]:
+        """Every inline comment on the PR as GitHub sends it, oldest first, all pages. Raw JSON, not githubkit's
+        models: callers read only a few fields."""
         github = self._as_installation(repo.installation_id)
-        found: list[PostedComment] = []
+        found: list[Mapping[str, Any]] = []
         page = 1
         while True:
-            # Raw JSON, not githubkit's models: only a few fields matter.
             response = await github.rest.pulls.async_list_review_comments(
                 repo.owner, repo.name, number, per_page=100, page=page
             )
             comments = response.json()
-            found += [
-                PostedComment(
-                    str(c.get("path") or ""),
-                    c.get("line"),
-                    str(c.get("body") or ""),
-                    int(c.get("id") or 0),
-                    c.get("in_reply_to_id"),
-                )
-                for c in comments
-                if (c.get("user") or {}).get("login") == author
-            ]
+            found += comments
             if len(comments) < 100:
                 return found
             page += 1

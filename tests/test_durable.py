@@ -16,13 +16,11 @@ from dbos import DBOS
 
 from autoreviewer.github import Repo
 from autoreviewer.review import durable
-from autoreviewer.review.agents import conversation_agent
-from autoreviewer.review.conversation import ConversationDeps
 from autoreviewer.review.posting import Publisher
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
-from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding, job_deps, make_repo
-from tests.test_conversation import scripted
+from tests.review_fakes import BOT, FakeGitHub, GitRepo, finding, job_deps, make_repo
+from tests.test_conversation import deps, scripted
 from tests.test_withdrawals import reviewed
 
 REPO_ = Repo(1, "mpfaffenberger", "demo")
@@ -61,9 +59,7 @@ async def test_each_reply_is_answered_once_on_the_answer_queue(tmp_path: Path) -
         Finding.model_validate(finding(5))
     )
     first, second = github.say("alice", 1, "why?"), github.say("alice", 1, "and?")
-    conversation_deps = ConversationDeps(
-        github, LocalSource(github.repo), lambda ws: conversation_agent(scripted("holds"), ws), tmp_path, BOT, 1
-    )
+    conversation_deps = deps(github, github.repo, tmp_path, scripted("holds"))
     durable.configure(tmp_path / "dbos.sqlite")
     await durable.launch(job_deps(github, tmp_path, []), conversation_deps, concurrency=1)
     try:
@@ -80,9 +76,7 @@ async def test_a_withdrawal_reconsiders_the_verdict(tmp_path: Path) -> None:
     """From the bot's review of #38: the answer workflow's second step, after a withdrawal."""
     github = await reviewed(make_repo(tmp_path / "origin"), Finding.model_validate(finding(5)))
     comment = github.say("alice", 1, "That can't happen: the caller checks.")
-    conversation_deps = ConversationDeps(
-        github, LocalSource(github.repo), lambda ws: conversation_agent(scripted("withdrawn"), ws), tmp_path, BOT, 1
-    )
+    conversation_deps = deps(github, github.repo, tmp_path, scripted("withdrawn"))  # the checker agrees
     durable.configure(tmp_path / "dbos.sqlite")
     await durable.launch(job_deps(github, tmp_path, []), conversation_deps, concurrency=1)
     try:

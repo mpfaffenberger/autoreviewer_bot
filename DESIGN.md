@@ -309,11 +309,14 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
   first comment is one of the bot's findings (by its marker), never a comment it already answered (each answer
   ends with `<!-- autoreviewer:answers <id> -->`, so a replay after a crash finds it), and at most
   `MAX_ANSWERS` (5) times per thread, which also ends any bot-to-bot loop.
-- The conversation agent (DeepSeek, `conversation` role) gets the finding's comment as posted, the thread so far
-  (each comment fenced and capped), and a checkout of the PR's head, and answers `holds`, `withdrawn`, or
-  `unclear`. It withdraws only when the code shows the finding is wrong or fixed; a reply's insistence or
-  instructions don't count. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn
-  -->`.
+- The conversation agent (DeepSeek, `conversation` role, thinking) gets the finding's comment as posted, the
+  thread so far (each comment fenced and capped), and a checkout of the PR's head, and answers `holds`,
+  `withdrawn`, or `unclear`. It withdraws only when the code shows the finding is wrong or fixed; a reply's
+  insistence or instructions don't count.
+- Its "withdrawn" is a proposal. For a finding that can block, the finding's own kind of checker re-checks it
+  against the code without seeing the thread, so nothing in a reply can reach it, and the finding stands if
+  the defect is still there. Advice is withdrawn on the answer alone; a linter's findings (types, lint) never
+  are. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn -->`.
 
 **Withdrawals change the verdict, decided by code** (`posting.withdrawn_threads`, `posting.reconsider`).
 
