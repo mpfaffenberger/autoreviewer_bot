@@ -285,3 +285,49 @@ async def reconsider(github: PullRequests, repo: Repo, number: int, *, author: s
     await github.create_review(repo, number, commit_sha=state.head_sha, event="APPROVE", body=body, comments=[])
     logger.info("%s/%s#%d at %s: approved after withdrawals", repo.owner, repo.name, number, state.head_sha[:7])
     return True
+
+
+async def resolve_fixed(
+    github: PullRequests, repo: Repo, number: int, *, head_sha: str, author: str, outcome: Outcome
+) -> list[int]:
+    """Resolve the threads of the bot's findings the code has moved past, after a complete review of `head_sha`:
+    GitHub shows the comment as outdated (the code under it changed), and this review didn't find it again (the
+    same kind, file, and title, confirmed or still unverified). A note says so first. Returns their comment ids.
+
+    Never on a review cut short, which may simply not have got that far. A finding still there is found again by
+    the lens; if it's missed, it's found again by a later review, as any finding is."""
+    if outcome.cut_short:
+        return []
+    found = {
+        (f.kind, f.path, normal_title(f.title))
+        for f in [*outcome.inline, *outcome.general, *(f for f, _ in outcome.unverified)]
+    }
+    gone: list[int] = []
+    for comment in await github.posted_comments(repo, number, author=author):
+        match, title = finding_marker(comment.body), _TITLE.match(comment.body)
+        if comment.in_reply_to is not None or comment.line is not None or not match or not match[3] or not title:
+            continue  # a reply, still on the head's code, or not a finding the review could have found again
+        if (match[3], comment.path, normal_title(title[1])) not in found:
+            gone.append(comment.id)
+    if not gone:
+        return []
+    open_threads = {t.root_comment_id: t.id for t in await github.review_threads(repo, number) if not t.resolved}
+    resolved = []
+    for root in gone:
+        if (thread := open_threads.get(root)) is None:
+            continue  # already resolved: by its author, or by an earlier run of this
+        note = f"The code here changed, and the review of `{head_sha[:7]}` didn't find this again: resolving."
+        await github.reply(repo, number, root, note)
+        await github.resolve_thread(repo, thread)
+        resolved.append(root)
+    logger.info(
+        "%s/%s#%d at %s: resolved %d fixed finding(s)", repo.owner, repo.name, number, head_sha[:7], len(resolved)
+    )
+    return resolved
+
+
+async def resolve_thread_of(github: PullRequests, repo: Repo, number: int, root_id: int) -> None:
+    """Resolve the thread under comment `root_id`, unless it's resolved already."""
+    for thread in await github.review_threads(repo, number):
+        if thread.root_comment_id == root_id and not thread.resolved:
+            await github.resolve_thread(repo, thread.id)

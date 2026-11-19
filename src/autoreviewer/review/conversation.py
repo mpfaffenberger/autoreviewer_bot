@@ -21,7 +21,7 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 
 from autoreviewer.github import Conversations, Repo, ThreadComment
 from autoreviewer.review.agents import CONVERSATION_LIMITS, VERIFIER_LIMITS
-from autoreviewer.review.posting import answer_markers, answered, finding_marker, reconsider
+from autoreviewer.review.posting import answer_markers, answered, finding_marker, reconsider, resolve_thread_of
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ADVISORY_KINDS, ThreadAnswer, Verification
 from autoreviewer.review.workspace import RepoSource, Workspace
@@ -101,6 +101,8 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
                 "withdrawn" if withdrawn else verdict.finding, verdict.reason)  # fmt: skip
     body = f"{sanitize(text)}\n\n{answer_markers(reply.comment_id, withdrawn=withdrawn)}"
     await deps.github.reply(repo, reply.number, reply.root_id, body)
+    if withdrawn:  # settled: the thread can close (the verdict is reconsidered next, in its own step)
+        await resolve_thread_of(deps.github, repo, reply.number, reply.root_id)
     return "withdrawn" if withdrawn else "answered"
 
 

@@ -131,10 +131,16 @@ async def test_a_reply_gets_one_sanitized_answer_in_the_thread(repo: GitRepo, tm
     assert len(github.review_comments) == 3
 
 
-async def test_a_withdrawal_is_marked(repo: GitRepo, tmp_path: Path) -> None:
+@pytest.mark.parametrize(("verdict", "result"), [("withdrawn", "withdrawn"), ("holds", "answered")])
+async def test_a_withdrawal_is_marked_and_its_thread_resolved(
+    repo: GitRepo, tmp_path: Path, verdict: str, result: str
+) -> None:
+    """Mike, Nov 19: the bot resolves what's settled. A finding that holds stays open."""
     github, reply = await thread_with_reply(repo)
-    assert await answer(deps(github, repo, tmp_path, scripted("withdrawn")), reply) == "withdrawn"
-    assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=True))
+    assert await answer(deps(github, repo, tmp_path, scripted(verdict)), reply) == result
+    withdrawn = verdict == "withdrawn"
+    assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=withdrawn))
+    assert github.resolved_threads == ({"T1"} if withdrawn else set())
 
 
 async def test_threads_the_bot_didnt_start_are_left_alone(repo: GitRepo, tmp_path: Path) -> None:

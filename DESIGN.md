@@ -338,6 +338,14 @@ people.
 
 ---
 
+**The bot resolves threads that are settled** (Mike, Nov 19). A withdrawn finding's thread is resolved right after
+the answer. After every complete review, `posting.resolve_fixed` resolves the threads of findings the code has
+moved past: GitHub shows the comment as outdated because the code under it changed, and this review didn't find
+the same finding again (same kind, file and normalized title, confirmed or unverified). A reply naming the
+reviewed commit comes first. A review cut short resolves nothing, since it may not have got that far. Nothing is
+resolved on merge or close, so advice that was never acted on stays visible. Resolving runs after the verdict,
+and a failure there is logged without touching the review.
+
 ## 6. State
 
 Two stores, each with one job:

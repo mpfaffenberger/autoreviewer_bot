@@ -41,7 +41,7 @@ from autoreviewer.review.pipeline import (
     review,
     review_lens,
 )
-from autoreviewer.review.posting import Publisher, post_review
+from autoreviewer.review.posting import Publisher, post_review, resolve_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
@@ -490,6 +490,12 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         outcome=result.outcome,
         posted=publisher.posted,
     )
+    try:  # tidying up, after the verdict: a failure here must never cost the review
+        await resolve_fixed(
+            deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=result.outcome
+        )
+    except Exception:
+        logger.warning("%s at %s: could not resolve fixed findings", conversation, pull.head_sha[:7], exc_info=True)
     return _summary(result.outcome)
 
 

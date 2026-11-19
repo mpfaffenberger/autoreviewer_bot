@@ -25,6 +25,7 @@ from autoreviewer.github import (
     ReviewComment,
     ReviewEvent,
     ReviewRejected,
+    ReviewThread,
     ThreadComment,
 )
 from autoreviewer.review.agents import (
@@ -183,6 +184,7 @@ class FakeGitHub:
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
     review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_review_comments: bool = False
+    resolved_threads: set[str] = field(default_factory=set[str])
     fail_posted_comments: int = 0
     """How many reads of the PR's comments fail (like a transient 5xx) before they work again."""
     comment_delay: float = 0.0
@@ -286,6 +288,17 @@ class FakeGitHub:
              "in_reply_to": root_id}
         )  # fmt: skip
         return len(self.review_comments)
+
+    async def review_threads(self, repo: Repo, number: int) -> list[ReviewThread]:
+        """One thread per comment that starts one, named after it; resolved as recorded in `resolved_threads`."""
+        return [
+            ReviewThread(f"T{i}", i, f"T{i}" in self.resolved_threads)
+            for i, c in enumerate(self.review_comments, start=1)
+            if c.get("in_reply_to") is None
+        ]
+
+    async def resolve_thread(self, repo: Repo, thread_id: str) -> None:
+        self.resolved_threads.add(thread_id)
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         """Like GitHub: a comment stays on its line on later heads unless marked `outdated`."""
