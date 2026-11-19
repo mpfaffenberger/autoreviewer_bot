@@ -305,8 +305,8 @@ async def resolve_fixed(
     github: PullRequests, repo: Repo, number: int, *, head_sha: str, author: str, outcome: Outcome
 ) -> list[int]:
     """Resolve the threads of the bot's findings the code has moved past, after a review of `head_sha`: GitHub
-    shows the comment as outdated (the code under it changed), this review checked that kind in full
-    (Outcome.covered), and it reported nothing of that kind in that file, in any state. A note says so first.
+    shows the comment as outdated (the code under it changed), this review checked that kind in that file in full
+    (Outcome.covered), and it reported nothing of that kind there, in any state. A note follows, once resolved.
     Returns their comment ids.
 
     Conservative on purpose: a reworded finding, or another one in the file, keeps the thread open."""
@@ -315,7 +315,7 @@ async def resolve_fixed(
     for comment in await github.posted_comments(repo, number, author=author):
         if comment.in_reply_to is not None or comment.line is not None or not (match := finding_marker(comment.body)):
             continue  # a reply, still on the head's code, or not a finding
-        if (kind := match[3]) in outcome.covered and (kind, comment.path) not in reported:
+        if (place := (match[3], comment.path)) in outcome.covered and place not in reported:
             gone.append(comment.id)
     threads = await _threads_by_root(github, repo, number) if gone else {}
     resolved = []
@@ -325,8 +325,8 @@ async def resolve_fixed(
         note = (
             f"The code here changed, and the review of `{head_sha[:7]}` found nothing like this in the file: resolving."
         )
+        await _settle(github, repo, thread, resolved=True)  # first: a failure here leaves no note behind
         await github.reply(repo, number, root, note)
-        await github.set_thread_resolved(repo, thread.id, resolved=True)
         resolved.append(root)
     logger.info(
         "%s/%s#%d at %s: resolved %d fixed finding(s)", repo.owner, repo.name, number, head_sha[:7], len(resolved)
@@ -336,8 +336,12 @@ async def resolve_fixed(
 
 async def mark_thread(github: PullRequests, repo: Repo, number: int, root_id: int, *, resolved: bool) -> None:
     """Resolve, or reopen, the thread under comment `root_id`, unless it's that way already."""
-    thread = (await _threads_by_root(github, repo, number)).get(root_id)
-    if thread is not None and thread.resolved != resolved:
+    if (thread := (await _threads_by_root(github, repo, number)).get(root_id)) is not None:
+        await _settle(github, repo, thread, resolved=resolved)
+
+
+async def _settle(github: PullRequests, repo: Repo, thread: ReviewThread, *, resolved: bool) -> None:
+    if thread.resolved != resolved:
         await github.set_thread_resolved(repo, thread.id, resolved=resolved)
 
 

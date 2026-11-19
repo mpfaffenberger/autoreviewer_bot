@@ -348,15 +348,21 @@ people.
 
 ---
 
-**The bot resolves threads that are settled** (Mike, Nov 19). A thread follows the latest answer in it:
-resolved once its finding is withdrawn, reopened if a later answer says the finding holds. After every review,
-`posting.resolve_fixed` also resolves the threads of findings the code has moved past. Three conditions:
-GitHub shows the comment as outdated, so the code under it changed; the review checked that kind in full
-(`Outcome.covered`: its lens finished, wasn't cut short or capped, or for lint kinds, ruff ran); and it
-reported nothing of that kind in that file, in any state. The last rule is conservative on purpose, so a
-reworded finding or another one in the same file keeps the thread open. A reply naming the reviewed commit comes
-first. Nothing is resolved on merge or close, so advice that was never acted on stays visible. Thread updates
-never cost a review or an answer: a failure is logged.
+**The bot resolves threads that are settled** (Mike, Nov 19). A withdrawn finding's thread is resolved with the
+answer, and reopened if a later answer reinstates the finding. A thread closed for any other reason stays closed.
+After every review, `posting.resolve_fixed` also resolves the threads of findings the code has moved past.
+Three conditions:
+- GitHub shows the comment as outdated, so the code under it changed.
+- This review checked that kind in that file in full (`Outcome.covered`, kind and path). The lens finished over
+  that file, wasn't cut short and wasn't at its cap. Lint kinds count only when ruff ran under its cap and the
+  correctness lens, which carries its findings, finished. A scoped lens covers only the files it re-read.
+- It reported nothing of that kind in that file, in any state. That includes a finding folded into another
+  lens's on the same line (`Outcome.merged`).
+
+The rules are conservative on purpose: a reworded finding, or another one in the same file, keeps the thread
+open. The thread is resolved before the note goes up, so a failed resolve leaves no note claiming otherwise.
+Nothing is resolved on merge or close, so advice that was never acted on stays visible. Thread updates never
+cost a review or an answer: a failure is logged.
 
 ## 6. State
 

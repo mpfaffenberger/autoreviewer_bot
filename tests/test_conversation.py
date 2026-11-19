@@ -146,9 +146,20 @@ async def test_a_withdrawal_is_marked_and_its_thread_resolved(
 async def test_a_finding_that_holds_again_reopens_its_thread(repo: GitRepo, tmp_path: Path) -> None:
     """From the bot's review of #42: a withdrawal isn't final, and a reinstated finding mustn't stay hidden."""
     github, reply = await thread_with_reply(repo)
-    github.resolved_threads.add("T1")  # withdrawn earlier, and resolved with it
+    github.say(BOT, 1, f"You're right.\n\n{answer_markers(2, withdrawn=True)}")  # withdrawn earlier...
+    github.resolved_threads.add("T1")  # ...and resolved with it
+    later = github.say("alice", 1, "Actually, look again at the empty list.")
+    reply = replace(reply, comment_id=later)
     assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
     assert github.resolved_threads == set()
+
+
+async def test_a_thread_closed_for_another_reason_stays_closed(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #42: only a withdrawal's close is the bot's to undo."""
+    github, reply = await thread_with_reply(repo)
+    github.resolved_threads.add("T1")  # the author resolved it, or the bot did after a fix
+    assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
+    assert github.resolved_threads == {"T1"}
 
 
 async def test_a_thread_github_wont_update_costs_nothing(repo: GitRepo, tmp_path: Path) -> None:

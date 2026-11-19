@@ -21,6 +21,7 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 
 from autoreviewer.github import Conversations, Repo, ThreadComment
 from autoreviewer.review.agents import CONVERSATION_LIMITS, VERIFIER_LIMITS
+from autoreviewer.review.lint import LINT_KINDS
 from autoreviewer.review.posting import answer_markers, answered, finding_marker, mark_thread, reconsider
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ADVISORY_KINDS, ThreadAnswer, Verification
@@ -37,8 +38,6 @@ MAX_QUOTED = 4_000
 ConversationAgents = Callable[[Workspace], Agent[None, ThreadAnswer]]
 Checkers = Callable[[Workspace, str], Agent[None, Verification]]
 """(checkout, kind) -> the agent that checks a finding of that kind (agents.checker_agent)."""
-PROVEN_BY_CODE = frozenset({"types", "lint"})
-"""A linter found these: a conversation can explain them, never withdraw them."""
 
 Outcome = Literal[
     "answered", "withdrawn", "not our thread", "already answered", "answer limit", "pr not open", "gave up"
@@ -89,7 +88,7 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
             return "gave up"
         verdict = result.output
         text, withdrawn = verdict.reply, verdict.finding == "withdrawn"
-        if withdrawn and kind in PROVEN_BY_CODE:
+        if withdrawn and kind in LINT_KINDS:
             text, withdrawn = f"{text}\n\nThis finding comes from a linter, so it stands until the code changes.", False
         elif withdrawn and (kind is None or kind not in ADVISORY_KINDS):  # it can block: a second, blind opinion
             check = await deps.checkers(workspace, kind or "correctness").run(
@@ -101,8 +100,10 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
                 "withdrawn" if withdrawn else verdict.finding, verdict.reason)  # fmt: skip
     body = f"{sanitize(text)}\n\n{answer_markers(reply.comment_id, withdrawn=withdrawn)}"
     await deps.github.reply(repo, reply.number, reply.root_id, body)
-    try:  # the thread follows the latest answer: resolved once withdrawn, reopened if the finding holds again
-        await mark_thread(deps.github, repo, reply.number, reply.root_id, resolved=withdrawn)
+    last = next((done for comment in reversed(answers) if (done := answered(comment.body))), None)
+    try:  # resolved once withdrawn; reopened only if this reinstates a withdrawal. Other closes aren't ours to undo.
+        if withdrawn or (last is not None and last[1]):
+            await mark_thread(deps.github, repo, reply.number, reply.root_id, resolved=withdrawn)
     except Exception:  # tidying up: never at the cost of the answer, or of reconsidering the verdict after it
         logger.warning("could not update the thread under comment %d", reply.root_id, exc_info=True)
     return "withdrawn" if withdrawn else "answered"

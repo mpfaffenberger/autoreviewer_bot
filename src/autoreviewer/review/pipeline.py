@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -105,9 +105,11 @@ class Outcome:
     """Lenses that raised (a model error after the client's retries, say), so found nothing (job._survive)."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
-    covered: set[str] = field(default_factory=set[str])
-    """Kinds this review checked in full: their lens finished, wasn't cut short, and wasn't capped. Only a comment
-    of a covered kind can be called fixed (posting.resolve_fixed)."""
+    covered: set[tuple[str, str]] = field(default_factory=set[tuple[str, str]])
+    """(kind, path) pairs this review checked in full: the lens finished over that file, and wasn't cut short or
+    capped. Only a comment on a covered pair can be called fixed (posting.resolve_fixed)."""
+    merged: list[Finding] = field(default_factory=list[Finding])
+    """Findings `absorb` folded into another lens's on the same line: not posted, but still reported."""
     withdrawn: tuple[Withdrawal, ...] = ()
     """Findings withdrawn in conversation on unchanged code (posting.Publisher.withdrawn): one found again is not
     posted again, and doesn't block."""
@@ -131,7 +133,17 @@ class Outcome:
     @property
     def reported(self) -> list[Finding]:
         """Everything the lenses reported, whatever became of it: posted, unverified, rejected, or a hunch."""
-        return [*self.posted, *(f for f, _ in [*self.unverified, *self.rejected]), *self.low_confidence]
+        return [
+            *self.posted,
+            *(f for f, _ in [*self.unverified, *self.rejected]),
+            *self.low_confidence,
+            *self.merged,
+        ]
+
+    def uncover(self, kinds: Iterable[str]) -> None:
+        """Take `kinds` out of what this review checked in full (cut short, or capped)."""
+        kinds = set(kinds)
+        self.covered = {(kind, path) for kind, path in self.covered if kind not in kinds}
 
     def absorb(self, other: Outcome) -> None:
         """Add another lens's results. Where correctness and security posted on one line (likely one defect
@@ -140,6 +152,7 @@ class Outcome:
         self.unverified += other.unverified
         self.failed |= other.failed
         self.covered |= other.covered
+        self.merged += other.merged
         self.low_confidence += other.low_confidence
         for target, findings in ((self.inline, other.inline), (self.general, other.general)):
             for finding in findings:
@@ -147,6 +160,9 @@ class Outcome:
                     target.append(finding)
                 elif finding.priority < same.priority:
                     target[target.index(same)] = finding
+                    self.merged.append(same)
+                else:
+                    self.merged.append(finding)
 
     def is_blocking(self, finding: Finding) -> bool:
         return blocks(finding, self.block_at) and not any(w.covers(finding) for w in self.withdrawn)
