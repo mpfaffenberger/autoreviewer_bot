@@ -53,7 +53,21 @@ class ReviewRequested:
     comment_id: int
 
 
-Decision = Ignore | Pong | PullRequestUpdated | PullRequestClosed | ReviewRequested
+@dataclass(frozen=True)
+class ThreadReply:
+    """A reply in an inline comment thread on an open PR. Whether the thread is one of the bot's findings is
+    checked when it's answered (the payload doesn't say who started the thread)."""
+
+    installation_id: int
+    owner: str
+    repo: str
+    number: int
+    comment_id: int
+    root_id: int
+    """The thread's first comment: GitHub points every reply at it."""
+
+
+Decision = Ignore | Pong | PullRequestUpdated | PullRequestClosed | ReviewRequested | ThreadReply
 
 
 class MalformedPayload(ValueError):
@@ -72,6 +86,8 @@ def _route(event: str, payload: Mapping[str, Any], app_slug: str) -> Decision:
         return Pong()
     if event == "issue_comment":
         return _comment(payload, app_slug)
+    if event == "pull_request_review_comment":
+        return _thread_reply(payload, app_slug)
     if event != "pull_request":
         return Ignore(f"event {event!r} is not handled yet")
     action = payload["action"]
@@ -116,6 +132,30 @@ def _comment(payload: Mapping[str, Any], app_slug: str) -> Decision:
         repo=repository["name"],
         number=issue["number"],
         comment_id=comment["id"],
+    )
+
+
+def _thread_reply(payload: Mapping[str, Any], app_slug: str) -> Decision:
+    if payload["action"] != "created":
+        return Ignore("only new comments are answered")  # an edit must not get a second answer
+    comment, pull, repository = payload["comment"], payload["pull_request"], payload["repository"]
+    root = comment.get("in_reply_to_id")
+    if root is None:
+        return Ignore("not a reply in a thread")
+    author = comment["user"]["login"]
+    if author.lower() == f"{app_slug}[bot]".lower():
+        return Ignore("the bot's own comment")
+    if pull["state"] != "open":
+        return Ignore("the pull request isn't open")
+    if author != pull["user"]["login"] and comment.get("author_association") not in TRUSTED_ASSOCIATIONS:
+        return Ignore(f"{author} is neither the pull request's author nor a maintainer")
+    return ThreadReply(
+        installation_id=payload["installation"]["id"],
+        owner=repository["owner"]["login"],
+        repo=repository["name"],
+        number=pull["number"],
+        comment_id=comment["id"],
+        root_id=root,
     )
 
 

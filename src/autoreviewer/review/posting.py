@@ -39,6 +39,11 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+def finding_marker(body: str) -> re.Match[str] | None:
+    """The marker that ends one of the bot's finding comments: (fingerprint, priority, kind or None)."""
+    return _MARKER.search(body)
+
+
 def covered[Key](posted: Mapping[Key, int], key: Key, finding: Finding) -> bool:
     """Whether a comment at least as urgent as `finding` is already posted under `key` (its fingerprint, or where
     GitHub shows a comment of its kind)."""

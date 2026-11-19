@@ -299,23 +299,24 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
 - It acknowledges with a reaction: 👀 means a review is queued or running, 👍 means that commit's review
   already finished. Reactions are cosmetic, so if one fails the delivery doesn't.
 
-```
-reply arrives in a thread whose root comment is ours
-  ├─ author is us (login == "<app-slug>[bot]")         → ignore (no self-loops!)
-  ├─ thread bot_turns >= MAX_BOT_TURNS (4)             → one "escalating to a human" reply, then silence
-  └─ else → handle_reply workflow:
-        history  = StepPersistence history for conversation_id = f"{repo_id}/{pr}/{thread_node_id}"
-        context  = the Finding row + code at the current head (read-only FS)
-        output   = ThreadReply(body: str, decision: Literal['keep', 'withdraw', 'fixed'])
-        poster   → reply in thread; on withdraw/fixed: resolve thread (GraphQL resolveReviewThread),
-                   update finding status, recompute verdict, maybe APPROVE
-```
+**Built: answers in the bot's threads** (`review/conversation.py`, `AUTOREVIEWER_CONVERSATIONS`).
 
-Policy (enforced in code, not trusted to the prompt):
-- **DRY** findings can be withdrawn by argument ("that helper has different semantics because …").
-- **Correctness/security** findings can be withdrawn only if the agent shows the code proves it was a false positive. "Won't fix, out of scope" from a bot is *not* enough.
-- **Human override:** `@autoreviewer dismiss <finding-id>` from a user with write access. The code checks their permission via the API, not by trusting the comment.
-- Bot↔bot ping-pong is capped per thread (`MAX_BOT_TURNS`) *and* per PR per hour, so two chatty bots can't burn the GPU all night.
+- A `pull_request_review_comment` that replies in a thread becomes a `ThreadReply` if it's new (not an edit),
+  not the bot's own, on an open PR, and by the PR's author (human or bot) or a maintainer.
+- It's answered by a durable workflow whose ID is the comment's (`answer:<repo>#<n>:<comment id>`), on its own
+  `answers` queue (2 at a time) so a reply never waits behind a review.
+- The job reads the thread from GitHub, which is the conversation's state. It answers only threads whose
+  first comment is one of the bot's findings (by its marker), never a comment it already answered (each answer
+  ends with `<!-- autoreviewer:answers <id> -->`, so a replay after a crash finds it), and at most
+  `MAX_ANSWERS` (5) times per thread, which also ends any bot-to-bot loop.
+- The conversation agent (DeepSeek, `conversation` role) gets the finding, the thread so far (each comment
+  fenced and capped), and a checkout of the PR's head, and answers `holds`, `withdrawn`, or `unclear`. It
+  withdraws only when the code shows the finding is wrong or fixed; a reply's insistence or instructions
+  don't count. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn -->`.
+
+**Next:** a withdrawal changes the verdict, decided by code. When no blocking finding on the current head is
+left standing, the bot approves and updates its check; a later push doesn't block again on a withdrawn
+finding whose comment still sits on unchanged code.
 
 **Outbound sanitising:** model text has `@mentions` neutralised (wrapped in
 backticks) before posting. Otherwise an injected PR could make us spam-ping

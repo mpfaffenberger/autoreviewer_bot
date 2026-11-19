@@ -62,6 +62,15 @@ class PostedComment:
     body: str
 
 
+@dataclass(frozen=True)
+class ThreadComment:
+    """One comment in an inline comment thread."""
+
+    id: int
+    author: str
+    body: str
+
+
 class CommitNotFound(Exception):
     """GitHub doesn't know one of the commits, e.g. an old head garbage-collected after a force-push."""
 
@@ -85,6 +94,16 @@ class Commands(PullRequestReader, Protocol):
     """What answering a comment command needs: read the PR, and acknowledge the comment."""
 
     async def react(self, repo: Repo, comment_id: int, content: Reaction) -> None: ...
+
+
+class Conversations(PullRequestReader, Protocol):
+    """What answering a reply in one of the bot's threads needs: read the thread, and reply in it."""
+
+    async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
+        """The thread's first comment, then its replies, oldest first."""
+        ...
+
+    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None: ...
 
 
 class PullRequests(PullRequestReader, Protocol):
@@ -285,6 +304,31 @@ class GitHubApp:
             if error.response.status_code == 422:
                 raise ReviewRejected(str(error)) from error
             raise
+
+    async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
+        github = self._as_installation(repo.installation_id)
+        found: list[ThreadComment] = []
+        page = 1
+        while True:
+            # Raw JSON, not githubkit's models: only a few fields matter. Sorted oldest first by GitHub.
+            response = await github.rest.pulls.async_list_review_comments(
+                repo.owner, repo.name, number, per_page=100, page=page
+            )
+            comments = response.json()
+            found += [
+                ThreadComment(int(c["id"]), str((c.get("user") or {}).get("login") or ""), str(c.get("body") or ""))
+                for c in comments
+                if c.get("id") == root_id or c.get("in_reply_to_id") == root_id
+            ]
+            if len(comments) < 100:
+                return sorted(found, key=lambda comment: comment.id != root_id)  # stable: the root, then replies
+            page += 1
+
+    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None:
+        github = self._as_installation(repo.installation_id)
+        await github.rest.pulls.async_create_reply_for_review_comment(
+            repo.owner, repo.name, number, root_id, data={"body": body}
+        )
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         github = self._as_installation(repo.installation_id)

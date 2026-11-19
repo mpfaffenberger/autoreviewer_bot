@@ -15,11 +15,13 @@ from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.servers import CONTEXT_WINDOWS
-from autoreviewer.web.config import AgentKind, Settings, verifier_role
+from autoreviewer.web.config import CONVERSATION, AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
+    from autoreviewer.github import GitHubApp
+    from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.job import AgentFactory, Lens
     from autoreviewer.review.schemas import LensKind
     from autoreviewer.review.simplify import SimplifierFactory
@@ -30,6 +32,7 @@ from autoreviewer.web.routing import (
     PullRequestClosed,
     PullRequestUpdated,
     ReviewRequested,
+    ThreadReply,
     route,
 )
 
@@ -38,6 +41,7 @@ logger = logging.getLogger("autoreviewer.web")
 PullRequestHandler = Callable[[PullRequestUpdated], Awaitable[object]]
 ClosedHandler = Callable[[PullRequestClosed], Awaitable[None]]
 RequestHandler = Callable[[ReviewRequested], Awaitable[object]]
+ReplyHandler = Callable[[ThreadReply], Awaitable[object]]
 
 
 def _reply(status_code: int, **body: str) -> JSONResponse:
@@ -50,6 +54,7 @@ def create_app(
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
     on_pull_request_closed: ClosedHandler | None = None,
     on_review_requested: RequestHandler | None = None,
+    on_thread_reply: ReplyHandler | None = None,
 ) -> FastAPI:
     """`on_pull_request` must be quick (it enqueues); `lifespan` starts and stops whatever runs the work."""
     app = FastAPI(title="autoreviewer", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -96,6 +101,11 @@ def create_app(
                     return _reply(200, status="ignored", reason="commands are not enabled")
                 await on_review_requested(command)  # a failure is a 500, so GitHub's redelivery can retry it
                 return _reply(202, status="accepted")
+            case ThreadReply() as reply:
+                if on_thread_reply is None:
+                    return _reply(200, status="ignored", reason="conversations are not enabled")
+                await on_thread_reply(reply)  # queues the answer; its workflow ID makes redeliveries no-ops
+                return _reply(202, status="accepted")
 
     return app
 
@@ -121,6 +131,10 @@ class ModelPlan:
     def verifier(self, kind: AgentKind) -> tuple[Model, int]:
         """The model and its context window for the agent that checks `kind`'s findings."""
         return self._build(self.models[verifier_role(kind)])
+
+    def conversation(self) -> tuple[Model, int]:
+        """The model and its context window for answering replies under the bot's findings."""
+        return self._build(self.models[CONVERSATION])
 
     def _build(self, name: str) -> tuple[Model, int]:
         from autoreviewer.review.agents import boodleton_model
@@ -225,6 +239,22 @@ def _and(names: list[str]) -> str:
     return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
 
 
+def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps:
+    """Answers on the conversation role's model, over a fresh checkout of the PR's head."""
+    from autoreviewer.review.agents import conversation_agent
+    from autoreviewer.review.conversation import ConversationDeps
+    from autoreviewer.review.workspace import GitHubSource
+
+    model, window = ModelPlan.from_settings(settings).conversation()
+    return ConversationDeps(
+        github=github,
+        source=GitHubSource(github),
+        agents=lambda workspace: conversation_agent(model, workspace, context_window=window),
+        work_dir=settings.work_dir,
+        bot_login=settings.bot_login,
+    )
+
+
 def main() -> None:
     import functools
 
@@ -267,7 +297,8 @@ def main() -> None:
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await durable.launch(deps, concurrency=settings.max_concurrent_jobs)  # also recovers interrupted reviews
+        # Also recovers interrupted reviews and answers.
+        await durable.launch(deps, conversation_deps(settings, github), concurrency=settings.max_concurrent_jobs)
         try:
             yield
         finally:
@@ -277,10 +308,20 @@ def main() -> None:
         # An explicit request retries a review of this commit that was cancelled or crashed.
         await request_review(github, request, functools.partial(durable.enqueue_review, retry_failed=True))
 
+    async def answer_reply(reply: ThreadReply) -> None:
+        await durable.enqueue_answer(reply)
+
     async def forget(closed: PullRequestClosed) -> None:
         repo = Repo(closed.installation_id, closed.owner, closed.repo)
         memory.forget(conversation_id(repo, closed.number))
 
-    app = create_app(settings, durable.enqueue_review, lifespan, forget, review_requested)
+    app = create_app(
+        settings,
+        durable.enqueue_review,
+        lifespan,
+        forget,
+        review_requested,
+        answer_reply if settings.conversations else None,
+    )
     logfire.instrument_fastapi(app)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

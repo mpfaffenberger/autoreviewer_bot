@@ -22,13 +22,16 @@ def verifier_role(kind: AgentKind) -> str:
     return f"{kind}.verifier"
 
 
-AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS))
+CONVERSATION = "conversation"
+"""The role that answers replies under the bot's findings (review/conversation.py)."""
+AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS), CONVERSATION)
 _CHECKED_BY_KIMI: tuple[AgentKind, ...] = ("docs", "tests")
 DEFAULT_MODELS = {
     **dict.fromkeys(AGENT_KINDS, QWEN),
     **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK),
     **dict.fromkeys(_CHECKED_BY_KIMI, DEEPSEEK),
     **dict.fromkeys(map(verifier_role, _CHECKED_BY_KIMI), KIMI),
+    CONVERSATION: DEEPSEEK,
 }
 """Finders on Qwen (fast), checkers on DeepSeek (better); docs and tests are found by DeepSeek and checked by Kimi,
 keeping Qwen's lanes for the rest (Mike, Nov 18). Pin any role to change it (AUTOREVIEWER_MODELS)."""
@@ -52,6 +55,8 @@ class Settings:
     docs: bool = False
     """Run the docs lens: docstrings, comments, docs, config comments, error messages, and contracts the change
     makes untrue. Off until its evals are in."""
+    conversations: bool = False
+    """Answer replies under the bot's findings (see review/conversation.py)."""
     tests: bool = False
     """Run the tests lens: changed behaviour no test would catch breaking, and tests that can't fail. Off until
     its evals are in."""
@@ -101,6 +106,7 @@ class Settings:
             dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True),
             docs=parse_bool(env, "AUTOREVIEWER_DOCS", default=False),
             tests=parse_bool(env, "AUTOREVIEWER_TESTS", default=False),
+            conversations=parse_bool(env, "AUTOREVIEWER_CONVERSATIONS", default=False),
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],

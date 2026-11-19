@@ -20,7 +20,14 @@ from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
 from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.schemas import LensKind, LensReport, SimplifyReport, SimplifyVerdict, Verification
+from autoreviewer.review.schemas import (
+    LensKind,
+    LensReport,
+    SimplifyReport,
+    SimplifyVerdict,
+    ThreadAnswer,
+    Verification,
+)
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, QWEN_CONTEXT_WINDOW
 
@@ -197,6 +204,17 @@ def simplify_checker_agent(
     model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
 ) -> Agent[None, SimplifyVerdict]:
     return _agent(model, workspace, SimplifyVerdict, _prompt("simplify_checker.md"), context_window)
+
+
+CONVERSATION_LIMITS = UsageLimits(request_limit=60)
+"""An answer reads a few files: plenty, and a runaway thread can't burn the model for long."""
+
+
+def conversation_agent(
+    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+) -> Agent[None, ThreadAnswer]:
+    """Answers a reply under one of the bot's findings, re-checking the code it's about (see conversation.py)."""
+    return _agent(model, workspace, ThreadAnswer, _prompt("conversation.md"), context_window)
 
 
 def _prompt(name: str) -> str:

@@ -18,10 +18,13 @@ from pathlib import Path
 
 from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync, WorkflowStatusString
 
-from autoreviewer.review import job
-from autoreviewer.web.routing import PullRequestUpdated
+from autoreviewer.review import conversation, job
+from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 QUEUE = "reviews"
+ANSWER_QUEUE = "answers"
+"""Answers to replies run beside reviews, never behind one: a reply shouldn't wait for a 15-minute review."""
+ANSWER_CONCURRENCY = 2
 
 APPLICATION_VERSION = "review-workflow-v1"
 """Pinned so in-flight reviews survive a redeploy (DBOS otherwise only recovers workflows of the same
@@ -35,12 +38,19 @@ MAX_RECOVERY_ATTEMPTS = 3
 """A review that keeps crashing the process is parked after this many recoveries instead of looping on the GPU."""
 
 _deps: job.ReviewDeps | None = None
+_conversation_deps: conversation.ConversationDeps | None = None
 
 
 def _require_deps() -> job.ReviewDeps:
     if _deps is None:
         raise RuntimeError("durable.launch() must run before reviews are executed")
     return _deps
+
+
+def _require_conversation_deps() -> conversation.ConversationDeps:
+    if _conversation_deps is None:
+        raise RuntimeError("durable.launch() must run before answers are executed")
+    return _conversation_deps
 
 
 logger = logging.getLogger("autoreviewer.durable")
@@ -78,6 +88,29 @@ async def review_workflow(pull: PullRequestUpdated) -> job.CheckResult:
     return result
 
 
+def answer_id(reply: ThreadReply) -> str:
+    """One answer per comment: redeliveries and duplicate events can never answer twice."""
+    return f"answer:{reply.owner}/{reply.repo}#{reply.number}:{reply.comment_id}".lower()
+
+
+@DBOS.step()  # no retries: a model call isn't free, and conversation.answer finds an answer already posted
+async def _answer(reply: ThreadReply) -> str:
+    return await conversation.answer(_require_conversation_deps(), reply)
+
+
+@DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
+async def answer_workflow(reply: ThreadReply) -> str:
+    return await _answer(reply)
+
+
+async def enqueue_answer(reply: ThreadReply) -> None:
+    queue = await DBOS.retrieve_queue_async(ANSWER_QUEUE)
+    if queue is None:
+        raise RuntimeError("the answer queue is not registered; call durable.launch() first")
+    with SetWorkflowID(answer_id(reply)):
+        await queue.enqueue_async(answer_workflow, reply)
+
+
 def configure(database: Path) -> None:
     """Create the DBOS instance (SQLite system database). Call once, outside the event loop."""
     if sqlite3.sqlite_version_info < MIN_SQLITE:
@@ -95,12 +128,15 @@ def configure(database: Path) -> None:
     )
 
 
-async def launch(deps: job.ReviewDeps, *, concurrency: int) -> None:
-    """Start DBOS (recovering interrupted reviews) and register the review queue."""
-    global _deps
-    _deps = deps
+async def launch(
+    deps: job.ReviewDeps, conversation_deps: conversation.ConversationDeps | None = None, *, concurrency: int
+) -> None:
+    """Start DBOS (recovering interrupted reviews and answers) and register the queues."""
+    global _deps, _conversation_deps
+    _deps, _conversation_deps = deps, conversation_deps
     DBOS.launch()
     await DBOS.register_queue_async(QUEUE, worker_concurrency=concurrency)
+    await DBOS.register_queue_async(ANSWER_QUEUE, worker_concurrency=ANSWER_CONCURRENCY)
 
 
 async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResult]:

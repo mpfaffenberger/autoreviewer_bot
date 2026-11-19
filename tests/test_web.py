@@ -21,6 +21,7 @@ from autoreviewer.web.routing import (
     PullRequestClosed,
     PullRequestUpdated,
     ReviewRequested,
+    ThreadReply,
     is_review_command,
     route,
 )
@@ -341,3 +342,27 @@ async def test_a_review_command_reaches_its_handler() -> None:
     async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/webhook", content=body, headers=headers)
     assert response.status_code == 202 and requests == [REQUESTED]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_thread_reply_reaches_its_handler_when_conversations_are_on(enabled: bool) -> None:
+    replies: list[ThreadReply] = []
+
+    async def on_reply(reply: ThreadReply) -> None:
+        replies.append(reply)
+
+    settings = Settings(app_id=1, app_slug=SLUG, webhook_secret=SECRET, private_key="unused")
+    app = create_app(settings, FakeHandler(), on_thread_reply=on_reply if enabled else None)
+    delivery = {
+        "action": "created",
+        "comment": {"id": 9, "in_reply_to_id": 4, "user": {"login": "alice"}, "author_association": "NONE"},
+        "pull_request": {"number": 7, "state": "open", "user": {"login": "alice"}},
+        "repository": {"name": "demo", "owner": {"login": "mpfaffenberger"}},
+        "installation": {"id": 1},
+    }
+    body = json.dumps(delivery).encode()
+    headers = {"X-GitHub-Event": "pull_request_review_comment", "X-GitHub-Delivery": "d-10",
+               "X-Hub-Signature-256": signature(body)}  # fmt: skip
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/webhook", content=body, headers=headers)
+    assert (response.status_code, len(replies)) == ((202, 1) if enabled else (200, 0))
