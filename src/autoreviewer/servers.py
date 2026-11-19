@@ -12,8 +12,9 @@ DEEPSEEK_CONTEXT_WINDOW = 1_048_576
 CONTEXT_WINDOWS = {QWEN: QWEN_CONTEXT_WINDOW, DEEPSEEK: DEEPSEEK_CONTEXT_WINDOW}
 """Every model an agent may be pinned to (config.models_from): an agent's context window follows its model.
 
-Real names only. Boodleton also serves aliases (`qwen3.8-27b` is this Qwen, `glm53` this DeepSeek); they stay
-out, since the rule that a finder and its checker differ, and the per-model lanes, compare names."""
+Real names only. Boodleton also serves aliases: `qwen3.8-27b` is this Qwen and `glm53` is this DeepSeek. They
+stay out because the rule that a finder and its checker differ, and the per-model lanes, compare names, so a
+pin to an alias stops startup."""
 DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4}
 """Requests at once per model, across every review: Qwen's stream count, and DeepSeek's share of a shared server."""
 
