@@ -15,6 +15,10 @@ KIMI_CONTEXT_WINDOW = 262_144
 """As Boodleton's /v1/models lists it (2026-11-18); Boodleton lists every model this way, so it's a floor."""
 CONTEXT_WINDOWS = {QWEN: QWEN_CONTEXT_WINDOW, DEEPSEEK: DEEPSEEK_CONTEXT_WINDOW, KIMI: KIMI_CONTEXT_WINDOW}
 """Every model an agent may be pinned to (config.models_from): an agent's context window follows its model."""
+FALLBACKS = {KIMI: QWEN}
+"""Model -> the one its requests go to when it fails (an API error, after the client's own retries). Kimi is a
+hosted plan with quotas: on Nov 19 it answered 429 for half an hour, and every docs and tests check went
+unverified. Qwen is local, and still not the docs and tests finders' model."""
 DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4, KIMI: 2}
 """Requests at once per model, across every review: Qwen's stream count, DeepSeek's share of a shared server,
 and few to Kimi's hosted API (it only checks findings)."""

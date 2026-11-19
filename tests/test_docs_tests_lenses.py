@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS, lens_pair
 from autoreviewer.review.pipeline import blocks
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import DEEPSEEK, KIMI
-from autoreviewer.web.app import MAX_ADVISORY_POSTED, build_lenses, models_note
-from autoreviewer.web.config import Settings
+from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, KIMI, QWEN
+from autoreviewer.web.app import MAX_ADVISORY_POSTED, ModelPlan, build_lenses, models_note
+from autoreviewer.web.config import Settings, models_from
 
 BASE = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
 ENV = {"GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "s", "GITHUB_WEBHOOK_SECRET": "w", "BOODLETON_API_KEY": "b",
@@ -35,8 +36,15 @@ async def test_found_by_deepseek_checked_by_kimi_capped_and_scoped(workspace: Wo
     for kind in ("docs", "tests"):
         spec = lenses[kind]
         finder, checker = spec.agents(workspace)
-        assert (finder.model.model_name, checker.model.model_name) == (DEEPSEEK, KIMI)  # type: ignore[union-attr]
+        assert finder.model.model_name == DEEPSEEK  # type: ignore[union-attr]
+        assert checks_in_order(checker.model) == [KIMI, QWEN]  # Kimi, and Qwen when Kimi fails
         assert (spec.max_posted, spec.whole_pr) == (MAX_ADVISORY_POSTED, False)
+
+
+def checks_in_order(model: object) -> list[str]:
+    """The models a request tries, in order: one, or a FallbackModel's chain."""
+    chain = model.models if isinstance(model, FallbackModel) else [model]
+    return [m.model_name for m in chain]  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("kind", ["docs", "tests"])
@@ -82,3 +90,16 @@ async def test_the_docs_lens_and_its_checker_hold_text_to_unslop(workspace: Work
 def test_lenses_run_in_one_order() -> None:
     every = with_lenses(security=True, dry=True, docs=True, tests=True)
     assert [spec.kind for spec in build_lenses(every)] == ["security", "dry", "docs", "tests"]
+
+
+def test_only_models_with_a_fallback_get_one() -> None:
+    """Kimi, a hosted API with quotas, falls back to Qwen; the window fits both. DeepSeek runs alone."""
+    plan = ModelPlan.from_settings(BASE)
+    model, window = plan.verifier("docs")
+    assert (checks_in_order(model), window) == ([KIMI, QWEN], min(CONTEXT_WINDOWS[KIMI], CONTEXT_WINDOWS[QWEN]))
+    assert checks_in_order(plan.verifier("correctness")[0]) == [DEEPSEEK]
+
+
+def test_a_checker_may_not_fall_back_to_its_finders_model() -> None:
+    with pytest.raises(ValueError, match=r"docs\.verifier \(kimi-k3\.1-pro\) falls back to 'qwen3\.8-flash-next'"):
+        models_from({"AUTOREVIEWER_MODELS": f"docs={QWEN}"})

@@ -12,6 +12,7 @@ from autoreviewer.servers import (
     CONTEXT_WINDOWS,
     DEEPSEEK,
     DEFAULT_MODEL_LANES,
+    FALLBACKS,
     KIMI,
     QWEN,
     REASONING_EFFORTS,
@@ -162,8 +163,13 @@ def models_from(env: Mapping[str, str]) -> dict[str, str]:
             raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
         models[role] = model
     for kind in AGENT_KINDS:
-        if models[kind] == models[verifier_role(kind)]:
+        checker = models[verifier_role(kind)]
+        if models[kind] == checker:
             raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
+        if FALLBACKS.get(checker) == models[kind]:
+            raise ValueError(
+                f"AUTOREVIEWER_MODELS: {verifier_role(kind)} ({checker}) falls back to {models[kind]!r}, {kind}'s model"
+            )
     return models
 
 
