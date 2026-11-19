@@ -262,3 +262,24 @@ async def test_a_runaway_answer_gives_up_without_posting(repo: GitRepo, tmp_path
 
     assert await answer(deps(github, repo, tmp_path, FunctionModel(forever)), reply) == "gave up"
     assert len(github.review_comments) == 2  # the finding and the reply; no answer
+
+
+def test_the_bots_blind_recheck_uses_the_findings_own_checker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From the bot's review of #37: conversation_deps' checker factory, as the bot builds it. A security finding is
+    re-checked by the security checker (with its references); anything else that can block, by correctness's."""
+    from autoreviewer.review import agents
+    from autoreviewer.web.app import conversation_deps
+    from autoreviewer.web.config import Settings
+
+    built: list[str] = []
+
+    def record(kind: str, *_: object, **__: object) -> object:
+        built.append(kind)
+        return object()
+
+    monkeypatch.setattr(agents, "checker_agent", record)
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
+    deps = conversation_deps(settings, object())  # type: ignore[arg-type]
+    for kind in ("security", "correctness", "dry"):
+        deps.checkers(object(), kind)  # type: ignore[arg-type]
+    assert built == ["security", "correctness", "correctness"]

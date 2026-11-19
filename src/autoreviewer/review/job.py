@@ -46,7 +46,7 @@ from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
-from autoreviewer.web.routing import PullRequestUpdated
+from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 logger = logging.getLogger("autoreviewer.job")
 
@@ -166,8 +166,9 @@ class Superseded(Exception):
     """The PR moved on (new push, closed) while we worked; the newer event gets its own review."""
 
 
-def repo_of(pull: PullRequestUpdated) -> Repo:
-    return Repo(pull.installation_id, pull.owner, pull.repo)
+def repo_of(event: PullRequestUpdated | ThreadReply) -> Repo:
+    """The repository a webhook event is about, as the GitHub client addresses it."""
+    return Repo(event.installation_id, event.owner, event.repo)
 
 
 async def start_check(deps: ReviewDeps, pull: PullRequestUpdated) -> int:

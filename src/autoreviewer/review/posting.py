@@ -24,7 +24,7 @@ from autoreviewer.github import (
     ReviewThread,
 )
 from autoreviewer.review.pipeline import Outcome, Withdrawal, blocks, blocks_at, normal_title, same_defect
-from autoreviewer.review.render import comment_body, review_body
+from autoreviewer.review.render import comment_body, posted_title, review_body
 from autoreviewer.review.schemas import Finding
 
 logger = logging.getLogger("autoreviewer.posting")
@@ -49,7 +49,7 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
 
 WITHDRAWN_MARKER = "<!-- autoreviewer:withdrawn -->"
 """The last line of an answer that withdrew its thread's finding after re-checking the code (conversation.py)."""
-_ANSWER_END = re.compile(r"<!-- autoreviewer:answers (\d+) -->(\n<!-- autoreviewer:withdrawn -->)?\Z")
+_ANSWER_END = re.compile(rf"<!-- autoreviewer:answers (\d+) -->(\n{re.escape(WITHDRAWN_MARKER)})?\Z")
 """Only the markers that end an answer count: code appends them after the model's text, so nothing the model was
 led to write can claim an answer or withdraw a finding."""
 _VERDICT_STATE = re.compile(
@@ -60,7 +60,6 @@ _VERDICT_STATE = re.compile(
 """The line before a verdict's own marker, at the very end of its body (anchored there for the same reason): its
 event, how many blocking findings it listed with no thread to withdraw them in, and whether the review covered
 the whole change. A withdrawal only ever overturns a complete verdict that requested changes with outside=0."""
-_TITLE = re.compile(r"\A\*\*\[P[0-3]\] ([^\n]*)\*\* \(")
 
 
 Placement = tuple[str, int, str]
@@ -91,9 +90,9 @@ def withdrawals(comments: Iterable[PostedComment]) -> tuple[Withdrawal, ...]:
     """The withdrawn findings GitHub still shows on the current head, as a later review should see them."""
     found = []
     for root in withdrawn_threads(comments).values():
-        match, title = finding_marker(root.body), _TITLE.match(root.body)
+        match, title = finding_marker(root.body), posted_title(root.body)
         if root.line is not None and match and match[3] and title:  # outdated, or from before kinds were recorded
-            found.append(Withdrawal(root.path, root.line, match[3], int(match[2]), normal_title(title[1])))
+            found.append(Withdrawal(root.path, root.line, match[3], int(match[2]), normal_title(title)))
     return tuple(found)
 
 

@@ -19,8 +19,9 @@ from typing import Literal
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UsageLimitExceeded
 
-from autoreviewer.github import Conversations, Repo, ThreadComment
+from autoreviewer.github import Conversations, ThreadComment
 from autoreviewer.review.agents import CONVERSATION_LIMITS, VERIFIER_LIMITS
+from autoreviewer.review.job import repo_of
 from autoreviewer.review.posting import answer_markers, answered, finding_marker, mark_thread, reconsider
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ADVISORY_KINDS, ThreadAnswer, Verification
@@ -60,7 +61,7 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
     """Answer `reply` once, if it's under one of the bot's findings. A re-run (say, after a crash) finds an answer
     already posted by its marker, so it doesn't answer twice; two runs for one comment that overlap could, which
     the durable workflow's ID (one per comment) rules out."""
-    repo = _repo(reply)
+    repo = repo_of(reply)
     thread = await deps.github.thread(repo, reply.number, reply.root_id)
     marker = finding_marker(thread[0].body) if thread and thread[0].author == deps.bot_login else None
     if marker is None:
@@ -136,8 +137,4 @@ def _prompt(title: str, thread: list[ThreadComment], comment_id: int) -> str:
 
 async def reconsider_verdict(deps: ConversationDeps, reply: ThreadReply) -> bool:
     """After a withdrawal: approve the PR's head if nothing blocking is left standing (posting.reconsider)."""
-    return await reconsider(deps.github, _repo(reply), reply.number, author=deps.bot_login, block_at=deps.block_at)
-
-
-def _repo(reply: ThreadReply) -> Repo:
-    return Repo(reply.installation_id, reply.owner, reply.repo)
+    return await reconsider(deps.github, repo_of(reply), reply.number, author=deps.bot_login, block_at=deps.block_at)
