@@ -184,5 +184,14 @@ async def test_an_unreadable_base_costs_only_that_files_unused_imports(tmp_path:
     """From the bot's review of #28: a git failure used to discard every lint finding, types included."""
     source = "import os\n\n\n" + UNTYPED
     changes, patches = new_file(tmp_path, "scale.py", source)  # no repository here: `git show` fails
-    findings = await lint_findings(tmp_path, [replace(changes[0], status="M")], patches)
+    unchecked: set[str] = set()
+    findings = await lint_findings(tmp_path, [replace(changes[0], status="M")], patches, unchecked=unchecked)
     assert [(f.kind, f.line) for f in findings] == [("types", 4)]
+    assert unchecked == {"scale.py"}  # #50's review: the job then doesn't count its unused imports as checked
+
+
+async def test_a_readable_base_leaves_nothing_unchecked(tmp_path: Path) -> None:
+    unchecked: set[str] = set()
+    changes = edited(tmp_path, "util.py", "import os\n\nSEP = os.sep\n", "import os\n\nSEP = '/'\n")
+    await lint_findings(tmp_path, *changes, unchecked=unchecked)
+    assert unchecked == set()

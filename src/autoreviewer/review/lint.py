@@ -65,8 +65,11 @@ class Diagnostic(TypedDict):
 _DIAGNOSTICS = TypeAdapter(list[Diagnostic])
 
 
-async def lint_findings(root: Path, changes: list[ChangedPath], patches: dict[str, str]) -> list[Finding]:
-    """One finding per line that breaks a rule, most urgent first, at most MAX_LINT_FINDINGS."""
+async def lint_findings(
+    root: Path, changes: list[ChangedPath], patches: dict[str, str], *, unchecked: set[str] | None = None
+) -> list[Finding]:
+    """One finding per line that breaks a rule, most urgent first, at most MAX_LINT_FINDINGS. Files whose unused
+    imports couldn't be checked (an unreadable merge-base) are added to `unchecked`, if given."""
     python = {c.path: c for c in changes if c.path.endswith(PYTHON_SUFFIXES)}
     if not python:
         return []
@@ -85,6 +88,8 @@ async def lint_findings(root: Path, changes: list[ChangedPath], patches: dict[st
     for path, lines in sorted(unused.items()):
         already = await _unused_at_base(root, python[path])
         if already is None:  # base unknown: say nothing rather than blame the PR for old imports
+            if unchecked is not None:
+                unchecked.add(path)
             continue
         for line, hits in lines.items():
             if fresh := [hit for hit in hits if hit["message"] not in already]:

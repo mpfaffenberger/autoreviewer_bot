@@ -110,7 +110,7 @@ async def _survive(kind: str, block_at: int, run: Awaitable[Outcome], paths: Ite
     except Exception:
         logger.warning("the %s lens failed; the review goes on without it", kind, exc_info=True)
         return Outcome(block_at=block_at, failed={kind})
-    outcome.covered |= {(kind, path) for path in paths}  # only a lens that ran to the end (settle_fixed)
+    outcome.covered |= {(kind, path) for path in paths}
     return outcome
 
 
@@ -310,10 +310,12 @@ async def review_change(
                 continuation = Continuation(prior, history, head_sha, changed_since)
         persistence, run_id = memory.persistence(conversation) if memory else (None, "")
         try:
-            linted, lint_ran = await lint_findings(workspace.root, selection.reviewable, patches), True
+            unchecked: set[str] = set()
+            linted = await lint_findings(workspace.root, selection.reviewable, patches, unchecked=unchecked)
+            lint_ran = True
         except LintError:  # a broken linter costs the lint checks, never the review
             logger.exception("%s at %s: lint checks skipped", conversation, head_sha[:7])
-            linted, lint_ran = [], False
+            linted, lint_ran, unchecked = [], False, set()
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
         progress = progress or Progress()
@@ -340,7 +342,8 @@ async def review_change(
                         progress=progress,
                         publish=publish,
                     ),
-                    [change.path for change in pr.reviewable],
+                    # Continuing, it covers only what it re-read: the files changed since its last review.
+                    [change.path for change in (pr if scope is None else _only(pr, scope)).reviewable],
                 )
             )
             extra = []
@@ -374,7 +377,12 @@ async def review_change(
         outcome = correctness.result()
         # The lint findings reach the outcome through the correctness lens (`checked`): without it, they're lost.
         if lint_ran and "correctness" not in outcome.failed and len(linted) < MAX_LINT_FINDINGS:
-            outcome.covered |= {(kind, change.path) for kind in LINT_KINDS for change in pr.reviewable}
+            outcome.covered |= {
+                (kind, change.path)
+                for kind in LINT_KINDS
+                for change in pr.reviewable
+                if not (kind == "lint" and change.path in unchecked)  # its unused imports weren't checked
+            }
         for task in extra:
             outcome.absorb(task.result())
         suggestions = simplify_task.result() if simplify_task is not None else []

@@ -168,6 +168,25 @@ async def test_a_finding_that_holds_again_reopens_its_thread(
     assert github.settled_threads == (set() if reopened else {"T1"})
 
 
+async def test_a_moderators_hide_is_never_undone(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #44: reinstating a withdrawn finding shows it again only if the bot hid it. A
+    moderator who hid the comment as spam or off-topic keeps it hidden."""
+    github, reply = await thread_with_reply(repo)
+    github.say(BOT, 1, f"withdrawn\n\n{answer_markers(2, withdrawn=True)}")
+    github.hidden_threads.add("T1")
+    reply = replace(reply, comment_id=github.say("alice", 1, "Look again."))
+    assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
+    assert github.hidden_threads == {"T1"} and github.settled_threads == set()
+
+
+async def test_a_withdrawal_leaves_a_hidden_thread_as_it_is(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #44: settling doesn't re-minimize what's hidden already (it would change why)."""
+    github, reply = await thread_with_reply(repo)
+    github.hidden_threads.add("T1")
+    assert await answer(deps(github, repo, tmp_path, scripted("withdrawn")), reply) == "withdrawn"
+    assert github.settled_threads == set()
+
+
 async def test_a_thread_closed_for_another_reason_stays_closed(repo: GitRepo, tmp_path: Path) -> None:
     """From the bot's review of #42: only a withdrawal's close is the bot's to undo."""
     github, reply = await thread_with_reply(repo)

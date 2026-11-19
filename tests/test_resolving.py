@@ -90,9 +90,9 @@ async def test_a_comment_still_on_the_heads_code_stays_open(repo: GitRepo) -> No
     assert await resolve(github) == []
 
 
-@pytest.mark.parametrize("done", ["resolved_threads", "settled_threads"])
+@pytest.mark.parametrize("done", ["resolved_threads", "settled_threads", "hidden_threads"])
 async def test_a_thread_already_done_gets_no_second_note(repo: GitRepo, done: str) -> None:
-    """Resolved by a person, or settled by an earlier review: replays and later pushes leave it alone."""
+    """Resolved by a person, settled by an earlier review, or hidden by a moderator: left alone, no note."""
     github = await pushed_past(repo, blocking(5))
     getattr(github, done).add("T1")
     assert await resolve(github) == []
@@ -251,3 +251,36 @@ async def test_a_scoped_lens_resolves_only_in_the_files_it_reread(
     github.head_shas = [head]
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
     assert github.settled_threads == resolved
+
+
+@pytest.mark.parametrize(("changed", "settled"), [("stats.py", {"T1"}), ("notes.py", set())])
+async def test_a_continued_review_settles_correctness_only_where_it_reread(
+    repo: GitRepo, tmp_path: Path, changed: str, settled: set[str]
+) -> None:
+    """From the bot's review of #44: continuing, correctness reads the files changed since; the rest it didn't."""
+    github = FakeGitHub(repo)
+    deps = replace(job_deps(github, tmp_path), memory=ReviewMemory(tmp_path / "steps"))
+    await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))  # remembered
+    await Publisher(github, REPO, 7, head_sha="a" * 40, author=BOT, block_at=1)(blocking(5))
+    github.review_comments[-1]["outdated"] = True
+    head = add_commit(repo, {changed: "# changed\n"})
+    github.head_shas = [head]
+    await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
+    assert github.settled_threads == settled
+
+
+@pytest.mark.parametrize(("kind", "settled"), [("lint", set()), ("types", {"T1"})])
+async def test_a_file_whose_unused_imports_went_unchecked_settles_no_lint_finding(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, settled: set[str]
+) -> None:
+    """From the bot's review of #44: an unreadable merge-base skips that file's unused-import check, not its types."""
+
+    async def base_unreadable(*_: object, unchecked: set[str] | None = None) -> list[Finding]:
+        assert unchecked is not None
+        unchecked.add("stats.py")
+        return []
+
+    github = await outdated(repo, kind)
+    monkeypatch.setattr(job, "lint_findings", base_unreadable)
+    await review_and_post(job_deps(github, tmp_path), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
+    assert github.settled_threads == settled

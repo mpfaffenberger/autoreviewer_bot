@@ -85,15 +85,17 @@ class ReviewThread:
     resolved: bool
     """Resolved on GitHub, by a person: a GitHub App can't resolve threads without write access to the code."""
     root_node_id: str
+    hidden: bool
+    """Its first comment is minimized, for any reason, by the bot or by a moderator."""
     settled: bool
-    """Its first comment is minimized: how the bot marks a thread done, since it can't resolve it."""
+    """Minimized as resolved: how the bot marks a thread done, since it can't resolve it."""
 
 
 _REVIEW_THREADS = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     reviewThreads(first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
-      nodes { id isResolved comments(first: 1) { nodes { databaseId id isMinimized } } }
+      nodes { id isResolved comments(first: 1) { nodes { databaseId id isMinimized minimizedReason } } }
     }
   } }
 }"""
@@ -383,6 +385,9 @@ class GitHubApp:
                     bool(node["isResolved"]),
                     str(root["id"]),
                     bool(root["isMinimized"]),
+                    # minimizedReason is a String, lowercased, not the classifier enum the mutation takes
+                    # ("RESOLVED"): live on #44, Nov 19, comment 4635273385 read minimizedReason=resolved.
+                    bool(root["isMinimized"]) and root.get("minimizedReason") == "resolved",
                 )
                 for node in page["nodes"]
                 if (root := next(iter(node["comments"]["nodes"]), None))
