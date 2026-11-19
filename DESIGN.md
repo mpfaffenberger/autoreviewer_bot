@@ -315,17 +315,19 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
   instructions don't count. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn
   -->`.
 
-**Withdrawals change the verdict, decided by code** (`posting.withdrawn_placements`, `posting.reconsider`).
+**Withdrawals change the verdict, decided by code** (`posting.withdrawn_threads`, `posting.reconsider`).
 
-- A finding stands withdrawn when the latest answer in its thread withdrew it and GitHub still shows the
-  comment on the current head (an outdated comment means the code changed: judged afresh).
+- A finding stands withdrawn when the latest answer in its own thread withdrew it. Answers end with code-written
+  markers (`<!-- autoreviewer:answers <id> -->`, then `<!-- autoreviewer:withdrawn -->` for a withdrawal), and
+  only markers at the very end of an answer count: text the model was led to write can't withdraw anything.
+- Every verdict ends with a state line just before its marker: `<!-- autoreviewer:state EVENT outside=N
+  complete=0|1 -->`. N counts blocking findings listed with no thread to withdraw them in.
 - After a withdrawal, a separate durable step reconsiders the head: if its latest verdict requested changes
-  and no blocking finding is left standing (a non-advisory finding comment at the blocking priority, not
-  withdrawn), the bot approves and posts a green check. Every verdict body records its state and how many
-  blocking findings it listed outside the diff (`<!-- autoreviewer:state ... outside=N -->`); those have no
-  thread, so a verdict with outside > 0, or one from before the marker, is never overturned.
-- On a later push, a finding found again where one stands withdrawn is posted once (as ever) but doesn't
-  block: `Outcome.withdrawn`, applied by the job before the verdict and the check.
+  after a complete review with outside=0, and no blocking finding comment on the head is left standing (each
+  checked against its own thread), the bot posts a green check, then an approval.
+- On a later push, a finding found again is unblocked only if it's the withdrawn one: same place, kind, and
+  title (normalised), and no more urgent; GitHub must still show the old comment there (unchanged code).
+  Anything else blocks as usual.
 
 **Outbound sanitising:** model text has `@mentions` neutralised (wrapped in
 backticks) before posting. Otherwise an injected PR could make us spam-ping

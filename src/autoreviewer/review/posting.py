@@ -15,9 +15,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 
 from autoreviewer.github import PostedComment, PullRequests, Repo, ReviewComment, ReviewEvent, ReviewRejected
-from autoreviewer.review.pipeline import Outcome, blocks, same_defect
+from autoreviewer.review.pipeline import Outcome, Withdrawal, blocks, blocks_at, normal_title, same_defect
 from autoreviewer.review.render import comment_body, review_body
-from autoreviewer.review.schemas import ADVISORY_KINDS, Finding
+from autoreviewer.review.schemas import Finding
 
 logger = logging.getLogger("autoreviewer.posting")
 
@@ -40,41 +40,53 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
 
 
 WITHDRAWN_MARKER = "<!-- autoreviewer:withdrawn -->"
-"""Ends an answer that withdrew its thread's finding after re-checking the code (conversation.py)."""
-_ANSWERS = re.compile(r"<!-- autoreviewer:answers (\d+) -->")
-_STATE = re.compile(r"<!-- autoreviewer:state (APPROVE|REQUEST_CHANGES|COMMENT) outside=(\d+) -->")
-"""In every verdict's body: its event, and how many blocking findings it listed outside the diff (no thread to
-withdraw them in). A withdrawal only ever overturns a verdict that says outside=0."""
+"""The last line of an answer that withdrew its thread's finding after re-checking the code (conversation.py)."""
+_ANSWER_END = re.compile(r"<!-- autoreviewer:answers (\d+) -->(\n<!-- autoreviewer:withdrawn -->)?\Z")
+"""Only the markers that end an answer count: code appends them after the model's text, so nothing the model was
+led to write can claim an answer or withdraw a finding."""
+_VERDICT_STATE = re.compile(
+    r"<!-- autoreviewer:state (APPROVE|REQUEST_CHANGES|COMMENT) outside=(\d+) complete=([01]) -->\n"
+    + re.escape(VERDICT_MARKER)
+    + r"\Z"
+)
+"""The line before a verdict's own marker, at the very end of its body (anchored there for the same reason): its
+event, how many blocking findings it listed with no thread to withdraw them in, and whether the review covered
+the whole change. A withdrawal only ever overturns a complete verdict that requested changes with outside=0."""
+_TITLE = re.compile(r"\A\*\*\[P[0-3]\] ([^\n]*)\*\* \(")
+
 
 Placement = tuple[str, int, str]
 """(path, line on the current head, kind): where GitHub shows a finding comment."""
 
 
-def answered_marker(comment_id: int) -> str:
-    return f"<!-- autoreviewer:answers {comment_id} -->"
+def answer_markers(comment_id: int, *, withdrawn: bool) -> str:
+    """What ends an answer to `comment_id` (appended by code, after the model's text)."""
+    return f"<!-- autoreviewer:answers {comment_id} -->" + (f"\n{WITHDRAWN_MARKER}" if withdrawn else "")
 
 
-def answered(body: str) -> int | None:
-    """The comment an answer of the bot's answers, from its marker."""
-    return int(match[1]) if (match := _ANSWERS.search(body)) else None
+def answered(body: str) -> tuple[int, bool] | None:
+    """The id of the comment an answer answers, and whether it withdrew the finding, read from the markers that
+    end it; None if it doesn't end with them."""
+    return (int(match[1]), match[2] is not None) if (match := _ANSWER_END.search(body)) else None
 
 
-def withdrawn_placements(comments: Iterable[PostedComment]) -> frozenset[Placement]:
-    """Where the bot's finding comments stand withdrawn: the latest answer in the thread withdrew the finding
-    (a later answer may reinstate it), and GitHub still shows the comment on the current head."""
+def withdrawn_threads(comments: Iterable[PostedComment]) -> dict[int, PostedComment]:
+    """The bot's finding comments whose thread withdrew them, by id: the latest answer decides, so a later answer
+    can reinstate a finding."""
     comments = sorted(comments, key=lambda comment: comment.id)
-    latest: dict[int, PostedComment] = {}
-    for comment in comments:
-        if comment.in_reply_to is not None and answered(comment.body) is not None:
-            latest[comment.in_reply_to] = comment  # a later answer replaces an earlier one
-    withdrawn = set[Placement]()
-    for root in comments:
-        answer, match = latest.get(root.id), finding_marker(root.body)
-        if root.in_reply_to is not None or root.line is None or match is None or not match[3]:
-            continue  # a reply, outdated, not a finding, or from before markers recorded kinds
-        if answer is not None and WITHDRAWN_MARKER in answer.body:
-            withdrawn.add((root.path, root.line, match[3]))
-    return frozenset(withdrawn)
+    latest = {c.in_reply_to: answer for c in comments if c.in_reply_to is not None and (answer := answered(c.body))}
+    findings = {c.id: c for c in comments if c.in_reply_to is None and finding_marker(c.body)}
+    return {root: findings[root] for root, (_, withdrew) in latest.items() if withdrew and root in findings}
+
+
+def withdrawals(comments: Iterable[PostedComment]) -> tuple[Withdrawal, ...]:
+    """The withdrawn findings GitHub still shows on the current head, as a later review should see them."""
+    found = []
+    for root in withdrawn_threads(comments).values():
+        match, title = finding_marker(root.body), _TITLE.match(root.body)
+        if root.line is not None and match and match[3] and title:  # outdated, or from before kinds were recorded
+            found.append(Withdrawal(root.path, root.line, match[3], int(match[2]), normal_title(title[1])))
+    return tuple(found)
 
 
 def finding_marker(body: str) -> re.Match[str] | None:
@@ -110,7 +122,6 @@ class Publisher:
         """Fingerprint -> the most urgent priority posted for it (this review, or found on the PR)."""
         self._findings: list[Finding] = []
         self._existing: dict[str, int] | None = None
-        self._comments: list[PostedComment] = []
         self._placed: dict[Placement, int] = {}
         """(path, line on this head, kind) -> the most urgent priority of the comments of that kind GitHub still
         shows there, from any commit: a superseded review's comments cover the same defect on the new head. Only
@@ -148,23 +159,19 @@ class Publisher:
             self.posted[key] = finding.priority
             self._findings.append(finding)  # only once its comment exists can it stand in for a duplicate
 
-    async def withdrawn(self) -> frozenset[Placement]:
-        """Placements whose findings stand withdrawn in conversation: a finding found there again doesn't block.
-        Empty (and logged) if the PR's comments can't be read: the verdict then counts every finding."""
+    async def withdrawn(self) -> tuple[Withdrawal, ...]:
+        """The findings withdrawn in conversation, read afresh (an answer may have come in during the review). Empty,
+        and logged, if the PR's comments can't be read: the verdict then counts every finding."""
         try:
-            async with self._lock:
-                if self._existing is None:
-                    await self._load_existing()
+            return withdrawals(await self._github.posted_comments(self._repo, self._number, author=self._author))
         except Exception:
             logger.warning("could not read the PR's comments; withdrawals not applied", exc_info=True)
-            return frozenset()
-        return withdrawn_placements(self._comments)
+            return ()
 
     async def _load_existing(self) -> dict[str, int]:
         """Fingerprints (and placements) of the bot's comments on the PR. Recorded only once the fetch succeeds,
         so a failed fetch is retried with the next finding instead of switching dedupe off for the review."""
         comments = await self._github.posted_comments(self._repo, self._number, author=self._author)
-        self._comments = comments
         existing: dict[str, int] = {}
         for comment in comments:
             if not (match := _MARKER.search(comment.body)):
@@ -201,66 +208,80 @@ async def post_review(
         # also wraps each early inline comment in an empty review of its own; those never count.)
         logger.info("%s/%s#%d at %s already reviewed; not posting again", repo.owner, repo.name, number, head_sha[:7])
         return
-    footer = f"<sub>autoreviewer · {models_note} · `{head_sha[:7]}`</sub>\n\n{marker}"
     event: ReviewEvent = "REQUEST_CHANGES" if outcome.blocking else "COMMENT" if partial else "APPROVE"
     unposted = [f for f in outcome.inline if not covered(posted or {}, fingerprint(head_sha, f), f)]
+
+    def footer(outside: int) -> str:
+        state = state_marker(event, outside=outside, complete=not outcome.cut_short)
+        return verdict_footer(models_note, head_sha, state, marker)
+
+    outside = sum(outcome.is_blocking(f) for f in outcome.general)
     try:
         await github.create_review(
             repo,
             number,
             commit_sha=head_sha,
             event=event,
-            body=review_body(outcome, footer=f"{state_marker(event, outcome)}\n{footer}"),
+            body=review_body(outcome, footer=footer(outside)),
             comments=[inline_comment(f, head_sha=head_sha, block_at=outcome.block_at) for f in unposted],
         )
     except ReviewRejected:
         # GitHub's diff view can differ from ours (e.g. files it doesn't render). Keep every finding, just
-        # not inline: same verdict, the unposted findings listed in the review body.
+        # not inline: same verdict, the unposted findings listed in the review body (with no thread: outside).
         logger.warning("inline comments rejected for %s/%s#%d; listing them in the body", repo.owner, repo.name, number)
         listed = replace(outcome, inline=[], general=[*outcome.general, *outcome.inline])
-        body = review_body(listed, footer=f"{state_marker(event, listed)}\n{footer}")
-        await github.create_review(repo, number, commit_sha=head_sha, event=event, body=body, comments=[])
+        outside += sum(outcome.is_blocking(f) for f in unposted)
+        await github.create_review(
+            repo,
+            number,
+            commit_sha=head_sha,
+            event=event,
+            body=review_body(listed, footer=footer(outside)),
+            comments=[],
+        )
 
 
-def state_marker(event: ReviewEvent, outcome: Outcome) -> str:
-    outside = sum(outcome.is_blocking(f) for f in outcome.general)
-    return f"<!-- autoreviewer:state {event} outside={outside} -->"
+def state_marker(event: ReviewEvent, *, outside: int, complete: bool) -> str:
+    return f"<!-- autoreviewer:state {event} outside={outside} complete={int(complete)} -->"
+
+
+def verdict_footer(note: str, head_sha: str, state: str, marker: str) -> str:
+    """What ends every verdict: who and what reviewed, then the state line, then the marker, last."""
+    return f"<sub>autoreviewer · {note} · `{head_sha[:7]}`</sub>\n\n{state}\n{marker}"
 
 
 async def reconsider(github: PullRequests, repo: Repo, number: int, *, author: str, block_at: int) -> bool:
-    """After a withdrawal: approve the current head if its verdict requested changes and no blocking finding is
-    left standing. Decided by code from the PR's comments, never by the model; True if it approved.
-
-    Standing: a finding comment GitHub still shows on the head, at the blocking priority, of a kind that can
-    block, and not withdrawn. Never overturned: a verdict that listed blocking findings outside the diff (they
-    have no thread), or one from before verdicts recorded that (no state marker)."""
+    """After a withdrawal: approve the current head if its latest verdict requested changes after a complete
+    review, listed no blocking finding without a thread (outside=0), and no blocking finding comment on it is
+    left standing (each was withdrawn in its own thread). Decided by code from the PR's comments, never by the
+    model; True if it approved. A replay finds the approval as the latest verdict and does nothing."""
     state = await github.get_pull(repo, number)
-    bodies = [b for b in await github.review_bodies(repo, number, commit_sha=state.head_sha, author=author) if b]
-    verdicts = [match for body in bodies if (match := _STATE.search(body)) and body.endswith(VERDICT_MARKER)]
-    if state.state != "open" or not verdicts or verdicts[-1][1] != "REQUEST_CHANGES" or verdicts[-1][2] != "0":
+    if state.state != "open":
+        return False
+    bodies = await github.review_bodies(repo, number, commit_sha=state.head_sha, author=author)
+    verdicts = [match.groups() for body in bodies if (match := _VERDICT_STATE.search(body))]
+    if not verdicts or verdicts[-1] != ("REQUEST_CHANGES", "0", "1"):
         return False
     comments = await github.posted_comments(repo, number, author=author)
-    withdrawn = withdrawn_placements(comments)
-    for comment in comments:
-        match = finding_marker(comment.body)
-        if comment.in_reply_to is not None or comment.line is None or match is None:
-            continue
-        priority, kind = int(match[2]), match[3]
-        if priority <= block_at and kind not in ADVISORY_KINDS and (comment.path, comment.line, kind) not in withdrawn:
-            return False  # still standing (a marker without a kind counts: it may well block)
-    footer = f"<sub>autoreviewer · re-checked in conversation · `{state.head_sha[:7]}`</sub>\n\n{VERDICT_MARKER}"
-    body = (
-        "Every blocking finding on this commit was withdrawn after a re-check of the code in its thread.\n\n"
-        f"<!-- autoreviewer:state APPROVE outside=0 -->\n{footer}"
-    )
-    await github.create_review(repo, number, commit_sha=state.head_sha, event="APPROVE", body=body, comments=[])
+    withdrawn = withdrawn_threads(comments)
+    standing = [
+        comment
+        for comment in comments
+        if comment.in_reply_to is None
+        and comment.line is not None
+        and comment.id not in withdrawn
+        and (match := finding_marker(comment.body))
+        and blocks_at(match[3], int(match[2]), block_at)
+    ]
+    if standing:
+        return False
+    # The green check first: a retry after a failure here never leaves an approval beside a red check.
     check = await github.start_check(repo, state.head_sha)
-    await github.finish_check(
-        repo,
-        check,
-        conclusion="success",
-        title="Approved",
-        summary="Every blocking finding was withdrawn in conversation.",
-    )
+    summary = "Each blocking finding was withdrawn in its thread after a re-check of the code."
+    await github.finish_check(repo, check, conclusion="success", title="Approved", summary=summary)
+    state_line = state_marker("APPROVE", outside=0, complete=True)
+    footer = verdict_footer("re-checked in conversation", state.head_sha, state_line, VERDICT_MARKER)
+    body = f"No blocking finding is left standing on this commit. {summary}\n\n{footer}"
+    await github.create_review(repo, number, commit_sha=state.head_sha, event="APPROVE", body=body, comments=[])
     logger.info("%s/%s#%d at %s: approved after withdrawals", repo.owner, repo.name, number, state.head_sha[:7])
     return True

@@ -20,7 +20,7 @@ from pydantic_ai import Agent
 
 from autoreviewer.github import Conversations, Repo, ThreadComment
 from autoreviewer.review.agents import CONVERSATION_LIMITS
-from autoreviewer.review.posting import WITHDRAWN_MARKER, answered, answered_marker, finding_marker, reconsider
+from autoreviewer.review.posting import answer_markers, answered, finding_marker, reconsider
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ThreadAnswer
 from autoreviewer.review.workspace import RepoSource, Workspace
@@ -52,12 +52,12 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
     """Answer `reply` once, if it's under one of the bot's findings. A re-run (say, after a crash) finds an answer
     already posted by its marker, so it doesn't answer twice; two runs for one comment that overlap could, which
     the durable workflow's ID (one per comment) rules out."""
-    repo = Repo(reply.installation_id, reply.owner, reply.repo)
+    repo = _repo(reply)
     thread = await deps.github.thread(repo, reply.number, reply.root_id)
     if not thread or thread[0].author != deps.bot_login or finding_marker(thread[0].body) is None:
         return "not our thread"
     answers = [comment for comment in thread[1:] if comment.author == deps.bot_login]
-    if any(answered(comment.body) == reply.comment_id for comment in answers):
+    if any((done := answered(comment.body)) and done[0] == reply.comment_id for comment in answers):
         return "already answered"
     if len(answers) >= MAX_ANSWERS:
         logger.info("%s/%s#%d thread %d: %d answers already", reply.owner, reply.repo, reply.number, reply.root_id,
@@ -76,8 +76,8 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
     withdrawn = verdict.finding == "withdrawn"
     logger.info("%s/%s#%d thread %d: finding %s (%s)", reply.owner, reply.repo, reply.number, reply.root_id,
                 verdict.finding, verdict.reason)  # fmt: skip
-    body = f"{sanitize(verdict.reply)}\n\n{answered_marker(reply.comment_id)}"
-    await deps.github.reply(repo, reply.number, reply.root_id, body + (f"\n{WITHDRAWN_MARKER}" if withdrawn else ""))
+    body = f"{sanitize(verdict.reply)}\n\n{answer_markers(reply.comment_id, withdrawn=withdrawn)}"
+    await deps.github.reply(repo, reply.number, reply.root_id, body)
     return "withdrawn" if withdrawn else "answered"
 
 
@@ -99,5 +99,8 @@ def _prompt(title: str, thread: list[ThreadComment], comment_id: int) -> str:
 
 async def reconsider_verdict(deps: ConversationDeps, reply: ThreadReply) -> bool:
     """After a withdrawal: approve the PR's head if nothing blocking is left standing (posting.reconsider)."""
-    repo = Repo(reply.installation_id, reply.owner, reply.repo)
-    return await reconsider(deps.github, repo, reply.number, author=deps.bot_login, block_at=deps.block_at)
+    return await reconsider(deps.github, _repo(reply), reply.number, author=deps.bot_login, block_at=deps.block_at)
+
+
+def _repo(reply: ThreadReply) -> Repo:
+    return Repo(reply.installation_id, reply.owner, reply.repo)
