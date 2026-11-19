@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.servers import CONTEXT_WINDOWS
-from autoreviewer.web.config import AgentKind, Settings
+from autoreviewer.web.config import AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -120,7 +120,7 @@ class ModelPlan:
 
     def verifier(self, kind: AgentKind) -> tuple[Model, int]:
         """The model and its context window for the agent that checks `kind`'s findings."""
-        return self._build(self.models[f"{kind}.verifier"])
+        return self._build(self.models[verifier_role(kind)])
 
     def _build(self, name: str) -> tuple[Model, int]:
         from autoreviewer.review.agents import boodleton_model
@@ -137,10 +137,8 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
 def correctness_agents(plan: ModelPlan) -> AgentFactory:
     from autoreviewer.review.agents import correctness_agent, verifier_agent
 
-    (lens_model, lens_window), (verifier_model, verifier_window) = (
-        plan.finder("correctness"),
-        plan.verifier("correctness"),
-    )
+    lens_model, lens_window = plan.finder("correctness")
+    verifier_model, verifier_window = plan.verifier("correctness")
     return lambda workspace: (
         correctness_agent(lens_model, workspace, context_window=lens_window),
         verifier_agent(verifier_model, workspace, context_window=verifier_window),
@@ -167,7 +165,8 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
     """(lens, verifier) for `kind` over a checkout, on the plan's models for it: shared by the bot and the evals."""
     from autoreviewer.review.agents import lens_pair
 
-    (lens_model, lens_window), (verifier_model, verifier_window) = plan.finder(kind), plan.verifier(kind)
+    lens_model, lens_window = plan.finder(kind)
+    verifier_model, verifier_window = plan.verifier(kind)
     return lambda workspace: lens_pair(
         kind, lens_model, verifier_model, workspace, lens_window=lens_window, verifier_window=verifier_window
     )
@@ -194,7 +193,8 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
     from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
     from autoreviewer.review.simplify import Simplifier
 
-    (propose_model, propose_window), (check_model, check_window) = plan.finder("simplify"), plan.verifier("simplify")
+    propose_model, propose_window = plan.finder("simplify")
+    check_model, check_window = plan.verifier("simplify")
     return lambda workspace: Simplifier(
         simplify_agent(propose_model, workspace, context_window=propose_window),
         simplify_checker_agent(check_model, workspace, context_window=check_window),
@@ -210,7 +210,7 @@ def models_note(settings: Settings) -> str:
         enabled.append(("dry", "DRY"))
     groups: dict[tuple[str, str], list[str]] = {}
     for kind, name in enabled:
-        groups.setdefault((settings.models[kind], settings.models[f"{kind}.verifier"]), []).append(name)
+        groups.setdefault((settings.models[kind], settings.models[verifier_role(kind)]), []).append(name)
     return "; ".join(
         f"{_and(names)} by `{finder}`, verified by `{checker}`" for (finder, checker), names in groups.items()
     )

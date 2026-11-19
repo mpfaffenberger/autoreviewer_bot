@@ -15,8 +15,15 @@ DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
 AgentKind = Literal["correctness", "security", "dry", "simplify"]
 """Each kind has a finder (the role named after it) and a checker (`<kind>.verifier`)."""
 AGENT_KINDS: tuple[AgentKind, ...] = get_args(AgentKind)
-AGENT_ROLES = (*AGENT_KINDS, *(f"{kind}.verifier" for kind in AGENT_KINDS))
-DEFAULT_MODELS = {role: DEEPSEEK if role.endswith(".verifier") else QWEN for role in AGENT_ROLES}
+
+
+def verifier_role(kind: AgentKind) -> str:
+    """The role of the agent that checks `kind`'s findings: the one place the `<kind>.verifier` name is made."""
+    return f"{kind}.verifier"
+
+
+AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS))
+DEFAULT_MODELS = {**dict.fromkeys(AGENT_KINDS, QWEN), **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK)}
 """Finders on Qwen (fast), checkers on DeepSeek (better): pin any role to change it (AUTOREVIEWER_MODELS)."""
 
 
@@ -131,8 +138,8 @@ def models_from(env: Mapping[str, str]) -> dict[str, str]:
             raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
         models[role] = model
     for kind in AGENT_KINDS:
-        if models[kind] == models[f"{kind}.verifier"]:
-            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {kind}.verifier are both {models[kind]!r}")
+        if models[kind] == models[verifier_role(kind)]:
+            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
     return models
 
 
