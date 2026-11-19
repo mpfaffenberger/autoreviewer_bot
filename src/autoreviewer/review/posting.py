@@ -108,6 +108,12 @@ def covered[Key](posted: Mapping[Key, int], key: Key, finding: Finding) -> bool:
     return key in posted and posted[key] <= finding.priority
 
 
+def placement(path: str, line: int, kind: str) -> Placement:
+    """Where a comment of one kind sits on the current head: what a finding and a comment GitHub shows are matched
+    by, across heads (the fingerprint, by contrast, is per head)."""
+    return (path, line, kind)
+
+
 def inline_comment(finding: Finding, *, head_sha: str, block_at: int) -> ReviewComment:
     body = comment_body(finding, blocking=blocks(finding, block_at))
     return ReviewComment(
@@ -132,9 +138,9 @@ class Publisher:
         """What this review posted, or found already standing on the PR for the same defect."""
         self._existing: dict[str, int] | None = None
         self._placed: dict[Placement, int] = {}
-        """(path, line on this head, kind) -> the most urgent priority of the comments of that kind GitHub still
-        shows there, from any commit: a superseded review's comments cover the same defect on the new head. Only
-        markers that record a kind count (older ones can't be placed)."""
+        """placement() -> the most urgent priority of the comments of that kind GitHub still shows there, from a
+        superseded review: its comments cover the same defect on the new head. Only markers that record a kind
+        count (older ones can't be placed)."""
         self._lock = asyncio.Lock()
 
     @property
@@ -152,7 +158,7 @@ class Publisher:
                 if covered(existing, key, finding) or covered(self.posted, key, finding):
                     self.posted[key] = min(finding.priority, existing.get(key, 3), self.posted.get(key, 3))
                     return
-                where = (finding.path, finding.line, finding.kind)
+                where = placement(finding.path, finding.line, finding.kind)
                 if covered(self._placed, where, finding):  # posted for an earlier commit, still on this line
                     self.posted[key] = self._placed[where]
                     self._findings.append(finding)  # its comment exists: it stands in for the other lens's too
@@ -193,7 +199,7 @@ class Publisher:
             fp, priority, kind = match[1], int(match[2]), match[3]
             existing[fp] = min(priority, existing.get(fp, 3))
             if kind and comment.line is not None:
-                where = (comment.path, comment.line, kind)
+                where = placement(comment.path, comment.line, kind)
                 self._placed[where] = min(priority, self._placed.get(where, 3))
         self._existing = existing
         return existing
