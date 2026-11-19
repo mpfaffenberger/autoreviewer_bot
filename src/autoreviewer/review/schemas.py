@@ -24,9 +24,9 @@ CONFIDENCE_HELP = (
 )
 
 
-LensKind = Literal["security", "dry"]
+LensKind = Literal["security", "dry", "docs", "tests"]
 """Lenses beyond correctness: each reviews the PR fresh and has its own verifier."""
-ADVISORY_KINDS = frozenset({"simplify", "dry", "lint"})
+ADVISORY_KINDS = frozenset({"simplify", "dry", "docs", "tests", "lint"})
 """Findings of these kinds are suggestions: they never block a merge, at any priority."""
 
 
