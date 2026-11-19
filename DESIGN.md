@@ -338,6 +338,16 @@ people.
 
 ---
 
+**The bot resolves threads that are settled** (Mike, Nov 19). A thread follows the latest answer in it:
+resolved once its finding is withdrawn, reopened if a later answer says the finding holds. After every review,
+`posting.resolve_fixed` also resolves the threads of findings the code has moved past. Three conditions:
+GitHub shows the comment as outdated, so the code under it changed; the review checked that kind in full
+(`Outcome.covered`: its lens finished, wasn't cut short or capped, or for lint kinds, ruff ran); and it
+reported nothing of that kind in that file, in any state. The last rule is conservative on purpose, so a
+reworded finding or another one in the same file keeps the thread open. A reply naming the reviewed commit comes
+first. Nothing is resolved on merge or close, so advice that was never acted on stays visible. Thread updates
+never cost a review or an answer: a failure is logged.
+
 ## 6. State
 
 Two stores, each with one job:

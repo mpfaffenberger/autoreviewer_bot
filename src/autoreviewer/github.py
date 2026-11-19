@@ -76,6 +76,29 @@ class ThreadComment:
     path: str = ""
 
 
+@dataclass(frozen=True)
+class ReviewThread:
+    """An inline comment thread, as GitHub's GraphQL API names it (resolving takes its node id)."""
+
+    id: str
+    root_comment_id: int
+    resolved: bool
+
+
+_REVIEW_THREADS = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    reviewThreads(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id isResolved comments(first: 1) { nodes { databaseId } } }
+    }
+  } }
+}"""
+_SET_THREAD_RESOLVED = {
+    True: "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
+    False: "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
+}
+
+
 class CommitNotFound(Exception):
     """GitHub doesn't know one of the commits, e.g. an old head garbage-collected after a force-push."""
 
@@ -131,6 +154,14 @@ class PullRequests(PullRequestReader, Protocol):
         """Every inline comment `author` left on the PR, where GitHub places it on the current head."""
         ...
 
+    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None:
+        """A reply in the thread whose first comment is `root_id`."""
+        ...
+
+    async def review_threads(self, repo: Repo, number: int) -> list[ReviewThread]: ...
+
+    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None: ...
+
 
 class Conversations(PullRequests, Protocol):
     """What answering a reply in one of the bot's threads needs: read the thread and reply in it, plus what a
@@ -139,8 +170,6 @@ class Conversations(PullRequests, Protocol):
     async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
         """The thread's first comment, then its replies, oldest first."""
         ...
-
-    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None: ...
 
 
 async def _get_pull(github: GitHub, repo: Repo, number: int) -> PullRequestState:
@@ -331,6 +360,28 @@ class GitHubApp:
         await github.rest.pulls.async_create_reply_for_review_comment(
             repo.owner, repo.name, number, root_id, data={"body": body}
         )
+
+    async def review_threads(self, repo: Repo, number: int) -> list[ReviewThread]:
+        github = self._as_installation(repo.installation_id)
+        threads: list[ReviewThread] = []
+        after: str | None = None
+        while True:
+            variables = {"owner": repo.owner, "name": repo.name, "number": number, "after": after}
+            page = (await github.async_graphql(_REVIEW_THREADS, variables))["repository"]["pullRequest"][
+                "reviewThreads"
+            ]
+            threads += [
+                ReviewThread(str(node["id"]), int(node["comments"]["nodes"][0]["databaseId"]), bool(node["isResolved"]))
+                for node in page["nodes"]
+                if node["comments"]["nodes"]
+            ]
+            if not page["pageInfo"]["hasNextPage"]:
+                return threads
+            after = page["pageInfo"]["endCursor"]
+
+    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None:
+        github = self._as_installation(repo.installation_id)
+        await github.async_graphql(_SET_THREAD_RESOLVED[resolved], {"id": thread_id})
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         return [

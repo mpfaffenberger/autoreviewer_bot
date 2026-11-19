@@ -131,8 +131,30 @@ async def test_a_reply_gets_one_sanitized_answer_in_the_thread(repo: GitRepo, tm
     assert len(github.review_comments) == 3
 
 
-async def test_a_withdrawal_is_marked(repo: GitRepo, tmp_path: Path) -> None:
+@pytest.mark.parametrize(("verdict", "result"), [("withdrawn", "withdrawn"), ("holds", "answered")])
+async def test_a_withdrawal_is_marked_and_its_thread_resolved(
+    repo: GitRepo, tmp_path: Path, verdict: str, result: str
+) -> None:
+    """Mike, Nov 19: the bot resolves what's settled. A finding that holds stays open."""
     github, reply = await thread_with_reply(repo)
+    assert await answer(deps(github, repo, tmp_path, scripted(verdict)), reply) == result
+    withdrawn = verdict == "withdrawn"
+    assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=withdrawn))
+    assert github.resolved_threads == ({"T1"} if withdrawn else set())
+
+
+async def test_a_finding_that_holds_again_reopens_its_thread(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #42: a withdrawal isn't final, and a reinstated finding mustn't stay hidden."""
+    github, reply = await thread_with_reply(repo)
+    github.resolved_threads.add("T1")  # withdrawn earlier, and resolved with it
+    assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
+    assert github.resolved_threads == set()
+
+
+async def test_a_thread_github_wont_update_costs_nothing(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #42 (P1): raising here would retry the answer and skip reconsidering the verdict."""
+    github, reply = await thread_with_reply(repo)
+    github.fail_threads = True
     assert await answer(deps(github, repo, tmp_path, scripted("withdrawn")), reply) == "withdrawn"
     assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=True))
 
