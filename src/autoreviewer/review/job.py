@@ -41,7 +41,7 @@ from autoreviewer.review.pipeline import (
     review,
     review_lens,
 )
-from autoreviewer.review.posting import Publisher, post_review, resolve_fixed
+from autoreviewer.review.posting import Publisher, post_review, settle_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
@@ -110,7 +110,7 @@ async def _survive(kind: str, block_at: int, run: Awaitable[Outcome], paths: Ite
     except Exception:
         logger.warning("the %s lens failed; the review goes on without it", kind, exc_info=True)
         return Outcome(block_at=block_at, failed={kind})
-    outcome.covered |= {(kind, path) for path in paths}  # only a lens that ran to the end (resolve_fixed)
+    outcome.covered |= {(kind, path) for path in paths}  # only a lens that ran to the end (settle_fixed)
     return outcome
 
 
@@ -512,11 +512,11 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         posted=publisher.posted,
     )
     try:  # tidying up, after the verdict: a failure here must never cost the review
-        await resolve_fixed(
+        await settle_fixed(
             deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=result.outcome
         )
     except Exception:
-        logger.warning("%s at %s: could not resolve fixed findings", conversation, pull.head_sha[:7], exc_info=True)
+        logger.warning("%s at %s: could not settle fixed findings", conversation, pull.head_sha[:7], exc_info=True)
     return _summary(result.outcome)
 
 

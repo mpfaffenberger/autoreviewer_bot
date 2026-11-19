@@ -348,9 +348,12 @@ people.
 
 ---
 
-**The bot resolves threads that are settled** (Mike, Nov 19). A withdrawn finding's thread is resolved with the
-answer, and reopened if a later answer reinstates the finding. A thread closed for any other reason stays closed.
-After every review, `posting.resolve_fixed` also resolves the threads of findings the code has moved past.
+**The bot settles threads that are done** (Mike, Nov 19). It can't resolve them: a GitHub App needs write
+access to the code for that (live on #44: FORBIDDEN with `pull_requests: write`), which the bot isn't given.
+So it minimizes the thread's finding as resolved (`minimizeComment`), which collapses it out of the way;
+resolving stays the author's. A withdrawn finding is settled with the answer, and shown again if a later answer
+reinstates it. A thread done for any other reason, whether resolved by a person or settled after a fix, stays
+as it is. After every review, `posting.settle_fixed` also settles the findings the code has moved past.
 Three conditions:
 - GitHub shows the comment as outdated, so the code under it changed.
 - This review checked that kind in that file in full (`Outcome.covered`, kind and path). The lens finished over
@@ -360,8 +363,8 @@ Three conditions:
   lens's on the same line (`Outcome.merged`).
 
 The rules are conservative on purpose: a reworded finding, or another one in the same file, keeps the thread
-open. The thread is resolved before the note goes up, so a failed resolve leaves no note claiming otherwise.
-Nothing is resolved on merge or close, so advice that was never acted on stays visible. Thread updates never
+open. The finding is settled before the note goes up, so a failed update leaves no note claiming otherwise.
+Nothing is settled on merge or close, so advice that was never acted on stays visible. Thread updates never
 cost a review or an answer: a failure is logged.
 
 ## 6. State

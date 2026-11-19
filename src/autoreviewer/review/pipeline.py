@@ -107,7 +107,7 @@ class Outcome:
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
     covered: set[tuple[str, str]] = field(default_factory=set[tuple[str, str]])
     """(kind, path) pairs this review checked in full: the lens finished over that file, and wasn't cut short or
-    capped. Only a comment on a covered pair can be called fixed (posting.resolve_fixed)."""
+    capped. Only a comment on a covered pair can be called fixed (posting.settle_fixed)."""
     merged: list[Finding] = field(default_factory=list[Finding])
     """Findings `absorb` folded into another lens's on the same line: not posted, but still reported."""
     withdrawn: tuple[Withdrawal, ...] = ()

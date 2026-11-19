@@ -101,9 +101,9 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
     body = f"{sanitize(text)}\n\n{answer_markers(reply.comment_id, withdrawn=withdrawn)}"
     await deps.github.reply(repo, reply.number, reply.root_id, body)
     last = next((done for comment in reversed(answers) if (done := answered(comment.body))), None)
-    try:  # resolved once withdrawn; reopened only if this reinstates a withdrawal. Other closes aren't ours to undo.
+    try:  # settled once withdrawn; shown again only if this reinstates a withdrawal. Other closes aren't ours.
         if withdrawn or (last is not None and last[1]):
-            await mark_thread(deps.github, repo, reply.number, reply.root_id, resolved=withdrawn)
+            await mark_thread(deps.github, repo, reply.number, reply.root_id, settled=withdrawn)
     except Exception:  # tidying up: never at the cost of the answer, or of reconsidering the verdict after it
         logger.warning("could not update the thread under comment %d", reply.root_id, exc_info=True)
     return "withdrawn" if withdrawn else "answered"

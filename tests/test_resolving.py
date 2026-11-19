@@ -12,7 +12,7 @@ from autoreviewer.review.job import Lens, review_and_post
 from autoreviewer.review.lint import LintError
 from autoreviewer.review.memory import ReviewMemory
 from autoreviewer.review.pipeline import Outcome
-from autoreviewer.review.posting import Publisher, resolve_fixed
+from autoreviewer.review.posting import Publisher, settle_fixed
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, add_commit, finding, job_deps, lens_agents
@@ -36,15 +36,18 @@ CHECKED = Outcome(covered={("correctness", "stats.py")})
 
 
 async def resolve(github: FakeGitHub, outcome: Outcome = CHECKED) -> list[int]:
-    return await resolve_fixed(github, REPO, 7, head_sha=NEXT_HEAD, author=BOT, outcome=outcome)
+    return await settle_fixed(github, REPO, 7, head_sha=NEXT_HEAD, author=BOT, outcome=outcome)
 
 
 async def test_a_finding_the_review_found_nothing_like_is_resolved_with_a_note(repo: GitRepo) -> None:
     github = await pushed_past(repo, blocking(5), blocking(9, title="Division by zero on an empty list"))
     assert await resolve(github) == [1, 2]
-    assert github.resolved_threads == {"T1", "T2"}
+    assert github.settled_threads == {"T1", "T2"}
     notes = [c["comment"].body for c in github.review_comments if c.get("in_reply_to") is not None]
-    note = f"The code here changed, and the review of `{NEXT_HEAD[:7]}` found nothing like this in the file: resolving."
+    note = (
+        f"The code here changed, and the review of `{NEXT_HEAD[:7]}` found nothing like this in the file: "
+        "marking it resolved."
+    )
     assert notes == [note] * 2
 
 
@@ -66,7 +69,7 @@ async def test_a_finding_the_review_found_nothing_like_is_resolved_with_a_note(r
 async def test_a_finding_that_may_still_be_there_stays_open(repo: GitRepo, outcome: Outcome) -> None:
     github = await pushed_past(repo, blocking(5))
     assert await resolve(github, outcome) == []
-    assert github.resolved_threads == set()
+    assert github.settled_threads == set()
 
 
 @pytest.mark.parametrize(
@@ -87,10 +90,11 @@ async def test_a_comment_still_on_the_heads_code_stays_open(repo: GitRepo) -> No
     assert await resolve(github) == []
 
 
-async def test_a_resolved_thread_gets_no_second_note(repo: GitRepo) -> None:
-    """The author resolved it, or an earlier review did: replays and later pushes leave it alone."""
+@pytest.mark.parametrize("done", ["resolved_threads", "settled_threads"])
+async def test_a_thread_already_done_gets_no_second_note(repo: GitRepo, done: str) -> None:
+    """Resolved by a person, or settled by an earlier review: replays and later pushes leave it alone."""
     github = await pushed_past(repo, blocking(5))
-    github.resolved_threads.add("T1")
+    getattr(github, done).add("T1")
     assert await resolve(github) == []
     assert len(github.review_comments) == 1
 
@@ -112,7 +116,7 @@ async def test_the_bots_review_resolves_them_and_never_fails_for_it(
     pull = PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head)
     result = await review_and_post(job_deps(github, tmp_path, []), pull)
     assert (result.conclusion, github.reviews[-1]["event"]) == ("success", "APPROVE")
-    assert github.resolved_threads == (set() if threads_fail else {"T1"})
+    assert github.settled_threads == (set() if threads_fail else {"T1"})
 
 
 ELSEWHERE = Finding.model_validate({**finding(3), "kind": "dry", "path": "notes.py"}).model_dump()
@@ -135,7 +139,7 @@ async def test_the_review_resolves_only_what_it_checked_in_full(
     github.review_comments[0]["outdated"] = True
     deps = replace(job_deps(github, tmp_path), lenses=(lens,))
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == resolved
+    assert github.settled_threads == resolved
 
 
 @pytest.mark.parametrize("ruff_fails", [False, True])
@@ -152,7 +156,7 @@ async def test_a_linters_finding_is_resolved_only_when_the_linter_ran(
 
         monkeypatch.setattr(job, "lint_findings", broken)
     await review_and_post(job_deps(github, tmp_path), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == (set() if ruff_fails else {"T1"})
+    assert github.settled_threads == (set() if ruff_fails else {"T1"})
 
 
 async def test_a_failed_correctness_lens_resolves_none_of_its_threads(repo: GitRepo, tmp_path: Path) -> None:
@@ -162,7 +166,7 @@ async def test_a_failed_correctness_lens_resolves_none_of_its_threads(repo: GitR
     github.review_comments[0]["outdated"] = True
     deps = replace(job_deps(github, tmp_path), agents=lens_agents([], crash=True))
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == set()
+    assert github.settled_threads == set()
 
 
 async def test_a_failed_resolve_leaves_no_note_behind(repo: GitRepo) -> None:
@@ -187,7 +191,7 @@ async def test_a_review_cut_short_resolves_nothing_its_lens_didnt_finish(repo: G
     github = await outdated(repo)
     deps = replace(job_deps(github, tmp_path), soft_deadline_s=0)
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == set()
+    assert github.settled_threads == set()
 
 
 @pytest.mark.parametrize(("lint_cap", "resolved"), [(30, {"T1"}), (0, set())])
@@ -198,7 +202,7 @@ async def test_the_linter_at_its_cap_resolves_nothing(
     github = await outdated(repo, "types")
     monkeypatch.setattr(job, "MAX_LINT_FINDINGS", lint_cap)
     await review_and_post(job_deps(github, tmp_path), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == resolved
+    assert github.settled_threads == resolved
 
 
 async def outdated(repo: GitRepo, kind: str = "correctness") -> FakeGitHub:
@@ -214,7 +218,7 @@ async def test_a_failed_correctness_lens_resolves_none_of_the_linters_threads(re
     github = await outdated(repo, "types")
     deps = replace(job_deps(github, tmp_path), agents=lens_agents([], crash=True))
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == set()
+    assert github.settled_threads == set()
 
 
 @pytest.mark.parametrize(("cap", "resolved"), [(25, {"T1"}), (1, set())])
@@ -226,7 +230,7 @@ async def test_the_correctness_lens_at_its_cap_resolves_nothing(
     monkeypatch.setattr(job, "MAX_FINDINGS", cap)
     deps = job_deps(github, tmp_path, [finding(3, path="notes.py")])
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
-    assert github.resolved_threads == resolved
+    assert github.settled_threads == resolved
 
 
 @pytest.mark.parametrize(("whole_pr", "resolved"), [(True, {"T1"}), (False, set())])
@@ -246,4 +250,4 @@ async def test_a_scoped_lens_resolves_only_in_the_files_it_reread(
     head = add_commit(repo, {"notes.py": "# only this file changes\n"})
     github.head_shas = [head]
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, head))
-    assert github.resolved_threads == resolved
+    assert github.settled_threads == resolved

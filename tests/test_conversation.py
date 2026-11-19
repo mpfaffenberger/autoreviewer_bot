@@ -140,7 +140,7 @@ async def test_a_withdrawal_is_marked_and_its_thread_resolved(
     assert await answer(deps(github, repo, tmp_path, scripted(verdict)), reply) == result
     withdrawn = verdict == "withdrawn"
     assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=withdrawn))
-    assert github.resolved_threads == ({"T1"} if withdrawn else set())
+    assert github.settled_threads == ({"T1"} if withdrawn else set())
 
 
 @pytest.mark.parametrize(
@@ -160,18 +160,18 @@ async def test_a_finding_that_holds_again_reopens_its_thread(
     for n, said in enumerate(history, start=2):
         marker = "" if said == "note" else f"\n\n{answer_markers(n, withdrawn=said == 'withdrawn')}"
         github.say(BOT, 1, f"{said}{marker}")
-    github.resolved_threads.add("T1")
+    github.settled_threads.add("T1")
     reply = replace(reply, comment_id=github.say("alice", 1, "Actually, look again at the empty list."))
     assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
-    assert github.resolved_threads == (set() if reopened else {"T1"})
+    assert github.settled_threads == (set() if reopened else {"T1"})
 
 
 async def test_a_thread_closed_for_another_reason_stays_closed(repo: GitRepo, tmp_path: Path) -> None:
     """From the bot's review of #42: only a withdrawal's close is the bot's to undo."""
     github, reply = await thread_with_reply(repo)
-    github.resolved_threads.add("T1")  # the author resolved it, or the bot did after a fix
+    github.settled_threads.add("T1")  # the bot settled it after a fix
     assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
-    assert github.resolved_threads == {"T1"}
+    assert github.settled_threads == {"T1"}
 
 
 async def test_a_thread_github_wont_update_costs_nothing(repo: GitRepo, tmp_path: Path) -> None:
