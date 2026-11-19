@@ -173,13 +173,17 @@ Boodleton, 2 lanes), so they add no Qwen load.
 - *docs*: text the change makes untrue: docstrings, comments, docs, config comments and documented settings,
   error and log messages, and contracts callers rely on (renamed flags, env vars, endpoints). The stale text
   is often in a file the PR didn't touch, so a finding cites the changed line that made it untrue and quotes
-  the stale text with its location.
+  the stale text with its location. It also holds the prose the PR writes to pstack's unslop rules
+  (`vendor/pstack/skill-unslop.md`, verbatim, in both the lens's and the verifier's instructions): slop is P3,
+  reported after drift, and the verifier confirms only a clear break of a cited rule with a rewrite that
+  follows them all.
 - *tests*: behaviour changes no test would catch breaking (the reviewer imagines the smallest break and reads
   the assertions), tests that can't fail, and weakened tests. It can't run tests; a sandbox could later make
   the mutations for real.
 
 Evals: `--suite docs --lens docs` and `--suite tests --lens tests` (`evals/docs_cases.py`, `evals/tests_cases.py`):
-5 seeded cases each on `d284fe8`, their own clean controls, and the correctness suite's.
+5 seeded cases each on `d284fe8` (docs adds 2 slop cases), their own clean controls, and the correctness
+suite's.
 
 Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
 `agents.lens_pair()`, optional run instructions, and whether a continued review re-reads the whole PR.

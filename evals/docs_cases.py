@@ -1,5 +1,6 @@
 """Seeded docs and contract drift in this repo's own code: a change leaves a docstring, design doc, error message,
 or documented setting saying something the code no longer does. Each change works; the text is what's wrong.
+Two more cases add slop (pstack's unslop rules) in text the PR writes.
 Clean controls change code without making any text untrue, plus the correctness suite's clean controls.
 """
 
@@ -32,6 +33,16 @@ CASES: list[Case] = [
     # Its docstring says "4 streams of 224k tokens"; DESIGN.md §7 too.
     Case("docs_window", SERVERS, "QWEN_CONTEXT_WINDOW = 229_376", "QWEN_CONTEXT_WINDOW = 196_608",
          "Match Qwen's window to the server", corpus=DOCS_CORPUS),
+    # unslop 7, 8, 3: "serves as", "crucial", "seamlessly", a trailing "-ing" phrase.
+    Case("docs_slop_docstring", APP, "def _and(names: list[str]) -> str:\n",
+         'def _and(names: list[str]) -> str:\n    """This helper serves as a crucial utility, seamlessly joining names '
+         'and ensuring a vibrant, readable footer."""\n', "Document the footer helper", anchor="serves as a crucial",
+         corpus=DOCS_CORPUS),
+    # unslop 7, 13, 26, 31: "leveraging", "fosters", "pivotal", an em dash, "landscape".
+    Case("docs_slop_comment", SERVERS, "DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4}",
+         "# Leveraging these lanes fosters robust throughput \u2014 a pivotal part of the serving landscape.\n"
+         "DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4}", "Explain the lane defaults", anchor="Leveraging these lanes",
+         corpus=DOCS_CORPUS),
     Case("docs_clean_helper_name", APP, "_and(", "_join_names(", "Name the footer helper", replace_all=True,
          clean=True, corpus=DOCS_CORPUS),
     Case("docs_clean_concat", CONFIG, 'return f"{kind}.verifier"', 'return kind + ".verifier"',

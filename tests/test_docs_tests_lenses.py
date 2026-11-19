@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS
+from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS, lens_pair
 from autoreviewer.review.pipeline import blocks
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import Workspace
@@ -52,3 +54,26 @@ def test_every_lens_has_both_prompts() -> None:
     for kind, prompts in LENS_PROMPTS.items():
         for name in prompts:
             assert (PROMPTS / name).read_text().strip(), (kind, name)
+
+
+class _Seen(Exception):
+    """Stops a run once the model has been called: only the instructions it was sent matter here."""
+
+
+@pytest.mark.anyio
+async def test_the_docs_lens_and_its_checker_hold_text_to_unslop(workspace: Workspace) -> None:
+    sent: dict[str, str] = {}
+
+    def recording(role: str) -> FunctionModel:
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            sent[role] = [m for m in messages if isinstance(m, ModelRequest)][-1].instructions or ""
+            raise _Seen
+
+        return FunctionModel(respond)
+
+    for kind in ("docs", "tests", "dry"):
+        for agent in lens_pair(kind, recording(kind), recording(f"{kind}.verifier"), workspace):
+            with pytest.raises(_Seen):
+                await agent.run("go")
+    rule = '23. Cut filler. "In order to" becomes "to".'
+    assert [role for role, instructions in sent.items() if rule in instructions] == ["docs", "docs.verifier"]
