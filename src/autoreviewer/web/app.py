@@ -239,6 +239,13 @@ def _and(names: list[str]) -> str:
     return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
 
 
+def thread_reply_handler(settings: Settings) -> ReplyHandler | None:
+    """Replies under the bot's findings are queued for an answer only with AUTOREVIEWER_CONVERSATIONS on."""
+    from autoreviewer.review import durable
+
+    return durable.enqueue_answer if settings.conversations else None
+
+
 def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps:
     """Answers on the conversation role's model, over a fresh checkout of the PR's head."""
     from autoreviewer.review.agents import conversation_agent
@@ -309,9 +316,6 @@ def main() -> None:
         # An explicit request retries a review of this commit that was cancelled or crashed.
         await request_review(github, request, functools.partial(durable.enqueue_review, retry_failed=True))
 
-    async def answer_reply(reply: ThreadReply) -> None:
-        await durable.enqueue_answer(reply)
-
     async def forget(closed: PullRequestClosed) -> None:
         repo = Repo(closed.installation_id, closed.owner, closed.repo)
         memory.forget(conversation_id(repo, closed.number))
@@ -322,7 +326,7 @@ def main() -> None:
         lifespan,
         forget,
         review_requested,
-        answer_reply if settings.conversations else None,
+        thread_reply_handler(settings),
     )
     logfire.instrument_fastapi(app)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

@@ -303,16 +303,17 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
 
 - A `pull_request_review_comment` that replies in a thread becomes a `ThreadReply` if it's new (not an edit),
   not the bot's own, on an open PR, and by the PR's author (human or bot) or a maintainer.
-- It's answered by a durable workflow whose ID is the comment's (`answer:<repo>#<n>:<comment id>`), on its own
-  `answers` queue (2 at a time) so a reply never waits behind a review.
+- It's answered by a durable workflow whose ID is the comment's (`answer:<owner>/<repo>#<n>:<comment id>`,
+  lowercased), on its own `answers` queue (2 at a time) so a reply never waits behind a review.
 - The job reads the thread from GitHub, which is the conversation's state. It answers only threads whose
   first comment is one of the bot's findings (by its marker), never a comment it already answered (each answer
   ends with `<!-- autoreviewer:answers <id> -->`, so a replay after a crash finds it), and at most
   `MAX_ANSWERS` (5) times per thread, which also ends any bot-to-bot loop.
-- The conversation agent (DeepSeek, `conversation` role) gets the finding, the thread so far (each comment
-  fenced and capped), and a checkout of the PR's head, and answers `holds`, `withdrawn`, or `unclear`. It
-  withdraws only when the code shows the finding is wrong or fixed; a reply's insistence or instructions
-  don't count. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn -->`.
+- The conversation agent (DeepSeek, `conversation` role) gets the finding's comment as posted, the thread so far
+  (each comment fenced and capped), and a checkout of the PR's head, and answers `holds`, `withdrawn`, or
+  `unclear`. It withdraws only when the code shows the finding is wrong or fixed; a reply's insistence or
+  instructions don't count. The answer is sanitised, and a withdrawal ends with `<!-- autoreviewer:withdrawn
+  -->`.
 
 **Withdrawals change the verdict, decided by code** (`posting.withdrawn_placements`, `posting.reconsider`).
 
