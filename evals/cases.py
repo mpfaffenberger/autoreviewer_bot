@@ -212,6 +212,10 @@ CASES: list[Case] = [
 CLEAN_CONTROLS = tuple(case for case in CASES if case.clean)
 """Changes with nothing to find: every lens's suite runs them, so a lens that cries wolf shows up."""
 
+LENS_CORPUS = "d284fe8"
+"""main after #32: servers.py, model pins, the unused-import lint, and DESIGN.md documenting the DRY cap, lanes, and
+switches. The docs and tests suites seed their cases here."""
+
 CLEAN_CONCAT = Case(
     "clean_concat",
     "src/autoreviewer/web/config.py",
@@ -219,6 +223,6 @@ CLEAN_CONCAT = Case(
     'return kind + ".verifier"',
     "Build role names by concatenation",
     clean=True,
-    corpus="d284fe8",
+    corpus=LENS_CORPUS,
 )
-"""Equivalent, well-tested, and touches no text: a control for the docs and tests lenses (main after #32)."""
+"""Equivalent, well-tested, and touches no text: a control for the docs and tests lenses."""

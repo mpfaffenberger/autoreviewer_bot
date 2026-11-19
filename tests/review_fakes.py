@@ -182,6 +182,8 @@ class FakeGitHub:
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
     review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_review_comments: bool = False
+    fail_posted_comments: int = 0
+    """How many reads of the PR's comments fail (like a transient 5xx) before they work again."""
     comment_delay: float = 0.0
     """Inline comments posted on their own, as findings are confirmed."""
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -266,6 +268,9 @@ class FakeGitHub:
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         """Like GitHub: a comment stays on its line on later heads unless marked `outdated`."""
+        if self.fail_posted_comments:
+            self.fail_posted_comments -= 1
+            raise RuntimeError("502 Bad Gateway")
         return [
             PostedComment(c["comment"].path, None if c.get("outdated") else c["comment"].line, c["comment"].body)
             for c in self.review_comments

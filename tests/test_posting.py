@@ -244,3 +244,35 @@ async def test_markers_record_priority_and_kind(repo: GitRepo) -> None:
     await publisher(github)(confirmed(kind="docs", priority=3))
     [comment] = github.inline_comments
     assert comment.body.endswith(f"<!-- autoreviewer:{fingerprint(repo.head, confirmed(kind='docs'))} p3 docs -->")
+
+
+async def test_a_failed_read_of_the_prs_comments_is_retried(repo: GitRepo) -> None:
+    """From the bot's review of #35: recording "loaded" before the read meant one failed read switched dedupe off
+    for the rest of the review."""
+    github = FakeGitHub(repo)
+    await on(github, "a" * 40)(confirmed(priority=1))
+    github.fail_posted_comments = 1
+    later = on(github, "b" * 40)
+    await later(confirmed(line=9))  # the read fails: this one goes in the final review instead
+    await later(confirmed(priority=1))  # the read works now: already on the PR
+    assert len(github.review_comments) == 1
+
+
+@pytest.mark.parametrize(("marker", "comments"), [("p1 correctness", 1), ("p1", 2)])
+async def test_a_comment_from_github_is_placed_by_its_markers_kind(repo: GitRepo, marker: str, comments: int) -> None:
+    """A marker recording its kind places the comment; one from before kinds were recorded can't be placed."""
+    github = FakeGitHub(repo)
+    body = f"**[P1] Old finding** (correctness)\n\n<!-- autoreviewer:{'0' * 16} {marker} -->"
+    github.review_comments.append({"commit_sha": "a" * 40, "comment": ReviewComment("x.py", 5, body), "author": BOT})
+    await on(github, "b" * 40)(Finding.model_validate({**finding(5, priority=1), "path": "x.py"}))
+    assert len(github.review_comments) == comments
+
+
+async def test_a_placed_comment_stands_in_for_the_other_lens(repo: GitRepo) -> None:
+    """From the bot's review of #35: the same defect from a second lens, already said on an earlier commit."""
+    github = FakeGitHub(repo)
+    await on(github, "a" * 40)(confirmed(priority=1))
+    later = on(github, "b" * 40)
+    await later(confirmed(priority=1))
+    await later(confirmed(kind="security", priority=1))
+    assert len(github.review_comments) == 1

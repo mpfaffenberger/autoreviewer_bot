@@ -39,8 +39,9 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
-def covered(posted: Mapping[str, int], key: str, finding: Finding) -> bool:
-    """Whether a comment at least as urgent as `finding` is already posted for its fingerprint."""
+def covered[Key](posted: Mapping[Key, int], key: Key, finding: Finding) -> bool:
+    """Whether a comment at least as urgent as `finding` is already posted under `key` (its fingerprint, or where
+    GitHub shows a comment of its kind)."""
     return key in posted and posted[key] <= finding.priority
 
 
@@ -67,8 +68,9 @@ class Publisher:
         self._findings: list[Finding] = []
         self._existing: dict[str, int] | None = None
         self._placed: dict[tuple[str, int, str], int] = {}
-        """(path, line on this head, kind) -> the most urgent priority of a comment GitHub shows there, whichever
-        commit it was posted on: a superseded review's comments still cover the same defect on the new head."""
+        """(path, line on this head, kind) -> the most urgent priority of the comments of that kind GitHub still
+        shows there, from any commit: a superseded review's comments cover the same defect on the new head. Only
+        markers that record a kind count (older ones can't be placed)."""
         self._lock = asyncio.Lock()
 
     async def __call__(self, finding: Finding) -> None:
@@ -77,15 +79,14 @@ class Publisher:
         # must not both see "not posted yet". (Posts are few and quick.)
         async with self._lock:
             try:
-                if self._existing is None:
-                    await self._load_existing()
-                    assert self._existing is not None
-                placed = self._placed.get((finding.path, finding.line, finding.kind), 4)
-                if covered(self._existing, key, finding) or covered(self.posted, key, finding):
-                    self.posted[key] = min(finding.priority, self._existing.get(key, 3), self.posted.get(key, 3))
+                existing = self._existing if self._existing is not None else await self._load_existing()
+                if covered(existing, key, finding) or covered(self.posted, key, finding):
+                    self.posted[key] = min(finding.priority, existing.get(key, 3), self.posted.get(key, 3))
                     return
-                if placed <= finding.priority:  # posted for an earlier commit, still on this line here
-                    self.posted[key] = placed
+                where = (finding.path, finding.line, finding.kind)
+                if covered(self._placed, where, finding):  # posted for an earlier commit, still on this line
+                    self.posted[key] = self._placed[where]
+                    self._findings.append(finding)  # its comment exists: it stands in for the other lens's too
                     return
                 # Already posted as at least as urgent by the other lens: a second comment would only repeat it.
                 if any(same_defect(f, finding) and f.priority <= finding.priority for f in self._findings):
@@ -103,16 +104,21 @@ class Publisher:
             self.posted[key] = finding.priority
             self._findings.append(finding)  # only once its comment exists can it stand in for a duplicate
 
-    async def _load_existing(self) -> None:
-        self._existing = {}
-        for comment in await self._github.posted_comments(self._repo, self._number, author=self._author):
+    async def _load_existing(self) -> dict[str, int]:
+        """Fingerprints (and placements) of the bot's comments on the PR. Recorded only once the fetch succeeds,
+        so a failed fetch is retried with the next finding instead of switching dedupe off for the review."""
+        comments = await self._github.posted_comments(self._repo, self._number, author=self._author)
+        existing: dict[str, int] = {}
+        for comment in comments:
             if not (match := _MARKER.search(comment.body)):
                 continue
             fp, priority, kind = match[1], int(match[2]), match[3]
-            self._existing[fp] = min(priority, self._existing.get(fp, 3))
-            if kind and comment.line is not None:  # markers from before kinds were recorded can't be placed
+            existing[fp] = min(priority, existing.get(fp, 3))
+            if kind and comment.line is not None:
                 where = (comment.path, comment.line, kind)
                 self._placed[where] = min(priority, self._placed.get(where, 3))
+        self._existing = existing
+        return existing
 
 
 async def post_review(
