@@ -185,6 +185,9 @@ class FakeGitHub:
     review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_review_comments: bool = False
     resolved_threads: set[str] = field(default_factory=set[str])
+    """Threads a person resolved (the bot can't)."""
+    settled_threads: set[str] = field(default_factory=set[str])
+    """Threads whose first comment the bot minimized."""
     fail_threads: bool = False
     """Make resolving or reopening a thread fail, like GitHub's GraphQL API on a bad day."""
     fail_posted_comments: int = 0
@@ -292,17 +295,17 @@ class FakeGitHub:
         return len(self.review_comments)
 
     async def review_threads(self, repo: Repo, number: int) -> list[ReviewThread]:
-        """One thread per comment that starts one, named after it; resolved as recorded in `resolved_threads`."""
+        """One thread per comment that starts one, named after it."""
         return [
-            ReviewThread(f"T{i}", i, f"T{i}" in self.resolved_threads)
+            ReviewThread(f"T{i}", i, f"T{i}" in self.resolved_threads, f"N{i}", f"T{i}" in self.settled_threads)
             for i, c in enumerate(self.review_comments, start=1)
             if c.get("in_reply_to") is None
         ]
 
-    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None:
+    async def set_settled(self, repo: Repo, thread: ReviewThread, *, settled: bool) -> None:
         if self.fail_threads:
             raise RuntimeError("502 Bad Gateway")
-        (self.resolved_threads.add if resolved else self.resolved_threads.discard)(thread_id)
+        (self.settled_threads.add if settled else self.settled_threads.discard)(thread.id)
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         """Like GitHub: a comment stays on its line on later heads unless marked `outdated`."""

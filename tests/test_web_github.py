@@ -141,15 +141,21 @@ class FakeGitHub:
             threads = {
                 "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
                 "nodes": [
-                    {"id": i, "isResolved": done, "comments": {"nodes": [{"databaseId": c} for c in ids]}}
+                    {
+                        "id": i,
+                        "isResolved": done,
+                        "comments": {"nodes": [{"databaseId": c, "id": f"N{c}", "isMinimized": c == 12} for c in ids]},
+                    }
                     for i, done, ids in nodes
                 ],
             }
             return httpx2.Response(200, json={"data": {"repository": {"pullRequest": {"reviewThreads": threads}}}})
-        mutation = re.search(r"(un)?resolveReviewThread", query)
+        mutation = re.search(r"(un)?minimizeComment", query)
         assert mutation, query
+        if mutation[1] is None:
+            assert "classifier: RESOLVED" in query
         self.writes.append(("graphql", mutation[0], variables))
-        return httpx2.Response(200, json={"data": {mutation[0]: {"thread": {"isResolved": not mutation[1]}}}})
+        return httpx2.Response(200, json={"data": {mutation[0]: {"clientMutationId": None}}})
 
 
 @pytest.fixture
@@ -259,15 +265,17 @@ async def test_a_thread_is_read_and_answered(fake_and_app: tuple[FakeGitHub, Git
     assert fake.writes[-1] == ("reply", "/repos/mpfaffenberger/demo/pulls/7/comments/11/replies", {"body": "answer"})
 
 
-async def test_review_threads_are_read_page_by_page_and_resolved_both_ways(
+async def test_review_threads_are_read_page_by_page_and_settled_both_ways(
     fake_and_app: tuple[FakeGitHub, GitHubApp],
 ) -> None:
-    """From the bot's review of #42: the real client's GraphQL, not just the fake's thread list."""
+    """From the bot's review of #42: the real client's GraphQL, not just the fake's thread list. Settling minimizes
+    the thread's first comment as resolved: resolving the thread itself was FORBIDDEN to the App, live (#44)."""
     fake, app = fake_and_app
-    assert await app.review_threads(REPO, 7) == [ReviewThread("T11", 11, False), ReviewThread("T12", 12, True)]
-    await app.set_thread_resolved(REPO, "T11", resolved=True)
-    await app.set_thread_resolved(REPO, "T12", resolved=False)
+    threads = await app.review_threads(REPO, 7)
+    assert threads == [ReviewThread("T11", 11, False, "N11", False), ReviewThread("T12", 12, True, "N12", True)]
+    await app.set_settled(REPO, threads[0], settled=True)
+    await app.set_settled(REPO, threads[1], settled=False)
     assert fake.writes[-2:] == [
-        ("graphql", "resolveReviewThread", {"id": "T11"}),
-        ("graphql", "unresolveReviewThread", {"id": "T12"}),
+        ("graphql", "minimizeComment", {"id": "N11"}),
+        ("graphql", "unminimizeComment", {"id": "N12"}),
     ]

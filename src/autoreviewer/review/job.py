@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,7 +28,7 @@ from autoreviewer.github import (
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
-from autoreviewer.review.lint import LINT_KINDS, LintError, lint_findings
+from autoreviewer.review.lint import LINT_KINDS, MAX_LINT_FINDINGS, LintError, lint_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
@@ -41,7 +41,7 @@ from autoreviewer.review.pipeline import (
     review,
     review_lens,
 )
-from autoreviewer.review.posting import Publisher, post_review, resolve_fixed
+from autoreviewer.review.posting import Publisher, post_review, settle_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
@@ -100,17 +100,17 @@ async def _run_lens(
     )
 
 
-async def _survive(kind: str, block_at: int, run: Awaitable[Outcome]) -> Outcome:
+async def _survive(kind: str, block_at: int, run: Awaitable[Outcome], paths: Iterable[str]) -> Outcome:
     """The lens's outcome; if it fails (a model error after the client's retries, say), an empty one naming it,
     and the other lenses carry on. An advisory lens costs only its advice; a lens that can block leaves the
     review cut short, which never approves, so nothing fails open. Cancellation isn't caught: a superseded
-    review still stops."""
+    review still stops. A lens that finishes covers its kind over `paths`, the files it reviewed."""
     try:
         outcome = await run
     except Exception:
         logger.warning("the %s lens failed; the review goes on without it", kind, exc_info=True)
         return Outcome(block_at=block_at, failed={kind})
-    outcome.covered.add(kind)  # finished: only a lens that ran to the end covers its kind (resolve_fixed)
+    outcome.covered |= {(kind, path) for path in paths}  # only a lens that ran to the end (settle_fixed)
     return outcome
 
 
@@ -339,6 +339,7 @@ async def review_change(
                         progress=progress,
                         publish=publish,
                     ),
+                    [change.path for change in pr.reviewable],
                 )
             )
             extra = []
@@ -354,7 +355,8 @@ async def review_change(
                         publish=publish,
                         deadline=deadline,
                     )
-                    extra.append(lenses_group.create_task(_survive(spec.kind, block_at, run)))
+                    paths = [change.path for change in target.reviewable]
+                    extra.append(lenses_group.create_task(_survive(spec.kind, block_at, run, paths)))
             simplify_task = None
             if simplifier is not None:
                 simplify_task = lenses_group.create_task(
@@ -369,8 +371,9 @@ async def review_change(
                     )
                 )
         outcome = correctness.result()
-        if lint_ran:
-            outcome.covered |= set(LINT_KINDS)
+        # The lint findings reach the outcome through the correctness lens (`checked`): without it, they're lost.
+        if lint_ran and "correctness" not in outcome.failed and len(linted) < MAX_LINT_FINDINGS:
+            outcome.covered |= {(kind, change.path) for kind in LINT_KINDS for change in pr.reviewable}
         for task in extra:
             outcome.absorb(task.result())
         suggestions = simplify_task.result() if simplify_task is not None else []
@@ -384,11 +387,10 @@ async def review_change(
     timed_out = deadline is not None and bool(deadline.wrapped_up & blocking_lenses)
     outcome.cut_short = timed_out or bool(outcome.failed_blocking)
     if deadline is not None:
-        outcome.covered -= {"correctness" if lens == "reviewer" else lens for lens in deadline.wrapped_up}
+        outcome.uncover("correctness" if lens == "reviewer" else lens for lens in deadline.wrapped_up)
     # A capped lens verifies only its best candidates and drops the rest: at its cap, it may have dropped one.
-    outcome.covered -= {
-        spec.kind for spec in lenses if sum(f.kind == spec.kind for f in outcome.reported) >= spec.max_posted
-    }
+    caps = {"correctness": MAX_FINDINGS, **{spec.kind: spec.max_posted for spec in lenses}}
+    outcome.uncover(kind for kind, cap in caps.items() if sum(f.kind == kind for f in outcome.reported) >= cap)
     # A review cut short isn't continued from: files it never read wouldn't count as "changed since".
     remember = None
     if memory is not None and not outcome.cut_short:
@@ -510,11 +512,11 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         posted=publisher.posted,
     )
     try:  # tidying up, after the verdict: a failure here must never cost the review
-        await resolve_fixed(
+        await settle_fixed(
             deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=result.outcome
         )
     except Exception:
-        logger.warning("%s at %s: could not resolve fixed findings", conversation, pull.head_sha[:7], exc_info=True)
+        logger.warning("%s at %s: could not settle fixed findings", conversation, pull.head_sha[:7], exc_info=True)
     return _summary(result.outcome)
 
 
