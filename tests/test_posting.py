@@ -211,3 +211,36 @@ async def test_a_replay_posts_again_only_if_more_urgent(repo: GitRepo, replayed_
     await publisher(github)(confirmed(priority=1))
     await publisher(github)(confirmed(priority=replayed_priority))  # a fresh process, the same finding
     assert len(github.review_comments) == comments
+
+
+def on(github: FakeGitHub, head: str) -> Publisher:
+    return Publisher(github, REPO, 7, head_sha=head, author=BOT, block_at=1)
+
+
+@pytest.mark.parametrize(
+    ("later", "outdated", "comments"),
+    [
+        (confirmed(priority=2), False, 1),  # the same defect, still on that line: already said
+        (confirmed(priority=1), False, 1),  # as urgent: already said
+        (confirmed(priority=0), False, 2),  # an escalation is worth a new comment
+        (confirmed(kind="dry", priority=1), False, 2),  # a different kind of issue on the same line
+        (confirmed(priority=1), True, 2),  # the code changed under the old comment: a fresh finding
+    ],
+)
+async def test_a_superseded_reviews_comments_cover_the_next_head(
+    repo: GitRepo, later: Finding, outdated: bool, comments: int
+) -> None:
+    """From #34: a push mid-review stopped it without a verdict, so the next head's review started fresh and
+    posted the same defects again (fingerprints include the commit)."""
+    github = FakeGitHub(repo)
+    await on(github, "a" * 40)(confirmed(priority=1))
+    github.review_comments[0]["outdated"] = outdated
+    await on(github, "b" * 40)(later)
+    assert len(github.review_comments) == comments
+
+
+async def test_markers_record_priority_and_kind(repo: GitRepo) -> None:
+    github = FakeGitHub(repo)
+    await publisher(github)(confirmed(kind="docs", priority=3))
+    [comment] = github.inline_comments
+    assert comment.body.endswith(f"<!-- autoreviewer:{fingerprint(repo.head, confirmed(kind='docs'))} p3 docs -->")

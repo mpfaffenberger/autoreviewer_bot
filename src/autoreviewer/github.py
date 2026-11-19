@@ -52,6 +52,16 @@ class ReviewComment:
     """For a comment spanning lines start_line..line (e.g. a multi-line suggestion)."""
 
 
+@dataclass(frozen=True)
+class PostedComment:
+    """An inline comment already on a PR, placed where GitHub shows it on the PR's current head."""
+
+    path: str
+    line: int | None
+    """None once the code it was on has changed (GitHub shows it as outdated)."""
+    body: str
+
+
 class CommitNotFound(Exception):
     """GitHub doesn't know one of the commits, e.g. an old head garbage-collected after a force-push."""
 
@@ -103,8 +113,8 @@ class PullRequests(PullRequestReader, Protocol):
         """One inline comment outside any review: a finding posted the moment it's confirmed."""
         ...
 
-    async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
-        """The bodies of every inline comment `author` left on the PR."""
+    async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
+        """Every inline comment `author` left on the PR, where GitHub places it on the current head."""
         ...
 
 
@@ -276,19 +286,23 @@ class GitHubApp:
                 raise ReviewRejected(str(error)) from error
             raise
 
-    async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
+    async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         github = self._as_installation(repo.installation_id)
-        bodies: list[str] = []
+        found: list[PostedComment] = []
         page = 1
         while True:
-            # Raw JSON, not githubkit's models: only two fields matter.
+            # Raw JSON, not githubkit's models: only a few fields matter.
             response = await github.rest.pulls.async_list_review_comments(
                 repo.owner, repo.name, number, per_page=100, page=page
             )
             comments = response.json()
-            bodies += [str(c.get("body") or "") for c in comments if (c.get("user") or {}).get("login") == author]
+            found += [
+                PostedComment(str(c.get("path") or ""), c.get("line"), str(c.get("body") or ""))
+                for c in comments
+                if (c.get("user") or {}).get("login") == author
+            ]
             if len(comments) < 100:
-                return bodies
+                return found
             page += 1
 
     async def review_bodies(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> list[str]:

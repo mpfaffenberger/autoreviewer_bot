@@ -6,8 +6,7 @@ Clean controls change code without making any text untrue, plus the correctness 
 
 from __future__ import annotations
 
-from evals.cases import CASES as CORRECTNESS_CASES
-from evals.cases import Case
+from evals.cases import CLEAN_CONCAT, CLEAN_CONTROLS, Case
 
 DOCS_CORPUS = "d284fe8"
 """main after #32: servers.py, model pins, and DESIGN.md documenting the DRY cap, lanes, and switches."""
@@ -45,7 +44,6 @@ CASES: list[Case] = [
          corpus=DOCS_CORPUS),
     Case("docs_clean_helper_name", APP, "_and(", "_join_names(", "Name the footer helper", replace_all=True,
          clean=True, corpus=DOCS_CORPUS),
-    Case("docs_clean_concat", CONFIG, 'return f"{kind}.verifier"', 'return kind + ".verifier"',
-         "Build role names by concatenation", clean=True, corpus=DOCS_CORPUS),
-    *(case for case in CORRECTNESS_CASES if case.clean),
+    CLEAN_CONCAT,
+    *CLEAN_CONTROLS,
 ]  # fmt: skip

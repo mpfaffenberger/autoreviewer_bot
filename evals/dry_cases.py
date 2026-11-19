@@ -5,8 +5,7 @@ Clean controls are the correctness suite's: they change code without duplicating
 
 from __future__ import annotations
 
-from evals.cases import CASES as CORRECTNESS_CASES
-from evals.cases import Case
+from evals.cases import CLEAN_CONTROLS, Case
 
 DRY_CORPUS = "d5e9888"
 
@@ -78,5 +77,5 @@ CASES: list[Case] = [
         anchor="def plus_lines",
         host="d3f782d",  # the PR that added diff.added_lines: duplication within one PR
     ),
-    *(case for case in CORRECTNESS_CASES if case.clean),
+    *CLEAN_CONTROLS,
 ]

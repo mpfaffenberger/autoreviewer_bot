@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import AppAuthStrategy, GitHub
 
-from autoreviewer.github import CHECK_NAME, Comparison, GitHubApp, Repo, ReviewComment, ReviewRejected
+from autoreviewer.github import CHECK_NAME, Comparison, GitHubApp, PostedComment, Repo, ReviewComment, ReviewRejected
 
 pytestmark = pytest.mark.anyio
 
@@ -26,6 +26,7 @@ APP_ID = 5786748
 REPO = Repo(installation_id=182623847, owner="mpfaffenberger", name="demo")
 BOT_LOGIN = "chaos-emerald-reviewer[bot]"
 HEAD = "a" * 40
+MARKER = "<!-- autoreviewer:0123456789abcdef p1 correctness -->"
 
 
 @pytest.fixture(scope="module")
@@ -94,8 +95,9 @@ class FakeGitHub:
             ])  # fmt: skip
         if method == "GET" and path == f"{base}/pulls/7/comments":
             return httpx2.Response(200, json=[
-                {"user": {"login": BOT_LOGIN}, "body": "finding <!-- autoreviewer:0123456789abcdef -->"},
-                {"user": {"login": "someone"}, "body": "reply"},
+                {"user": {"login": BOT_LOGIN}, "path": "f1.py", "line": 7, "body": f"finding {MARKER}"},
+                {"user": {"login": BOT_LOGIN}, "path": "f2.py", "line": None, "original_line": 3, "body": "outdated"},
+                {"user": {"login": "someone"}, "path": "f1.py", "line": 7, "body": "reply"},
             ])  # fmt: skip
         if method == "POST" and path == f"{base}/pulls/7/comments":
             self.writes.append(("create_review_comment", path, json.loads(request.content)))
@@ -200,6 +202,7 @@ async def test_single_comments_and_review_listings(fake_and_app: tuple[FakeGitHu
         "start_side": "RIGHT",
     }
     assert await app.review_bodies(REPO, 7, commit_sha=HEAD, author=BOT_LOGIN) == ["verdict", ""]
-    assert await app.review_comment_bodies(REPO, 7, author=BOT_LOGIN) == [
-        "finding <!-- autoreviewer:0123456789abcdef -->"
+    assert await app.posted_comments(REPO, 7, author=BOT_LOGIN) == [
+        PostedComment("f1.py", 7, f"finding {MARKER}"),
+        PostedComment("f2.py", None, "outdated"),
     ]

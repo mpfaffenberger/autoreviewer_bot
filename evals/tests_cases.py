@@ -5,8 +5,7 @@ Clean controls strengthen a test or refactor well-tested code, plus the correctn
 
 from __future__ import annotations
 
-from evals.cases import CASES as CORRECTNESS_CASES
-from evals.cases import Case
+from evals.cases import CLEAN_CONCAT, CLEAN_CONTROLS, Case
 
 TESTS_CORPUS = "d284fe8"
 """main after #32: has the unused-import lint and model pins, with their tests."""
@@ -39,7 +38,6 @@ CASES: list[Case] = [
          '    assert "`os` imported but unused" in finding.explanation\n'
          '    assert finding.title == "Remove the unused import"\n', "Pin the unused-import title", clean=True,
          corpus=TESTS_CORPUS),
-    Case("tests_clean_concat", CONFIG, 'return f"{kind}.verifier"', 'return kind + ".verifier"',
-         "Build role names by concatenation", clean=True, corpus=TESTS_CORPUS),
-    *(case for case in CORRECTNESS_CASES if case.clean),
+    CLEAN_CONCAT,
+    *CLEAN_CONTROLS,
 ]  # fmt: skip

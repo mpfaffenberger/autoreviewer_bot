@@ -23,13 +23,12 @@ def verifier_role(kind: AgentKind) -> str:
 
 
 AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS))
+_CHECKED_BY_KIMI: tuple[AgentKind, ...] = ("docs", "tests")
 DEFAULT_MODELS = {
     **dict.fromkeys(AGENT_KINDS, QWEN),
     **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK),
-    "docs": DEEPSEEK,
-    "docs.verifier": KIMI,
-    "tests": DEEPSEEK,
-    "tests.verifier": KIMI,
+    **dict.fromkeys(_CHECKED_BY_KIMI, DEEPSEEK),
+    **dict.fromkeys(map(verifier_role, _CHECKED_BY_KIMI), KIMI),
 }
 """Finders on Qwen (fast), checkers on DeepSeek (better); docs and tests are found by DeepSeek and checked by Kimi,
 keeping Qwen's lanes for the rest (Mike, Nov 18). Pin any role to change it (AUTOREVIEWER_MODELS)."""

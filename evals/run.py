@@ -36,6 +36,7 @@ from tests.review_fakes import FakeGitHub, GitRepo, LocalSource, git
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results")
+SUITES = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES, "docs": DOCS_CASES, "tests": TESTS_CASES}
 CONCURRENCY = Settings.max_concurrent_jobs
 """Cases at once by default: as many as the bot runs reviews, so cases don't queue behind each other's model
 lanes. More (--concurrency) finishes sooner, but per-case times then include waiting for lanes."""
@@ -192,7 +193,7 @@ async def main() -> None:
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="cases at once")
     parser.add_argument("--soft-minutes", type=float, default=ReviewDeps.soft_deadline_s / 60)
     parser.add_argument("--hard-minutes", type=float, default=ReviewDeps.hard_deadline_s / 60)
-    parser.add_argument("--suite", choices=("correctness", "security", "dry", "docs", "tests"), default="correctness")
+    parser.add_argument("--suite", choices=SUITES, default="correctness")
     parser.add_argument("--lens", action="append", choices=get_args(LensKind), default=[], help="extra lens to run")
     args = parser.parse_args()
 
@@ -200,14 +201,7 @@ async def main() -> None:
     agents = correctness_agents(plan)
     lenses = [lens(kind, lens_agents(plan, kind)) for kind in args.lens]  # the bot's own settings for each kind
 
-    suites = {
-        "correctness": CASES,
-        "security": SECURITY_CASES,
-        "dry": DRY_CASES,
-        "docs": DOCS_CASES,
-        "tests": TESTS_CASES,
-    }
-    suite = suites[args.suite]
+    suite = SUITES[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]
     slots = asyncio.Semaphore(args.concurrency)
     with tempfile.TemporaryDirectory(prefix="autoreviewer-eval-") as work:
