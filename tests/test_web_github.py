@@ -18,7 +18,16 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import AppAuthStrategy, GitHub
 
-from autoreviewer.github import CHECK_NAME, Comparison, GitHubApp, PostedComment, Repo, ReviewComment, ReviewRejected
+from autoreviewer.github import (
+    CHECK_NAME,
+    Comparison,
+    GitHubApp,
+    PostedComment,
+    Repo,
+    ReviewComment,
+    ReviewRejected,
+    ThreadComment,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -95,10 +104,15 @@ class FakeGitHub:
             ])  # fmt: skip
         if method == "GET" and path == f"{base}/pulls/7/comments":
             return httpx2.Response(200, json=[
-                {"user": {"login": BOT_LOGIN}, "path": "f1.py", "line": 7, "body": f"finding {MARKER}"},
-                {"user": {"login": BOT_LOGIN}, "path": "f2.py", "line": None, "original_line": 3, "body": "outdated"},
-                {"user": {"login": "someone"}, "path": "f1.py", "line": 7, "body": "reply"},
+                {"id": 11, "user": {"login": BOT_LOGIN}, "path": "f1.py", "line": 7, "body": f"finding {MARKER}"},
+                {"id": 12, "user": {"login": BOT_LOGIN}, "path": "f2.py", "line": None, "original_line": 3,
+                 "body": "outdated"},
+                {"id": 13, "in_reply_to_id": 11, "user": {"login": "someone"}, "path": "f1.py", "line": 7,
+                 "body": "reply"},
             ])  # fmt: skip
+        if method == "POST" and path == f"{base}/pulls/7/comments/11/replies":
+            self.writes.append(("reply", path, json.loads(request.content)))
+            return httpx2.Response(201, json={"id": 14})
         if method == "POST" and path == f"{base}/pulls/7/comments":
             self.writes.append(("create_review_comment", path, json.loads(request.content)))
             return httpx2.Response(201, json={"id": 2})
@@ -206,3 +220,14 @@ async def test_single_comments_and_review_listings(fake_and_app: tuple[FakeGitHu
         PostedComment("f1.py", 7, f"finding {MARKER}"),
         PostedComment("f2.py", None, "outdated"),
     ]
+
+
+async def test_a_thread_is_read_and_answered(fake_and_app: tuple[FakeGitHub, GitHubApp]) -> None:
+    """From the bot's review of #37: the real client's thread() and reply()."""
+    fake, app = fake_and_app
+    assert await app.thread(REPO, 7, 11) == [
+        ThreadComment(11, BOT_LOGIN, f"finding {MARKER}", "f1.py"),
+        ThreadComment(13, "someone", "reply", "f1.py"),
+    ]
+    await app.reply(REPO, 7, 11, "answer")
+    assert fake.writes[-1] == ("reply", "/repos/mpfaffenberger/demo/pulls/7/comments/11/replies", {"body": "answer"})

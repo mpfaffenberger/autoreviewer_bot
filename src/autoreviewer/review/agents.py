@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from pydantic_ai import Agent, AgentRetries, ConcurrencyLimiter
 from pydantic_ai.capabilities import LocalWorkspace
@@ -20,7 +21,14 @@ from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 
 from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.schemas import LensKind, LensReport, SimplifyReport, SimplifyVerdict, Verification
+from autoreviewer.review.schemas import (
+    LensKind,
+    LensReport,
+    SimplifyReport,
+    SimplifyVerdict,
+    ThreadAnswer,
+    Verification,
+)
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, QWEN_CONTEXT_WINDOW, ReasoningEffort
 
@@ -137,7 +145,7 @@ def correctness_agent(
 def verifier_agent(
     model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
 ) -> Agent[None, Verification]:
-    return _agent(model, workspace, Verification, _prompt("verifier.md"), context_window)
+    return checker_agent("correctness", model, workspace, context_window=context_window)
 
 
 LENS_PROMPTS: dict[LensKind, tuple[str, str]] = {
@@ -148,7 +156,7 @@ LENS_PROMPTS: dict[LensKind, tuple[str, str]] = {
 }
 """Each extra lens's (lens prompt, verifier prompt)."""
 
-LENS_REFERENCES: dict[LensKind, tuple[Path, ...]] = {"docs": (PSTACK / "skill-unslop.md",)}
+LENS_REFERENCES: dict[str, tuple[Path, ...]] = {"docs": (PSTACK / "skill-unslop.md",)}
 """Vendored standards a lens and its verifier both read, verbatim: the docs lens judges the text a PR writes by
 pstack's unslop rules (the verifier confirms only clear breaks of a cited rule)."""
 
@@ -164,12 +172,21 @@ def lens_pair(
 ) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
     """(lens, verifier) for one extra lens. The security lens also wants `security_references` as run
     instructions."""
-    lens_prompt, verifier_prompt = LENS_PROMPTS[kind]
-    references = "".join(f"\n{_body(path.read_text())}\n" for path in LENS_REFERENCES.get(kind, ()))
-    return (
-        _agent(lens_model, workspace, LensReport, _prompt(lens_prompt) + references, lens_window),
-        _agent(verifier_model, workspace, Verification, _prompt(verifier_prompt) + references, verifier_window),
-    )
+    lens = _agent(lens_model, workspace, LensReport, _prompt(LENS_PROMPTS[kind][0]) + _references(kind), lens_window)
+    return lens, checker_agent(kind, verifier_model, workspace, context_window=verifier_window)
+
+
+def checker_agent(
+    kind: Literal["correctness"] | LensKind, model: Model, workspace: Workspace, *, context_window: int
+) -> Agent[None, Verification]:
+    """The agent that checks one reported finding of `kind` against the code: the verifier a lens's findings go
+    through, and the blind re-check a withdrawal needs (conversation.py)."""
+    prompt = "verifier.md" if kind == "correctness" else LENS_PROMPTS[kind][1]
+    return _agent(model, workspace, Verification, _prompt(prompt) + _references(kind), context_window)
+
+
+def _references(kind: str) -> str:
+    return "".join(f"\n{_body(path.read_text())}\n" for path in LENS_REFERENCES.get(kind, ()))
 
 
 def security_references(paths: Iterable[str]) -> str:
@@ -202,6 +219,17 @@ def simplify_checker_agent(
     model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
 ) -> Agent[None, SimplifyVerdict]:
     return _agent(model, workspace, SimplifyVerdict, _prompt("simplify_checker.md"), context_window)
+
+
+CONVERSATION_LIMITS = UsageLimits(request_limit=60)
+"""An answer reads a few files: plenty, and a runaway thread can't burn the model for long."""
+
+
+def conversation_agent(
+    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+) -> Agent[None, ThreadAnswer]:
+    """Answers a reply under one of the bot's findings, re-checking the code it's about (see conversation.py)."""
+    return _agent(model, workspace, ThreadAnswer, _prompt("conversation.md"), context_window)
 
 
 def _prompt(name: str) -> str:

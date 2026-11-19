@@ -8,21 +8,25 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.servers import CONTEXT_WINDOWS, FALLBACKS, ReasoningEffort
-from autoreviewer.web.config import AgentKind, Settings, verifier_role
+from autoreviewer.web.config import CONVERSATION, AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
+    from pydantic_ai import Agent
     from pydantic_ai.models import Model
 
+    from autoreviewer.github import GitHubApp
+    from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.job import AgentFactory, Lens
-    from autoreviewer.review.schemas import LensKind
+    from autoreviewer.review.schemas import LensKind, Verification
     from autoreviewer.review.simplify import SimplifierFactory
+    from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import (
     Ignore,
     MalformedPayload,
@@ -30,6 +34,7 @@ from autoreviewer.web.routing import (
     PullRequestClosed,
     PullRequestUpdated,
     ReviewRequested,
+    ThreadReply,
     route,
 )
 
@@ -38,6 +43,7 @@ logger = logging.getLogger("autoreviewer.web")
 PullRequestHandler = Callable[[PullRequestUpdated], Awaitable[object]]
 ClosedHandler = Callable[[PullRequestClosed], Awaitable[None]]
 RequestHandler = Callable[[ReviewRequested], Awaitable[object]]
+ReplyHandler = Callable[[ThreadReply], Awaitable[object]]
 
 
 def _reply(status_code: int, **body: str) -> JSONResponse:
@@ -50,6 +56,7 @@ def create_app(
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
     on_pull_request_closed: ClosedHandler | None = None,
     on_review_requested: RequestHandler | None = None,
+    on_thread_reply: ReplyHandler | None = None,
 ) -> FastAPI:
     """`on_pull_request` must be quick (it enqueues); `lifespan` starts and stops whatever runs the work."""
     app = FastAPI(title="autoreviewer", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -96,6 +103,11 @@ def create_app(
                     return _reply(200, status="ignored", reason="commands are not enabled")
                 await on_review_requested(command)  # a failure is a 500, so GitHub's redelivery can retry it
                 return _reply(202, status="accepted")
+            case ThreadReply() as reply:
+                if on_thread_reply is None:
+                    return _reply(200, status="ignored", reason="conversations are not enabled")
+                await on_thread_reply(reply)  # queues the answer; its workflow ID makes redeliveries no-ops
+                return _reply(202, status="accepted")
 
     return app
 
@@ -129,6 +141,10 @@ class ModelPlan:
     def verifier(self, kind: AgentKind) -> tuple[Model, int]:
         """The model and its context window for the agent that checks `kind`'s findings."""
         return self._build(verifier_role(kind))
+
+    def conversation(self) -> tuple[Model, int]:
+        """The model and its context window for answering replies under the bot's findings."""
+        return self._build(CONVERSATION)
 
     def _build(self, role: str) -> tuple[Model, int]:
         """The role's model on Boodleton, with its lanes and the role's reasoning, and the context window its agent
@@ -249,6 +265,38 @@ def _and(names: list[str]) -> str:
     return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
 
 
+def thread_reply_handler(settings: Settings) -> ReplyHandler | None:
+    """Replies under the bot's findings are queued for an answer only with AUTOREVIEWER_CONVERSATIONS on."""
+    from autoreviewer.review import durable
+
+    return durable.enqueue_answer if settings.conversations else None
+
+
+def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps:
+    """Answers on the conversation role's model, over a fresh checkout of the PR's head."""
+    from autoreviewer.review.agents import checker_agent, conversation_agent
+    from autoreviewer.review.conversation import ConversationDeps
+    from autoreviewer.review.workspace import GitHubSource
+
+    plan = ModelPlan.from_settings(settings)
+    model, window = plan.conversation()
+
+    def checker(workspace: Workspace, kind: str) -> Agent[None, Verification]:
+        """The finding's own kind of checker; only kinds that can block are re-checked (security, correctness)."""
+        checked: Literal["correctness", "security"] = "security" if kind == "security" else "correctness"
+        checker_model, checker_window = plan.verifier(checked)
+        return checker_agent(checked, checker_model, workspace, context_window=checker_window)
+
+    return ConversationDeps(
+        github=github,
+        source=GitHubSource(github),
+        agents=lambda workspace: conversation_agent(model, workspace, context_window=window),
+        checkers=checker,
+        work_dir=settings.work_dir,
+        bot_login=settings.bot_login,
+    )
+
+
 def main() -> None:
     import functools
 
@@ -291,7 +339,8 @@ def main() -> None:
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await durable.launch(deps, concurrency=settings.max_concurrent_jobs)  # also recovers interrupted reviews
+        # Also recovers interrupted reviews and answers.
+        await durable.launch(deps, conversation_deps(settings, github), concurrency=settings.max_concurrent_jobs)
         try:
             yield
         finally:
@@ -305,6 +354,13 @@ def main() -> None:
         repo = Repo(closed.installation_id, closed.owner, closed.repo)
         memory.forget(conversation_id(repo, closed.number))
 
-    app = create_app(settings, durable.enqueue_review, lifespan, forget, review_requested)
+    app = create_app(
+        settings,
+        durable.enqueue_review,
+        lifespan,
+        forget,
+        review_requested,
+        thread_reply_handler(settings),
+    )
     logfire.instrument_fastapi(app)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")  # only reachable on homelab-public

@@ -31,13 +31,16 @@ def verifier_role(kind: AgentKind) -> str:
     return f"{kind}.verifier"
 
 
-AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS))
+CONVERSATION = "conversation"
+"""The role that answers replies under the bot's findings (review/conversation.py)."""
+AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS), CONVERSATION)
 _CHECKED_BY_KIMI: tuple[AgentKind, ...] = ("docs", "tests")
 DEFAULT_MODELS = {
     **dict.fromkeys(AGENT_KINDS, QWEN),
     **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK),
     **dict.fromkeys(_CHECKED_BY_KIMI, DEEPSEEK),
     **dict.fromkeys(map(verifier_role, _CHECKED_BY_KIMI), KIMI),
+    CONVERSATION: DEEPSEEK,
 }
 """Finders on Qwen (fast), checkers on DeepSeek (better); docs and tests are found by DeepSeek and checked by Kimi,
 keeping Qwen's lanes for the rest (Mike, Nov 18). Pin any role to change it (AUTOREVIEWER_MODELS)."""
@@ -61,6 +64,8 @@ class Settings:
     docs: bool = False
     """Run the docs lens: docstrings, comments, docs, config comments, error messages, and contracts the change
     makes untrue. Off until its evals are in."""
+    conversations: bool = False
+    """Answer replies under the bot's findings (see review/conversation.py)."""
     tests: bool = False
     """Run the tests lens: changed behaviour no test would catch breaking, and tests that can't fail. Off until
     its evals are in."""
@@ -82,7 +87,7 @@ class Settings:
     boodleton_api_key: str = field(default="", repr=False)
     models: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     """The model each agent role runs on (see models_from); its context window follows (servers.CONTEXT_WINDOWS)."""
-    reasoning: Mapping[str, ReasoningEffort] = field(default_factory=dict[str, "ReasoningEffort"])
+    reasoning: Mapping[str, ReasoningEffort] = field(default_factory=lambda: dict(DEFAULT_REASONING))
     """The reasoning effort sent for each role that has one (see reasoning_from); unlisted roles send none."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
@@ -112,6 +117,7 @@ class Settings:
             dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True),
             docs=parse_bool(env, "AUTOREVIEWER_DOCS", default=False),
             tests=parse_bool(env, "AUTOREVIEWER_TESTS", default=False),
+            conversations=parse_bool(env, "AUTOREVIEWER_CONVERSATIONS", default=False),
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],
@@ -174,13 +180,19 @@ def _runs_on(model: str) -> set[str]:
     return {model, *([FALLBACKS[model]] if model in FALLBACKS else [])}
 
 
+DEFAULT_REASONING: dict[str, ReasoningEffort] = {CONVERSATION: "high"}
+"""The conversation agent decides withdrawals, so it thinks. Thinking didn't help the docs or tests finders
+(evals docs-v3 and tests-v2, Nov 19: same recall, as much noise or more), so they don't."""
+
+
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
     """AUTOREVIEWER_REASONING ("role=effort,...", e.g. "docs=high,tests=high"): the reasoning effort each role's
-    requests carry. Unlisted roles send none, which leaves the server's default: DeepSeek doesn't think then
-    (any effort turns it on), while Qwen and Kimi think by default. Stops startup on an unknown role or effort."""
+    requests carry, over DEFAULT_REASONING. Other roles send none, which leaves the server's default: DeepSeek
+    doesn't think then (any effort turns it on), while Qwen and Kimi think by default. Stops startup on an unknown
+    role or effort."""
     # str -> its ReasoningEffort literal: a lookup the type checker can follow, where `in` wouldn't narrow.
     efforts: dict[str, ReasoningEffort] = {effort: effort for effort in REASONING_EFFORTS}
-    reasoning: dict[str, ReasoningEffort] = {}
+    reasoning: dict[str, ReasoningEffort] = dict(DEFAULT_REASONING)
     for role, value in _role_pairs(env, "AUTOREVIEWER_REASONING", "role=effort"):
         if (effort := efforts.get(value)) is None:
             raise ValueError(f"AUTOREVIEWER_REASONING: {role}={value!r}; efforts: {', '.join(REASONING_EFFORTS)}")
