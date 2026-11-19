@@ -12,7 +12,7 @@ from pydantic_ai import Agent, AgentRetries, ConcurrencyLimiter
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
 from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness import DetectLoops, FileSystem
@@ -22,7 +22,7 @@ from autoreviewer.review.compaction import review_compaction
 from autoreviewer.review.gittools import git_tools
 from autoreviewer.review.schemas import LensKind, LensReport, SimplifyReport, SimplifyVerdict, Verification
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, QWEN_CONTEXT_WINDOW
+from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, QWEN_CONTEXT_WINDOW, ReasoningEffort
 
 PROMPTS = Path(__file__).parent / "prompts"
 PSTACK = PROMPTS / "vendor" / "pstack"
@@ -52,9 +52,13 @@ Exploring means guessing paths: a few misses on a directory that doesn't exist m
 review, as 3 did on PR #5. Twenty-five misses in a row of one tool means the model is stuck."""
 
 
-def boodleton_model(name: str, *, base_url: str, api_key: str, lanes: int | None = None) -> Model:
-    """A model on Boodleton; with `lanes`, at most that many requests to it at once across this process."""
-    model = OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key))
+def boodleton_model(
+    name: str, *, base_url: str, api_key: str, lanes: int | None = None, reasoning: ReasoningEffort | None = None
+) -> Model:
+    """A model on Boodleton; with `lanes`, at most that many requests to it at once across this process (shared by
+    every model object for `name`); with `reasoning`, every request asks for that reasoning effort."""
+    settings = OpenAIChatModelSettings(openai_reasoning_effort=reasoning) if reasoning else None
+    model = OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key), settings=settings)
     return model if lanes is None else with_lanes(model, name, lanes)
 
 
@@ -109,12 +113,13 @@ REPORT_TOOL = "report_finding"
 """The tool a lens calls to hand over a finding mid-run (pipeline.Judge)."""
 
 
-def lens_version(model_name: str) -> str:
+def lens_version(model_name: str, reasoning: ReasoningEffort | None = None) -> str:
     """Fingerprint of what shapes a lens conversation; a saved one is only continued if it matches."""
     material = "\n".join(
         [
             _prompt("correctness.md"),
             model_name,
+            f"reasoning={reasoning}",
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
             ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
             LENS_RULES,

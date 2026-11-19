@@ -1,6 +1,8 @@
 """Facts about the model servers on chaos-emerald. Change them here when a server is reconfigured; DESIGN.md §7
 ("Lanes") has the measurements behind them."""
 
+from typing import Literal, get_args
+
 QWEN = "qwen3.8-flash-next"
 DEEPSEEK = "deepseek-v4.1-flash"
 KIMI = "kimi-k3.1-pro"
@@ -16,3 +18,8 @@ CONTEXT_WINDOWS = {QWEN: QWEN_CONTEXT_WINDOW, DEEPSEEK: DEEPSEEK_CONTEXT_WINDOW,
 DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4, KIMI: 2}
 """Requests at once per model, across every review: Qwen's stream count, DeepSeek's share of a shared server,
 and few to Kimi's hosted API (it only checks findings)."""
+
+ReasoningEffort = Literal["low", "medium", "high"]
+"""Efforts a request may ask for. DeepSeek thinks at any of them and not at all without one (2026-11-18: 43-59
+reasoning tokens at each level on the same question, 0 without); Qwen and Kimi think by default."""
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)

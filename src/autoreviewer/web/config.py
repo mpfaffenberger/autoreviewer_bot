@@ -8,7 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, get_args
 
-from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, DEFAULT_MODEL_LANES, KIMI, QWEN
+from autoreviewer.servers import (
+    CONTEXT_WINDOWS,
+    DEEPSEEK,
+    DEFAULT_MODEL_LANES,
+    KIMI,
+    QWEN,
+    REASONING_EFFORTS,
+    ReasoningEffort,
+)
 
 DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
 
@@ -73,6 +81,8 @@ class Settings:
     boodleton_api_key: str = field(default="", repr=False)
     models: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     """The model each agent role runs on (see models_from); its context window follows (servers.CONTEXT_WINDOWS)."""
+    reasoning: Mapping[str, ReasoningEffort] = field(default_factory=dict[str, "ReasoningEffort"])
+    """The reasoning effort sent for each role that has one (see reasoning_from); unlisted roles send none."""
     work_dir: Path = Path("/var/lib/autoreviewer/work")
     database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
     """DBOS system database: queued and in-flight reviews survive restarts here."""
@@ -105,6 +115,7 @@ class Settings:
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],
             models=models_from(env),
+            reasoning=reasoning_from(env),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
             steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
@@ -146,9 +157,7 @@ def models_from(env: Mapping[str, str]) -> dict[str, str]:
     role, a model without a known context window, or a finder on the same model as its checker (different models
     make different mistakes; that's the point of checking). Shared by the bot and the evals."""
     models = dict(DEFAULT_MODELS)
-    for role, model in _pairs(env.get("AUTOREVIEWER_MODELS", ""), "AUTOREVIEWER_MODELS", "role=model"):
-        if role not in models:
-            raise ValueError(f"AUTOREVIEWER_MODELS: unknown role {role!r}; roles: {', '.join(AGENT_ROLES)}")
+    for role, model in _role_pairs(env, "AUTOREVIEWER_MODELS", "role=model"):
         if model not in CONTEXT_WINDOWS:
             raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
         models[role] = model
@@ -156,6 +165,29 @@ def models_from(env: Mapping[str, str]) -> dict[str, str]:
         if models[kind] == models[verifier_role(kind)]:
             raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
     return models
+
+
+def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
+    """AUTOREVIEWER_REASONING ("role=effort,...", e.g. "docs=high,tests=high"): the reasoning effort each role's
+    requests carry. Unlisted roles send none, which leaves the server's default: DeepSeek doesn't think then
+    (any effort turns it on), while Qwen and Kimi think by default. Stops startup on an unknown role or effort."""
+    # str -> its ReasoningEffort literal: a lookup the type checker can follow, where `in` wouldn't narrow.
+    efforts: dict[str, ReasoningEffort] = {effort: effort for effort in REASONING_EFFORTS}
+    reasoning: dict[str, ReasoningEffort] = {}
+    for role, value in _role_pairs(env, "AUTOREVIEWER_REASONING", "role=effort"):
+        if (effort := efforts.get(value)) is None:
+            raise ValueError(f"AUTOREVIEWER_REASONING: {role}={value!r}; efforts: {', '.join(REASONING_EFFORTS)}")
+        reasoning[role] = effort
+    return reasoning
+
+
+def _role_pairs(env: Mapping[str, str], setting: str, expected: str) -> list[tuple[str, str]]:
+    """`setting`'s "role=value" pairs; an unknown role stops startup."""
+    pairs = _pairs(env.get(setting, ""), setting, expected)
+    for role, _ in pairs:
+        if role not in DEFAULT_MODELS:
+            raise ValueError(f"{setting}: unknown role {role!r}; roles: {', '.join(AGENT_ROLES)}")
+    return pairs
 
 
 def _pairs(value: str, setting: str, expected: str) -> list[tuple[str, str]]:
