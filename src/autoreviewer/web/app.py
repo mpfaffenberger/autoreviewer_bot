@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
-from autoreviewer.servers import CONTEXT_WINDOWS
+from autoreviewer.servers import CONTEXT_WINDOWS, ReasoningEffort
 from autoreviewer.web.config import CONVERSATION, AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
@@ -119,27 +119,42 @@ class ModelPlan:
     base_url: str
     api_key: str = field(repr=False)
     lanes: Mapping[str, int]
+    reasoning: Mapping[str, ReasoningEffort] = field(default_factory=dict[str, "ReasoningEffort"])
+    """Role -> reasoning effort (config.reasoning_from)."""
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ModelPlan:
-        return cls(settings.models, settings.boodleton_base_url, settings.boodleton_api_key, settings.model_lanes)
+        return cls(
+            settings.models,
+            settings.boodleton_base_url,
+            settings.boodleton_api_key,
+            settings.model_lanes,
+            settings.reasoning,
+        )
 
     def finder(self, kind: AgentKind) -> tuple[Model, int]:
         """The model and its context window for `kind`'s finder (a lens, or the simplifier's proposer)."""
-        return self._build(self.models[kind])
+        return self._build(kind)
 
     def verifier(self, kind: AgentKind) -> tuple[Model, int]:
         """The model and its context window for the agent that checks `kind`'s findings."""
-        return self._build(self.models[verifier_role(kind)])
+        return self._build(verifier_role(kind))
 
     def conversation(self) -> tuple[Model, int]:
         """The model and its context window for answering replies under the bot's findings."""
-        return self._build(self.models[CONVERSATION])
+        return self._build(CONVERSATION)
 
-    def _build(self, name: str) -> tuple[Model, int]:
+    def _build(self, role: str) -> tuple[Model, int]:
         from autoreviewer.review.agents import boodleton_model
 
-        model = boodleton_model(name, base_url=self.base_url, api_key=self.api_key, lanes=self.lanes.get(name))
+        name = self.models[role]
+        model = boodleton_model(
+            name,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            lanes=self.lanes.get(name),
+            reasoning=self.reasoning.get(role),
+        )
         return model, CONTEXT_WINDOWS[name]
 
 
@@ -294,7 +309,7 @@ def main() -> None:
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
-        lens_version=lens_version(settings.models["correctness"]),
+        lens_version=lens_version(settings.models["correctness"], settings.reasoning.get("correctness")),
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
         lenses=build_lenses(settings),
