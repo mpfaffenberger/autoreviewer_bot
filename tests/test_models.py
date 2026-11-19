@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, KIMI, QWEN
+from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, QWEN
 from autoreviewer.web.app import ModelPlan, build_agent_factory, build_lenses, build_simplifier_factory, models_note
 from autoreviewer.web.config import AGENT_ROLES, Settings, models_from
 
@@ -19,9 +19,9 @@ def settings(**changes: object) -> Settings:
 
 
 def test_default_models() -> None:
-    """Finders on Qwen and checkers on DeepSeek, except docs and tests: found by DeepSeek, checked by Kimi."""
+    """Finders on Qwen and checkers on DeepSeek, except docs and tests: found by DeepSeek, checked by Qwen."""
     expected = {role: DEEPSEEK if role.endswith(".verifier") else QWEN for role in AGENT_ROLES}
-    expected |= {"docs": DEEPSEEK, "docs.verifier": KIMI, "tests": DEEPSEEK, "tests.verifier": KIMI}
+    expected |= {"docs": DEEPSEEK, "docs.verifier": QWEN, "tests": DEEPSEEK, "tests.verifier": QWEN}
     assert models_from({}) == expected
 
 
@@ -36,7 +36,7 @@ def test_a_pin_moves_only_the_roles_it_names() -> None:
     [
         (f"securty={DEEPSEEK}", "unknown role 'securty'"),
         ("security=gpt-9", "no known context window for 'gpt-9'"),
-        (f"dry={DEEPSEEK}", "dry and dry.verifier could both run on"),  # its checker is DeepSeek by default
+        (f"dry={DEEPSEEK}", "dry and dry.verifier are both"),  # its checker is DeepSeek by default
         ("security", "expected role=model"),
     ],
 )

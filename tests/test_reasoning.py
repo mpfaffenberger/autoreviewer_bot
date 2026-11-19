@@ -29,7 +29,7 @@ def test_only_the_listed_roles_ask_for_reasoning() -> None:
         {"AUTOREVIEWER_REASONING": "docs=high,security.verifier=medium"}
     ))  # fmt: skip
     assert effort(plan.finder("docs")[0]) == "high"
-    assert effort(plan.verifier("docs")[0]) is None  # Kimi checks it, thinking by default
+    assert effort(plan.verifier("docs")[0]) is None  # Qwen checks it, thinking by default
     assert effort(plan.verifier("security")[0]) == "medium"
     assert effort(plan.finder("tests")[0]) is None  # the same model (DeepSeek), but no effort listed for it
 

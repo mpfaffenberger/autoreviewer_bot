@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.review.agents import with_lanes
-from autoreviewer.servers import DEEPSEEK, KIMI, QWEN
+from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
 
 pytestmark = pytest.mark.anyio
@@ -40,7 +40,7 @@ def test_lanes_parse_strictly() -> None:
 
 
 def test_the_defaults_match_the_model_servers() -> None:
-    assert DEFAULT_MODEL_LANES == {QWEN: 4, DEEPSEEK: 4, KIMI: 2}
+    assert DEFAULT_MODEL_LANES == {QWEN: 4, DEEPSEEK: 4}
 
 
 @pytest.mark.parametrize("value", [None, "", "  "])

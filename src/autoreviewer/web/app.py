@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
-from autoreviewer.servers import CONTEXT_WINDOWS, FALLBACKS, ReasoningEffort
+from autoreviewer.servers import CONTEXT_WINDOWS, ReasoningEffort
 from autoreviewer.web.config import AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
@@ -131,26 +131,18 @@ class ModelPlan:
         return self._build(verifier_role(kind))
 
     def _build(self, role: str) -> tuple[Model, int]:
-        """The role's model on Boodleton, with its lanes and the role's reasoning, and the context window its agent
-        gets. A model in FALLBACKS becomes a FallbackModel that moves to the fallback when it fails; the window is
-        then the smaller of the two, since a conversation may move mid-run."""
-        from pydantic_ai.models.fallback import FallbackModel
-
+        """The role's model on Boodleton, with its lanes and the role's reasoning, and its context window."""
         from autoreviewer.review.agents import boodleton_model
 
-        names = [self.models[role], *([fallback] if (fallback := FALLBACKS.get(self.models[role])) else [])]
-        models = [
-            boodleton_model(
-                name,
-                base_url=self.base_url,
-                api_key=self.api_key,
-                lanes=self.lanes.get(name),
-                reasoning=self.reasoning.get(role),
-            )
-            for name in names
-        ]
-        window = min(CONTEXT_WINDOWS[name] for name in names)
-        return (FallbackModel(*models) if len(models) > 1 else models[0]), window
+        name = self.models[role]
+        model = boodleton_model(
+            name,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            lanes=self.lanes.get(name),
+            reasoning=self.reasoning.get(role),
+        )
+        return model, CONTEXT_WINDOWS[name]
 
 
 def build_agent_factory(settings: Settings) -> AgentFactory:

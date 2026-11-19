@@ -12,8 +12,6 @@ from autoreviewer.servers import (
     CONTEXT_WINDOWS,
     DEEPSEEK,
     DEFAULT_MODEL_LANES,
-    FALLBACKS,
-    KIMI,
     QWEN,
     REASONING_EFFORTS,
     ReasoningEffort,
@@ -32,15 +30,16 @@ def verifier_role(kind: AgentKind) -> str:
 
 
 AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS))
-_CHECKED_BY_KIMI: tuple[AgentKind, ...] = ("docs", "tests")
+_FOUND_BY_DEEPSEEK: tuple[AgentKind, ...] = ("docs", "tests")
 DEFAULT_MODELS = {
     **dict.fromkeys(AGENT_KINDS, QWEN),
     **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK),
-    **dict.fromkeys(_CHECKED_BY_KIMI, DEEPSEEK),
-    **dict.fromkeys(map(verifier_role, _CHECKED_BY_KIMI), KIMI),
+    **dict.fromkeys(_FOUND_BY_DEEPSEEK, DEEPSEEK),
+    **dict.fromkeys(map(verifier_role, _FOUND_BY_DEEPSEEK), QWEN),
 }
-"""Finders on Qwen (fast), checkers on DeepSeek (better); docs and tests are found by DeepSeek and checked by Kimi,
-keeping Qwen's lanes for the rest (Mike, Nov 18). Pin any role to change it (AUTOREVIEWER_MODELS)."""
+"""Finders on Qwen (fast), checkers on DeepSeek (better). Docs and tests are found by DeepSeek and checked by Qwen,
+the other model. Kimi K3.1 Pro checked them for a day, Nov 18-19, and went when its hosted quota ran out twice.
+Pin any role to change it (AUTOREVIEWER_MODELS)."""
 
 
 @dataclass(frozen=True)
@@ -155,29 +154,23 @@ def parse_lanes(value: str) -> dict[str, int]:
 def models_from(env: Mapping[str, str]) -> dict[str, str]:
     """Each agent role's model: DEFAULT_MODELS, with AUTOREVIEWER_MODELS ("role=model,...", e.g.
     "security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next") pinning roles. Stops startup on an unknown
-    role, a model without a known context window, or a finder and its checker that could run on the same model,
-    fallbacks included: different models make different mistakes, which is the point of checking. Shared by the
-    bot and the evals."""
+    role, a model without a known context window, or a finder on the same model as its checker (different models
+    make different mistakes; that's the point of checking). Shared by the bot and the evals."""
     models = dict(DEFAULT_MODELS)
     for role, model in _role_pairs(env, "AUTOREVIEWER_MODELS", "role=model"):
         if model not in CONTEXT_WINDOWS:
             raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
         models[role] = model
     for kind in AGENT_KINDS:
-        if shared := sorted(_runs_on(models[kind]) & _runs_on(models[verifier_role(kind)])):
-            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} could both run on {shared[0]!r}")
+        if models[kind] == models[verifier_role(kind)]:
+            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
     return models
-
-
-def _runs_on(model: str) -> set[str]:
-    """The models an agent on `model` may end up on: its own, and its fallback's (servers.FALLBACKS)."""
-    return {model, *([FALLBACKS[model]] if model in FALLBACKS else [])}
 
 
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
     """AUTOREVIEWER_REASONING ("role=effort,...", e.g. "docs=high,tests=high"): the reasoning effort each role's
     requests carry. Unlisted roles send none, which leaves the server's default: DeepSeek doesn't think then
-    (any effort turns it on), while Qwen and Kimi think by default. Stops startup on an unknown role or effort."""
+    (any effort turns it on), while Qwen thinks by default. Stops startup on an unknown role or effort."""
     # str -> its ReasoningEffort literal: a lookup the type checker can follow, where `in` wouldn't narrow.
     efforts: dict[str, ReasoningEffort] = {effort: effort for effort in REASONING_EFFORTS}
     reasoning: dict[str, ReasoningEffort] = {}

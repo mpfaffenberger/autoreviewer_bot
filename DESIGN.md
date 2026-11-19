@@ -168,8 +168,8 @@ the lens's best 5 by its own ranking (counting only findings past the free filte
 
 **Docs and tests lenses** (Nov 18, off until their evals are in: `AUTOREVIEWER_DOCS`, `AUTOREVIEWER_TESTS`). Both
 are advisory like DRY: never block, at most `MAX_ADVISORY_POSTED` (5) each, only files changed since the last
-review when continuing. Both are found by DeepSeek and checked by Kimi K3.1 Pro (Moonshot's hosted plan via
-Boodleton, 2 lanes), so they add no Qwen load.
+review when continuing. Both are found by DeepSeek and checked by Qwen, the other model. Kimi K3.1 Pro checked
+them for a day (Nov 18-19) and was dropped when its hosted quota ran out twice.
 - *docs*: text the change makes untrue: docstrings, comments, docs, config comments and documented settings,
   error and log messages, and contracts callers rely on (renamed flags, env vars, endpoints). The stale text
   is often in a file the PR didn't touch, so a finding cites the changed line that made it untrue and quotes
@@ -354,18 +354,15 @@ lease. Don't build a distributed lock for a single box.
 |---|---|---|
 | Finders: `correctness`, `security`, `dry`, `simplify` | `qwen3.8-flash-next` | Local on the RTX PRO 6000, MTP drafting makes it fast |
 | Checkers: `<kind>.verifier` | `deepseek-v4.1-flash` | Better, and a *different* model, so its mistakes are less likely to match the finder's |
+| `docs`, `tests` and their checkers | DeepSeek finds, Qwen checks | Their evals ran this way; still two different models |
 
 **Pinning.** Any role can be pinned to another model with one setting, e.g.
 `AUTOREVIEWER_MODELS="security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next"`; unlisted roles keep
 the defaults (`config.models_from`). Each agent's context window follows its model (`servers.CONTEXT_WINDOWS`).
 Startup stops on an unknown role, a model without a known window, or a finder pinned to the same model as its
-checker. A model in `servers.FALLBACKS` is wrapped in pydantic-ai's `FallbackModel`. When it fails with an API error,
-after the client's own retries, the request goes to its fallback, and the agent's context window is the
-smaller of the two. Kimi, a hosted plan with quotas, falls back to Qwen. On Nov 19 Kimi answered 429 for half
-an hour, and every docs and tests check in that time went unverified. A finder and its checker may never run
-on the same model, fallbacks included.
+checker.
 `AUTOREVIEWER_REASONING="docs=high,tests=high"` sets a reasoning effort per role (low, medium, high).
-DeepSeek doesn't think unless a request asks for an effort (any effort turns it on); Qwen and Kimi think by
+DeepSeek doesn't think unless a request asks for an effort (any effort turns it on); Qwen thinks by
 default. Unlisted roles send none. `web.app.ModelPlan` builds every agent's model, for the bot and the evals alike; the review footer names
 each finder/checker pair.
 
