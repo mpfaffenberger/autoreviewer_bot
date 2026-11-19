@@ -143,15 +143,27 @@ async def test_a_withdrawal_is_marked_and_its_thread_resolved(
     assert github.resolved_threads == ({"T1"} if withdrawn else set())
 
 
-async def test_a_finding_that_holds_again_reopens_its_thread(repo: GitRepo, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("history", "reopened"),
+    [
+        (["withdrawn"], True),
+        (["holds", "withdrawn"], True),  # the latest answer decides, not the first (the bot's answer on #44)
+        (["withdrawn", "holds"], False),  # reinstated already; closed again since, by someone else
+        (["withdrawn", "note"], True),  # a note isn't an answer: the resolve note, say (the bot's answer on #44)
+    ],
+)
+async def test_a_finding_that_holds_again_reopens_its_thread(
+    repo: GitRepo, tmp_path: Path, history: list[str], reopened: bool
+) -> None:
     """From the bot's review of #42: a withdrawal isn't final, and a reinstated finding mustn't stay hidden."""
     github, reply = await thread_with_reply(repo)
-    github.say(BOT, 1, f"You're right.\n\n{answer_markers(2, withdrawn=True)}")  # withdrawn earlier...
-    github.resolved_threads.add("T1")  # ...and resolved with it
-    later = github.say("alice", 1, "Actually, look again at the empty list.")
-    reply = replace(reply, comment_id=later)
+    for n, said in enumerate(history, start=2):
+        marker = "" if said == "note" else f"\n\n{answer_markers(n, withdrawn=said == 'withdrawn')}"
+        github.say(BOT, 1, f"{said}{marker}")
+    github.resolved_threads.add("T1")
+    reply = replace(reply, comment_id=github.say("alice", 1, "Actually, look again at the empty list."))
     assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
-    assert github.resolved_threads == set()
+    assert github.resolved_threads == (set() if reopened else {"T1"})
 
 
 async def test_a_thread_closed_for_another_reason_stays_closed(repo: GitRepo, tmp_path: Path) -> None:

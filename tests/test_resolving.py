@@ -184,9 +184,7 @@ def test_a_finding_folded_into_another_lens_is_still_reported(security_priority:
 
 async def test_a_review_cut_short_resolves_nothing_its_lens_didnt_finish(repo: GitRepo, tmp_path: Path) -> None:
     """From the bot's review of #42: the deadline takes the wrapped-up lens's kinds out of what was checked."""
-    github = FakeGitHub(repo)
-    await Publisher(github, REPO, 7, head_sha="a" * 40, author=BOT, block_at=1)(blocking(5))
-    github.review_comments[0]["outdated"] = True
+    github = await outdated(repo)
     deps = replace(job_deps(github, tmp_path), soft_deadline_s=0)
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
     assert github.resolved_threads == set()
@@ -197,9 +195,7 @@ async def test_the_linter_at_its_cap_resolves_nothing(
     repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lint_cap: int, resolved: set[str]
 ) -> None:
     """From the bot's review of #42: like a capped lens, a capped linter may have dropped a finding."""
-    github = FakeGitHub(repo)
-    await Publisher(github, REPO, 7, head_sha="a" * 40, author=BOT, block_at=1)(blocking(5, kind="types"))
-    github.review_comments[0]["outdated"] = True
+    github = await outdated(repo, "types")
     monkeypatch.setattr(job, "MAX_LINT_FINDINGS", lint_cap)
     await review_and_post(job_deps(github, tmp_path), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
     assert github.resolved_threads == resolved
