@@ -138,8 +138,14 @@ def verifier_agent(
 LENS_PROMPTS: dict[LensKind, tuple[str, str]] = {
     "security": ("security.md", "security_verifier.md"),
     "dry": ("dry.md", "dry_verifier.md"),
+    "docs": ("docs.md", "docs_verifier.md"),
+    "tests": ("tests.md", "tests_verifier.md"),
 }
 """Each extra lens's (lens prompt, verifier prompt)."""
+
+LENS_REFERENCES: dict[LensKind, tuple[Path, ...]] = {"docs": (PSTACK / "skill-unslop.md",)}
+"""Vendored standards a lens and its verifier both read, verbatim: the docs lens judges the text a PR writes by
+pstack's unslop rules (the verifier confirms only clear breaks of a cited rule)."""
 
 
 def lens_pair(
@@ -154,9 +160,10 @@ def lens_pair(
     """(lens, verifier) for one extra lens. The security lens also wants `security_references` as run
     instructions."""
     lens_prompt, verifier_prompt = LENS_PROMPTS[kind]
+    references = "".join(f"\n{_body(path.read_text())}\n" for path in LENS_REFERENCES.get(kind, ()))
     return (
-        _agent(lens_model, workspace, LensReport, _prompt(lens_prompt), lens_window),
-        _agent(verifier_model, workspace, Verification, _prompt(verifier_prompt), verifier_window),
+        _agent(lens_model, workspace, LensReport, _prompt(lens_prompt) + references, lens_window),
+        _agent(verifier_model, workspace, Verification, _prompt(verifier_prompt) + references, verifier_window),
     )
 
 

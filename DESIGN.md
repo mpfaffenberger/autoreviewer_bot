@@ -105,7 +105,7 @@ Not used, on purpose (YAGNI):
 4. **Lenses** (in parallel). One factory, three instruction files. Each returns a report: every qualifying finding (not just the first), an overall verdict, and the files it inspected. A finding below confidence 4 is dropped without a verifier call.
 5. **Verify.** A *different* model re-reads the cited code for each candidate and judges it against a fixed rubric (introduced by this PR, reachable trigger, no unstated assumptions, not intentional, actionable). It returns `confirmed | rejected` with a reason, and may correct the priority. Unconfirmed findings are dropped. Using a second model means the two models' mistakes are less likely to line up, and this step does most of the work on precision.
 6. **Prove** (optional, see [EXECUTION.md](EXECUTION.md)). For confirmed high-severity findings, a repro test runs on head and on base in a throwaway sandbox. Findings that don't reproduce are dropped; bugs already present on base become non-blocking FYIs.
-7. **Dedupe.** Each finding gets a fingerprint, `sha256(lens, path, normalised_snippet, title)`, so the same issue is never posted twice, across lenses or across pushes.
+7. **Dedupe.** Each comment ends with a marker, `<!-- autoreviewer:<fingerprint> p<priority> <kind> -->`; the fingerprint is `sha256(head, kind, path, line)`. Before posting, `posting.Publisher` reads the bot's comments on the PR. A finding is skipped when a comment with its fingerprint is already there (a replayed review), when GitHub shows a comment of the same kind on the same path and line of this head (a superseded review's comment, carried over because the code there didn't change), or when the other lens already posted the same defect; in each case only if that comment is at least as urgent. A comment GitHub marks outdated covers nothing: the code changed.
 8. **Anchor.** GitHub rejects review comments on lines outside the diff hunks (HTTP 422). Findings that can be anchored become inline comments. Findings on unchanged code (common for DRY: "this already exists in `utils/x.py`") are anchored to the *new* code that duplicates it. Anything that still can't be anchored goes into the review body.
 9. **Stale check.** If the PR head moved while we were thinking, drop the result. The newer push has its own workflow.
 10. **Post** (code): one review (`REQUEST_CHANGES` if any blocking finding is open, else `APPROVE`), the check run, and the store update.
@@ -165,6 +165,25 @@ files, and not unused imports or other leftovers (linters and the correctness le
 DRY findings never block (`ADVISORY_KINDS`), at most 5 (`MAX_DRY_POSTED`) are verified and posted per review,
 the lens's best 5 by its own ranking (counting only findings past the free filters), and a continued review only looks at files changed since the last one.
 `AUTOREVIEWER_DRY=false` turns it off.
+
+**Docs and tests lenses** (Nov 18, off until their evals are in: `AUTOREVIEWER_DOCS`, `AUTOREVIEWER_TESTS`). Both
+are advisory like DRY: never block, at most `MAX_ADVISORY_POSTED` (5) each, only files changed since the last
+review when continuing. Both are found by DeepSeek and checked by Kimi K3.1 Pro (Moonshot's hosted plan via
+Boodleton, 2 lanes), so they add no Qwen load.
+- *docs*: text the change makes untrue: docstrings, comments, docs, config comments and documented settings,
+  error and log messages, and contracts callers rely on (renamed flags, env vars, endpoints). The stale text
+  is often in a file the PR didn't touch, so a finding cites the changed line that made it untrue and quotes
+  the stale text with its location. It also holds the prose the PR writes to pstack's unslop rules
+  (`vendor/pstack/skill-unslop.md`, verbatim, in both the lens's and the verifier's instructions): slop is P3,
+  reported after drift, and the verifier confirms only a clear break of a cited rule with a rewrite that
+  follows them all.
+- *tests*: behaviour changes no test would catch breaking (the reviewer imagines the smallest break and reads
+  the assertions), tests that can't fail, and weakened tests. It can't run tests; a sandbox could later make
+  the mutations for real.
+
+Evals: `--suite docs --lens docs` and `--suite tests --lens tests` (`evals/docs_cases.py`, `evals/tests_cases.py`):
+5 seeded cases each on `d284fe8` (docs adds 2 slop cases), their own clean controls, and the correctness
+suite's.
 
 Security and DRY are both `Lens` records (`review/job.py`): a kind, an agent pair from
 `agents.lens_pair()`, optional run instructions, and whether a continued review re-reads the whole PR.

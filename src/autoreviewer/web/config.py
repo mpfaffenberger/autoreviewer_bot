@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, get_args
 
-from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, DEFAULT_MODEL_LANES, QWEN
+from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, DEFAULT_MODEL_LANES, KIMI, QWEN
 
 DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
 
-AgentKind = Literal["correctness", "security", "dry", "simplify"]
+AgentKind = Literal["correctness", "security", "dry", "docs", "tests", "simplify"]
 """Each kind has a finder (the role named after it) and a checker (`<kind>.verifier`)."""
 AGENT_KINDS: tuple[AgentKind, ...] = get_args(AgentKind)
 
@@ -23,8 +23,15 @@ def verifier_role(kind: AgentKind) -> str:
 
 
 AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS))
-DEFAULT_MODELS = {**dict.fromkeys(AGENT_KINDS, QWEN), **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK)}
-"""Finders on Qwen (fast), checkers on DeepSeek (better): pin any role to change it (AUTOREVIEWER_MODELS)."""
+_CHECKED_BY_KIMI: tuple[AgentKind, ...] = ("docs", "tests")
+DEFAULT_MODELS = {
+    **dict.fromkeys(AGENT_KINDS, QWEN),
+    **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK),
+    **dict.fromkeys(_CHECKED_BY_KIMI, DEEPSEEK),
+    **dict.fromkeys(map(verifier_role, _CHECKED_BY_KIMI), KIMI),
+}
+"""Finders on Qwen (fast), checkers on DeepSeek (better); docs and tests are found by DeepSeek and checked by Kimi,
+keeping Qwen's lanes for the rest (Mike, Nov 18). Pin any role to change it (AUTOREVIEWER_MODELS)."""
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,12 @@ class Settings:
     """Run the security lens alongside correctness (see review/pipeline.py, review_lens)."""
     dry: bool = True
     """Run the DRY lens: new code that re-implements an existing helper, the stdlib, or a dependency."""
+    docs: bool = False
+    """Run the docs lens: docstrings, comments, docs, config comments, error messages, and contracts the change
+    makes untrue. Off until its evals are in."""
+    tests: bool = False
+    """Run the tests lens: changed behaviour no test would catch breaking, and tests that can't fail. Off until
+    its evals are in."""
     simplify: bool = True
     """Post optional one-click simplifications of the code a PR adds (see review/simplify.py)."""
     block_at_priority: int = 1
@@ -86,6 +99,8 @@ class Settings:
             simplify=parse_bool(env, "AUTOREVIEWER_SIMPLIFY", default=True),
             security=parse_bool(env, "AUTOREVIEWER_SECURITY", default=True),
             dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True),
+            docs=parse_bool(env, "AUTOREVIEWER_DOCS", default=False),
+            tests=parse_bool(env, "AUTOREVIEWER_TESTS", default=False),
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key=env["BOODLETON_API_KEY"],

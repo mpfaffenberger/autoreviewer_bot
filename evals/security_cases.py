@@ -7,8 +7,7 @@ code without changing its behaviour, to measure false alarms. Titles never hint 
 
 from __future__ import annotations
 
-from evals.cases import CASES as CORRECTNESS_CASES
-from evals.cases import Case
+from evals.cases import CLEAN_CONTROLS, Case
 
 SECURITY_CORPUS = "d5e9888"
 """A snapshot that has every file below."""
@@ -134,5 +133,5 @@ CASES: list[Case] = [
         corpus=SECURITY_CORPUS,
         clean=True,
     ),
-    *(case for case in CORRECTNESS_CASES if case.clean),
+    *CLEAN_CONTROLS,
 ]

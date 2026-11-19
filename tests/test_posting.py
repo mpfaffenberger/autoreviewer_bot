@@ -211,3 +211,68 @@ async def test_a_replay_posts_again_only_if_more_urgent(repo: GitRepo, replayed_
     await publisher(github)(confirmed(priority=1))
     await publisher(github)(confirmed(priority=replayed_priority))  # a fresh process, the same finding
     assert len(github.review_comments) == comments
+
+
+def on(github: FakeGitHub, head: str) -> Publisher:
+    return Publisher(github, REPO, 7, head_sha=head, author=BOT, block_at=1)
+
+
+@pytest.mark.parametrize(
+    ("later", "outdated", "comments"),
+    [
+        (confirmed(priority=2), False, 1),  # the same defect, still on that line: already said
+        (confirmed(priority=1), False, 1),  # as urgent: already said
+        (confirmed(priority=0), False, 2),  # an escalation is worth a new comment
+        (confirmed(kind="dry", priority=1), False, 2),  # a different kind of issue on the same line
+        (confirmed(priority=1), True, 2),  # the code changed under the old comment: a fresh finding
+    ],
+)
+async def test_a_superseded_reviews_comments_cover_the_next_head(
+    repo: GitRepo, later: Finding, outdated: bool, comments: int
+) -> None:
+    """From #34: a push mid-review stopped it without a verdict, so the next head's review started fresh and
+    posted the same defects again (fingerprints include the commit)."""
+    github = FakeGitHub(repo)
+    await on(github, "a" * 40)(confirmed(priority=1))
+    github.review_comments[0]["outdated"] = outdated
+    await on(github, "b" * 40)(later)
+    assert len(github.review_comments) == comments
+
+
+async def test_markers_record_priority_and_kind(repo: GitRepo) -> None:
+    github = FakeGitHub(repo)
+    await publisher(github)(confirmed(kind="docs", priority=3))
+    [comment] = github.inline_comments
+    assert comment.body.endswith(f"<!-- autoreviewer:{fingerprint(repo.head, confirmed(kind='docs'))} p3 docs -->")
+
+
+async def test_a_failed_read_of_the_prs_comments_is_retried(repo: GitRepo) -> None:
+    """From the bot's review of #35: recording "loaded" before the read meant one failed read switched dedupe off
+    for the rest of the review."""
+    github = FakeGitHub(repo)
+    await on(github, "a" * 40)(confirmed(priority=1))
+    github.fail_posted_comments = 1
+    later = on(github, "b" * 40)
+    await later(confirmed(line=9))  # the read fails: this one goes in the final review instead
+    await later(confirmed(priority=1))  # the read works now: already on the PR
+    assert len(github.review_comments) == 1
+
+
+@pytest.mark.parametrize(("marker", "comments"), [("p1 correctness", 1), ("p1", 2)])
+async def test_a_comment_from_github_is_placed_by_its_markers_kind(repo: GitRepo, marker: str, comments: int) -> None:
+    """A marker recording its kind places the comment; one from before kinds were recorded can't be placed."""
+    github = FakeGitHub(repo)
+    body = f"**[P1] Old finding** (correctness)\n\n<!-- autoreviewer:{'0' * 16} {marker} -->"
+    github.review_comments.append({"commit_sha": "a" * 40, "comment": ReviewComment("x.py", 5, body), "author": BOT})
+    await on(github, "b" * 40)(Finding.model_validate({**finding(5, priority=1), "path": "x.py"}))
+    assert len(github.review_comments) == comments
+
+
+async def test_a_placed_comment_stands_in_for_the_other_lens(repo: GitRepo) -> None:
+    """From the bot's review of #35: the same defect from a second lens, already said on an earlier commit."""
+    github = FakeGitHub(repo)
+    await on(github, "a" * 40)(confirmed(priority=1))
+    later = on(github, "b" * 40)
+    await later(confirmed(priority=1))
+    await later(confirmed(kind="security", priority=1))
+    assert len(github.review_comments) == 1
