@@ -22,6 +22,7 @@ def test_default_models() -> None:
     """Finders on Qwen and checkers on DeepSeek, except docs and tests: found by DeepSeek, checked by Qwen."""
     expected = {role: DEEPSEEK if role.endswith(".verifier") else QWEN for role in AGENT_ROLES}
     expected |= {"docs": DEEPSEEK, "docs.verifier": QWEN, "tests": DEEPSEEK, "tests.verifier": QWEN}
+    expected |= {"conversation": DEEPSEEK}
     assert models_from({}) == expected
 
 

@@ -14,14 +14,19 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync, WorkflowStatusString
 
-from autoreviewer.review import job
-from autoreviewer.web.routing import PullRequestUpdated
+from autoreviewer.review import conversation, job
+from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 QUEUE = "reviews"
+ANSWER_QUEUE = "answers"
+"""Answers to replies run beside reviews, never behind one: a reply shouldn't wait for a 15-minute review."""
+ANSWER_CONCURRENCY = 2
 
 APPLICATION_VERSION = "review-workflow-v1"
 """Pinned so in-flight reviews survive a redeploy (DBOS otherwise only recovers workflows of the same
@@ -35,12 +40,19 @@ MAX_RECOVERY_ATTEMPTS = 3
 """A review that keeps crashing the process is parked after this many recoveries instead of looping on the GPU."""
 
 _deps: job.ReviewDeps | None = None
+_conversation_deps: conversation.ConversationDeps | None = None
 
 
 def _require_deps() -> job.ReviewDeps:
     if _deps is None:
         raise RuntimeError("durable.launch() must run before reviews are executed")
     return _deps
+
+
+def _require_conversation_deps() -> conversation.ConversationDeps:
+    if _conversation_deps is None:
+        raise RuntimeError("durable.launch() must run before answers are executed")
+    return _conversation_deps
 
 
 logger = logging.getLogger("autoreviewer.durable")
@@ -78,6 +90,36 @@ async def review_workflow(pull: PullRequestUpdated) -> job.CheckResult:
     return result
 
 
+def answer_id(reply: ThreadReply) -> str:
+    """One durable workflow per comment: a redelivery or a duplicate event joins the run already there instead of
+    starting another, and a second reply in the same thread gets its own."""
+    return f"answer:{reply.owner}/{reply.repo}#{reply.number}:{reply.comment_id}".lower()
+
+
+# Retried: GitHub or a model failing for a moment shouldn't lose the answer. An answer already posted is found by
+# its marker, and a runaway one returns "gave up" instead of raising, so it isn't retried.
+@DBOS.step(retries_allowed=True, max_attempts=3)
+async def _answer(reply: ThreadReply) -> str:
+    return await conversation.answer(_require_conversation_deps(), reply)
+
+
+@DBOS.step(retries_allowed=True, max_attempts=3)  # GitHub calls only, and it re-reads everything each time
+async def _reconsider(reply: ThreadReply) -> bool:
+    return await conversation.reconsider_verdict(_require_conversation_deps(), reply)
+
+
+@DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
+async def answer_workflow(reply: ThreadReply) -> str:
+    outcome = await _answer(reply)
+    if outcome == "withdrawn":
+        await _reconsider(reply)
+    return outcome
+
+
+async def enqueue_answer(reply: ThreadReply) -> WorkflowHandleAsync[str]:
+    return await _enqueue(ANSWER_QUEUE, answer_id(reply), answer_workflow, reply)
+
+
 def configure(database: Path) -> None:
     """Create the DBOS instance (SQLite system database). Call once, outside the event loop."""
     if sqlite3.sqlite_version_info < MIN_SQLITE:
@@ -95,20 +137,30 @@ def configure(database: Path) -> None:
     )
 
 
-async def launch(deps: job.ReviewDeps, *, concurrency: int) -> None:
-    """Start DBOS (recovering interrupted reviews) and register the review queue."""
-    global _deps
-    _deps = deps
+async def launch(
+    deps: job.ReviewDeps, conversation_deps: conversation.ConversationDeps | None = None, *, concurrency: int
+) -> None:
+    """Start DBOS (recovering interrupted reviews and answers) and register the queues."""
+    global _deps, _conversation_deps
+    _deps, _conversation_deps = deps, conversation_deps
     DBOS.launch()
     await DBOS.register_queue_async(QUEUE, worker_concurrency=concurrency)
+    await DBOS.register_queue_async(ANSWER_QUEUE, worker_concurrency=ANSWER_CONCURRENCY)
 
 
 async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResult]:
-    queue = await DBOS.retrieve_queue_async(QUEUE)
+    return await _enqueue(QUEUE, workflow_id(pull), review_workflow, pull)
+
+
+async def _enqueue[Arg, Result](
+    queue_name: str, workflow_id: str, workflow: Callable[[Arg], Coroutine[Any, Any, Result]], arg: Arg
+) -> WorkflowHandleAsync[Result]:
+    """Run `workflow(arg)` on a registered queue under `workflow_id`: a second enqueue of an ID joins the first."""
+    queue = await DBOS.retrieve_queue_async(queue_name)
     if queue is None:
-        raise RuntimeError("the review queue is not registered; call durable.launch() first")
-    with SetWorkflowID(workflow_id(pull)):
-        return await queue.enqueue_async(review_workflow, pull)
+        raise RuntimeError(f"the {queue_name} queue is not registered; call durable.launch() first")
+    with SetWorkflowID(workflow_id):
+        return await queue.enqueue_async(workflow, arg)
 
 
 _RUNNING = frozenset({WorkflowStatusString.PENDING.value, WorkflowStatusString.ENQUEUED.value})

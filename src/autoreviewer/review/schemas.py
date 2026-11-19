@@ -108,3 +108,14 @@ class SimplifyReport(BaseModel):
 class SimplifyVerdict(BaseModel):
     confirmed: bool = Field(description="True only if the replacement behaves identically and is simpler")
     reason: str = Field(description="One or two sentences: which check failed, or what you verified")
+
+
+class ThreadAnswer(BaseModel):
+    """The conversation agent's answer to a reply under one of the bot's findings."""
+
+    reply: str = Field(description="Your reply in the thread: plain, specific, and short. Markdown is fine.")
+    finding: Literal["holds", "withdrawn", "unclear"] = Field(
+        description='"withdrawn" only if, after re-reading the code, the finding is wrong or no longer applies at '
+        'the head; "holds" if the code still has the defect; "unclear" if the code alone does not settle it.'
+    )
+    reason: str = Field(description="One or two sentences: what you checked in the code and what it showed")

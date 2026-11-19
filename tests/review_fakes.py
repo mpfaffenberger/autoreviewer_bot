@@ -25,6 +25,7 @@ from autoreviewer.github import (
     ReviewComment,
     ReviewEvent,
     ReviewRejected,
+    ThreadComment,
 )
 from autoreviewer.review.agents import (
     correctness_agent,
@@ -266,14 +267,40 @@ class FakeGitHub:
         """Every inline comment, posted on its own or inside a review."""
         return [c["comment"] for c in self.review_comments] + [c for r in self.reviews for c in r["comments"]]
 
+    async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
+        """Comment ids are 1-based positions in `review_comments`; a reply records the comment it answers."""
+        return [
+            ThreadComment(i, c["author"], c["comment"].body, c["comment"].path)
+            for i, c in enumerate(self.review_comments, start=1)
+            if i == root_id or c.get("in_reply_to") == root_id
+        ]
+
+    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None:
+        self.say(BOT, root_id, body)
+
+    def say(self, author: str, root_id: int, body: str) -> int:
+        """A reply in the thread under comment `root_id`, by anyone; returns its id."""
+        root = self.review_comments[root_id - 1]["comment"]
+        self.review_comments.append(
+            {"commit_sha": self.repo.head, "comment": ReviewComment(root.path, root.line, body), "author": author,
+             "in_reply_to": root_id}
+        )  # fmt: skip
+        return len(self.review_comments)
+
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         """Like GitHub: a comment stays on its line on later heads unless marked `outdated`."""
         if self.fail_posted_comments:
             self.fail_posted_comments -= 1
             raise RuntimeError("502 Bad Gateway")
         return [
-            PostedComment(c["comment"].path, None if c.get("outdated") else c["comment"].line, c["comment"].body)
-            for c in self.review_comments
+            PostedComment(
+                c["comment"].path,
+                None if c.get("outdated") else c["comment"].line,
+                c["comment"].body,
+                i,
+                c.get("in_reply_to"),
+            )
+            for i, c in enumerate(self.review_comments, start=1)
             if c["author"] == author
         ]
 

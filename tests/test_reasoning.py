@@ -12,8 +12,9 @@ from autoreviewer.web.config import Settings, models_from, reasoning_from
 
 
 def test_efforts_parse_strictly() -> None:
-    assert reasoning_from({}) == {}
-    assert reasoning_from({"AUTOREVIEWER_REASONING": " docs=high, tests=low ,"}) == {"docs": "high", "tests": "low"}
+    assert reasoning_from({}) == {"conversation": "high"}  # it decides withdrawals
+    pinned = reasoning_from({"AUTOREVIEWER_REASONING": " docs=high, tests=low ,conversation=low"})
+    assert pinned == {"docs": "high", "tests": "low", "conversation": "low"}
     for value, error in (("doc=high", "unknown role 'doc'"), ("docs=max", "docs='max'"), ("docs", "role=effort")):
         with pytest.raises(ValueError, match=error):
             reasoning_from({"AUTOREVIEWER_REASONING": value})
@@ -45,3 +46,9 @@ def test_the_bots_settings_carry_the_efforts_to_its_agents() -> None:
 def test_a_new_effort_starts_the_lens_conversation_afresh() -> None:
     """A saved correctness conversation is continued only with the same model and the same reasoning."""
     assert lens_version(QWEN) != lens_version(QWEN, "high") != lens_version(QWEN, "low")
+
+
+def test_the_conversation_agent_thinks_by_default() -> None:
+    """It decides withdrawals: DeepSeek doesn't think unless asked."""
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
+    assert effort(ModelPlan.from_settings(settings).conversation()[0]) == "high"
