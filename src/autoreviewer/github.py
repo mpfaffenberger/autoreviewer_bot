@@ -78,25 +78,31 @@ class ThreadComment:
 
 @dataclass(frozen=True)
 class ReviewThread:
-    """An inline comment thread, as GitHub's GraphQL API names it (resolving takes its node id)."""
+    """An inline comment thread, as GitHub's GraphQL API names it."""
 
     id: str
     root_comment_id: int
     resolved: bool
+    """Resolved on GitHub, by a person: a GitHub App can't resolve threads without write access to the code."""
+    root_node_id: str
+    settled: bool
+    """Its first comment is minimized: how the bot marks a thread done, since it can't resolve it."""
 
 
 _REVIEW_THREADS = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     reviewThreads(first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
-      nodes { id isResolved comments(first: 1) { nodes { databaseId } } }
+      nodes { id isResolved comments(first: 1) { nodes { databaseId id isMinimized } } }
     }
   } }
 }"""
-_SET_THREAD_RESOLVED = {
-    True: "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
-    False: "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
+_SET_SETTLED = {
+    True: "mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: RESOLVED}) { clientMutationId } }",
+    False: "mutation($id: ID!) { unminimizeComment(input: {subjectId: $id}) { clientMutationId } }",
 }
+"""Minimize a thread's first comment as resolved, or show it again. Resolving the thread itself needs
+`contents: write` (Nov 19: FORBIDDEN with `pull_requests: write`), which the bot doesn't get."""
 
 
 class CommitNotFound(Exception):
@@ -160,7 +166,7 @@ class PullRequests(PullRequestReader, Protocol):
 
     async def review_threads(self, repo: Repo, number: int) -> list[ReviewThread]: ...
 
-    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None: ...
+    async def set_settled(self, repo: Repo, thread: ReviewThread, *, settled: bool) -> None: ...
 
 
 class Conversations(PullRequests, Protocol):
@@ -371,17 +377,23 @@ class GitHubApp:
                 "reviewThreads"
             ]
             threads += [
-                ReviewThread(str(node["id"]), int(node["comments"]["nodes"][0]["databaseId"]), bool(node["isResolved"]))
+                ReviewThread(
+                    str(node["id"]),
+                    int(root["databaseId"]),
+                    bool(node["isResolved"]),
+                    str(root["id"]),
+                    bool(root["isMinimized"]),
+                )
                 for node in page["nodes"]
-                if node["comments"]["nodes"]
+                if (root := next(iter(node["comments"]["nodes"]), None))
             ]
             if not page["pageInfo"]["hasNextPage"]:
                 return threads
             after = page["pageInfo"]["endCursor"]
 
-    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None:
+    async def set_settled(self, repo: Repo, thread: ReviewThread, *, settled: bool) -> None:
         github = self._as_installation(repo.installation_id)
-        await github.async_graphql(_SET_THREAD_RESOLVED[resolved], {"id": thread_id})
+        await github.async_graphql(_SET_SETTLED[settled], {"id": thread.root_node_id})
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         return [

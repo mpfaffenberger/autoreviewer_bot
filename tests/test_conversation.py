@@ -8,17 +8,19 @@ from typing import Any
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
+from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import Repo
-from autoreviewer.review import durable
+from autoreviewer.review import conversation, durable
 from autoreviewer.review.agents import checker_agent, conversation_agent
-from autoreviewer.review.conversation import MAX_ANSWERS, MAX_QUOTED, ConversationDeps, answer
+from autoreviewer.review.conversation import MAX_ANSWERS, MAX_QUOTED, ConversationDeps, answer, reconsider_verdict
 from autoreviewer.review.durable import answer_id
 from autoreviewer.review.posting import Publisher, answer_markers
 from autoreviewer.review.schemas import Finding
+from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.app import thread_reply_handler
-from autoreviewer.web.config import Settings
+from autoreviewer.web.config import Settings, models_from
 from autoreviewer.web.routing import Ignore, ThreadReply, route
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding
 
@@ -140,15 +142,38 @@ async def test_a_withdrawal_is_marked_and_its_thread_resolved(
     assert await answer(deps(github, repo, tmp_path, scripted(verdict)), reply) == result
     withdrawn = verdict == "withdrawn"
     assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=withdrawn))
-    assert github.resolved_threads == ({"T1"} if withdrawn else set())
+    assert github.settled_threads == ({"T1"} if withdrawn else set())
 
 
-async def test_a_finding_that_holds_again_reopens_its_thread(repo: GitRepo, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("history", "reopened"),
+    [
+        (["withdrawn"], True),
+        (["holds", "withdrawn"], True),  # the latest answer decides, not the first (the bot's answer on #44)
+        (["withdrawn", "holds"], False),  # reinstated already; closed again since, by someone else
+        (["withdrawn", "note"], True),  # a note isn't an answer: the resolve note, say (the bot's answer on #44)
+    ],
+)
+async def test_a_finding_that_holds_again_reopens_its_thread(
+    repo: GitRepo, tmp_path: Path, history: list[str], reopened: bool
+) -> None:
     """From the bot's review of #42: a withdrawal isn't final, and a reinstated finding mustn't stay hidden."""
     github, reply = await thread_with_reply(repo)
-    github.resolved_threads.add("T1")  # withdrawn earlier, and resolved with it
+    for n, said in enumerate(history, start=2):
+        marker = "" if said == "note" else f"\n\n{answer_markers(n, withdrawn=said == 'withdrawn')}"
+        github.say(BOT, 1, f"{said}{marker}")
+    github.settled_threads.add("T1")
+    reply = replace(reply, comment_id=github.say("alice", 1, "Actually, look again at the empty list."))
     assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
-    assert github.resolved_threads == set()
+    assert github.settled_threads == (set() if reopened else {"T1"})
+
+
+async def test_a_thread_closed_for_another_reason_stays_closed(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #42: only a withdrawal's close is the bot's to undo."""
+    github, reply = await thread_with_reply(repo)
+    github.settled_threads.add("T1")  # the bot settled it after a fix
+    assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
+    assert github.settled_threads == {"T1"}
 
 
 async def test_a_thread_github_wont_update_costs_nothing(repo: GitRepo, tmp_path: Path) -> None:
@@ -269,17 +294,34 @@ def test_the_bots_blind_recheck_uses_the_findings_own_checker(monkeypatch: pytes
     re-checked by the security checker (with its references); anything else that can block, by correctness's."""
     from autoreviewer.review import agents
     from autoreviewer.web.app import conversation_deps
-    from autoreviewer.web.config import Settings
 
-    built: list[str] = []
+    built: list[tuple[str, str]] = []
 
-    def record(kind: str, *_: object, **__: object) -> object:
-        built.append(kind)
+    def record(kind: str, model: Model, *_: object, **__: object) -> object:
+        built.append((kind, getattr(model, "wrapped", model).model_name))
         return object()
 
     monkeypatch.setattr(agents, "checker_agent", record)
-    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
+    pins = models_from({"AUTOREVIEWER_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}"})  # tell them apart
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b", models=pins)
     deps = conversation_deps(settings, object())  # type: ignore[arg-type]
     for kind in ("security", "correctness", "dry"):
         deps.checkers(object(), kind)  # type: ignore[arg-type]
-    assert built == ["security", "correctness", "correctness"]
+    assert built == [("security", QWEN), ("correctness", DEEPSEEK), ("correctness", DEEPSEEK)]
+
+
+@pytest.mark.parametrize("block_at", [0, 2])
+async def test_reconsidering_uses_the_bots_blocking_threshold(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_at: int
+) -> None:
+    """From the bot's review of #49: reconsider_verdict passes the threshold on, not a default."""
+    seen: list[int] = []
+
+    async def record(*_: object, block_at: int, **__: object) -> bool:
+        seen.append(block_at)
+        return False
+
+    monkeypatch.setattr(conversation, "reconsider", record)
+    github, reply = await thread_with_reply(repo)
+    await reconsider_verdict(replace(deps(github, repo, tmp_path, scripted("holds")), block_at=block_at), reply)
+    assert seen == [block_at]

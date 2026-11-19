@@ -348,15 +348,24 @@ people.
 
 ---
 
-**The bot resolves threads that are settled** (Mike, Nov 19). A thread follows the latest answer in it:
-resolved once its finding is withdrawn, reopened if a later answer says the finding holds. After every review,
-`posting.resolve_fixed` also resolves the threads of findings the code has moved past. Three conditions:
-GitHub shows the comment as outdated, so the code under it changed; the review checked that kind in full
-(`Outcome.covered`: its lens finished, wasn't cut short or capped, or for lint kinds, ruff ran); and it
-reported nothing of that kind in that file, in any state. The last rule is conservative on purpose, so a
-reworded finding or another one in the same file keeps the thread open. A reply naming the reviewed commit comes
-first. Nothing is resolved on merge or close, so advice that was never acted on stays visible. Thread updates
-never cost a review or an answer: a failure is logged.
+**The bot settles threads that are done** (Mike, Nov 19). It can't resolve them: a GitHub App needs write
+access to the code for that (live on #44: FORBIDDEN with `pull_requests: write`), which the bot isn't given.
+So it minimizes the thread's finding as resolved (`minimizeComment`), which collapses it out of the way;
+resolving stays the author's. A withdrawn finding is settled with the answer, and shown again if a later answer
+reinstates it. A thread done for any other reason, whether resolved by a person or settled after a fix, stays
+as it is. After every review, `posting.settle_fixed` also settles the findings the code has moved past.
+Three conditions:
+- GitHub shows the comment as outdated, so the code under it changed.
+- This review checked that kind in that file in full (`Outcome.covered`, kind and path). The lens finished over
+  that file, wasn't cut short and wasn't at its cap. Lint kinds count only when ruff ran under its cap and the
+  correctness lens, which carries its findings, finished. A scoped lens covers only the files it re-read.
+- It reported nothing of that kind in that file, in any state. That includes a finding folded into another
+  lens's on the same line (`Outcome.merged`).
+
+The rules are conservative on purpose: a reworded finding, or another one in the same file, keeps the thread
+open. The finding is settled before the note goes up, so a failed update leaves no note claiming otherwise.
+Nothing is settled on merge or close, so advice that was never acted on stays visible. Thread updates never
+cost a review or an answer: a failure is logged.
 
 ## 6. State
 

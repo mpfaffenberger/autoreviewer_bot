@@ -154,5 +154,5 @@ async def test_a_finding_posted_as_it_was_confirmed_is_counted_once(repo: GitRep
     what the outcome is missing (an uncapped DRY lens posts as it goes, and reports the finding too)."""
     github = FakeGitHub(repo)
     deps = replace(job_deps(github, tmp_path), lenses=(Lens("dry", lens_agents([finding(5)], kind="dry")),))
-    result = await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
+    result = await review_and_post(deps, pull(repo))
     assert len(github.review_comments) == 1 and " 1 advisory (non-blocking) finding(s) posted." in result.summary

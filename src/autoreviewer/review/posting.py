@@ -49,7 +49,11 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
 
 WITHDRAWN_MARKER = "<!-- autoreviewer:withdrawn -->"
 """The last line of an answer that withdrew its thread's finding after re-checking the code (conversation.py)."""
-_ANSWER_END = re.compile(rf"<!-- autoreviewer:answers (\d+) -->(\n{re.escape(WITHDRAWN_MARKER)})?\Z")
+ANSWERS_MARKER = "<!-- autoreviewer:answers {} -->"
+"""Ends the bot's answer to one comment (its id goes in the braces); answer_markers writes it."""
+_ANSWER_END = re.compile(
+    re.escape(ANSWERS_MARKER).replace(r"\{\}", r"(\d+)") + rf"(\n{re.escape(WITHDRAWN_MARKER)})?\Z"
+)
 """Only the markers that end an answer count: code appends them after the model's text, so nothing the model was
 led to write can claim an answer or withdraw a finding."""
 _VERDICT_STATE = re.compile(
@@ -68,7 +72,7 @@ Placement = tuple[str, int, str]
 
 def answer_markers(comment_id: int, *, withdrawn: bool) -> str:
     """What ends an answer to `comment_id` (appended by code, after the model's text)."""
-    return f"<!-- autoreviewer:answers {comment_id} -->" + (f"\n{WITHDRAWN_MARKER}" if withdrawn else "")
+    return ANSWERS_MARKER.format(comment_id) + (f"\n{WITHDRAWN_MARKER}" if withdrawn else "")
 
 
 def answered(body: str) -> tuple[int, bool] | None:
@@ -306,13 +310,13 @@ async def reconsider(github: PullRequests, repo: Repo, number: int, *, author: s
     return True
 
 
-async def resolve_fixed(
+async def settle_fixed(
     github: PullRequests, repo: Repo, number: int, *, head_sha: str, author: str, outcome: Outcome
 ) -> list[int]:
-    """Resolve the threads of the bot's findings the code has moved past, after a review of `head_sha`: GitHub
-    shows the comment as outdated (the code under it changed), this review checked that kind in full
-    (Outcome.covered), and it reported nothing of that kind in that file, in any state. A note says so first.
-    Returns their comment ids.
+    """Settle the threads of the bot's findings the code has moved past, after a review of `head_sha` (mark_thread:
+    the finding minimized as resolved). GitHub shows the comment as outdated (the code under it changed), this
+    review checked that kind in that file in full (Outcome.covered), and it reported nothing of that kind there,
+    in any state. A note follows, once settled. Returns their comment ids.
 
     Conservative on purpose: a reworded finding, or another one in the file, keeps the thread open."""
     reported = {(f.kind, f.path) for f in outcome.reported}
@@ -320,30 +324,35 @@ async def resolve_fixed(
     for comment in await github.posted_comments(repo, number, author=author):
         if comment.in_reply_to is not None or comment.line is not None or not (match := finding_marker(comment.body)):
             continue  # a reply, still on the head's code, or not a finding
-        if (kind := match[3]) in outcome.covered and (kind, comment.path) not in reported:
+        if (place := (match[3], comment.path)) in outcome.covered and place not in reported:
             gone.append(comment.id)
     threads = await _threads_by_root(github, repo, number) if gone else {}
     resolved = []
     for root in gone:
-        if (thread := threads.get(root)) is None or thread.resolved:
-            continue  # resolved already: by its author, or by an earlier run of this
+        if (thread := threads.get(root)) is None or thread.resolved or thread.settled:
+            continue  # done already: resolved by a person, or settled by an earlier run of this
         note = (
-            f"The code here changed, and the review of `{head_sha[:7]}` found nothing like this in the file: resolving."
+            f"The code here changed, and the review of `{head_sha[:7]}` found nothing like this in the file: "
+            "marking it resolved."
         )
+        await _settle(github, repo, thread, settled=True)  # first: a failure here leaves no note behind
         await github.reply(repo, number, root, note)
-        await github.set_thread_resolved(repo, thread.id, resolved=True)
         resolved.append(root)
     logger.info(
-        "%s/%s#%d at %s: resolved %d fixed finding(s)", repo.owner, repo.name, number, head_sha[:7], len(resolved)
+        "%s/%s#%d at %s: settled %d fixed finding(s)", repo.owner, repo.name, number, head_sha[:7], len(resolved)
     )
     return resolved
 
 
-async def mark_thread(github: PullRequests, repo: Repo, number: int, root_id: int, *, resolved: bool) -> None:
-    """Resolve, or reopen, the thread under comment `root_id`, unless it's that way already."""
-    thread = (await _threads_by_root(github, repo, number)).get(root_id)
-    if thread is not None and thread.resolved != resolved:
-        await github.set_thread_resolved(repo, thread.id, resolved=resolved)
+async def mark_thread(github: PullRequests, repo: Repo, number: int, root_id: int, *, settled: bool) -> None:
+    """Settle the thread under comment `root_id` (its finding minimized as resolved), or show it again."""
+    if (thread := (await _threads_by_root(github, repo, number)).get(root_id)) is not None:
+        await _settle(github, repo, thread, settled=settled)
+
+
+async def _settle(github: PullRequests, repo: Repo, thread: ReviewThread, *, settled: bool) -> None:
+    if thread.settled != settled:
+        await github.set_settled(repo, thread, settled=settled)
 
 
 async def _threads_by_root(github: PullRequests, repo: Repo, number: int) -> dict[int, ReviewThread]:
