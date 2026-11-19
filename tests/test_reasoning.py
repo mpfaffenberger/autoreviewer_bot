@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic_ai.models import Model
 
+from autoreviewer.review import agents
 from autoreviewer.review.agents import lens_version
 from autoreviewer.servers import QWEN
 from autoreviewer.web.app import ModelPlan
@@ -52,3 +53,10 @@ def test_the_conversation_agent_thinks_by_default() -> None:
     """It decides withdrawals: DeepSeek doesn't think unless asked."""
     settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
     assert effort(ModelPlan.from_settings(settings).conversation()[0]) == "high"
+
+
+def test_the_lens_tools_are_part_of_its_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From the bot's review of #43: read_tool_result joining the tools started saved conversations afresh."""
+    before = lens_version(QWEN)
+    monkeypatch.setattr(agents, "READ_TOOL_NAME", "read_spill")
+    assert lens_version(QWEN) != before

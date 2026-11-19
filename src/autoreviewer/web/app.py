@@ -151,14 +151,13 @@ class ModelPlan:
         from autoreviewer.review.agents import boodleton_model
 
         name = self.models[role]
-        model = boodleton_model(
+        return boodleton_model(
             name,
             base_url=self.base_url,
             api_key=self.api_key,
             lanes=self.lanes.get(name),
             reasoning=self.reasoning.get(role),
-        )
-        return model, CONTEXT_WINDOWS[name]
+        ), CONTEXT_WINDOWS[name]
 
 
 def build_agent_factory(settings: Settings) -> AgentFactory:

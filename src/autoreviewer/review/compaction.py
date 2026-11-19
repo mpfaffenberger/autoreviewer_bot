@@ -60,7 +60,9 @@ IDEMPOTENT_TOOLS = frozenset(
         READ_TOOL_NAME,
     }
 )
-"""Read-only tools over an immutable checkout: the same call always returns the same output."""
+"""Read-only tools over an immutable checkout, plus read_tool_result over a spill, which never changes either:
+the same call returns the same output (or, once its spill is pruned, nothing, and the reviewer calls the
+original tool again)."""
 
 
 def same_call(call: ToolCallPart) -> str | None:

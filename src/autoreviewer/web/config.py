@@ -41,8 +41,7 @@ DEFAULT_MODELS = {
     CONVERSATION: DEEPSEEK,
 }
 """Finders on Qwen (fast), checkers on DeepSeek (better). Docs and tests are found by DeepSeek and checked by Qwen,
-the other model. Kimi K3.1 Pro checked them for a day, Nov 18-19, and went when its hosted quota ran out twice.
-Pin any role to change it (AUTOREVIEWER_MODELS)."""
+the other model (DESIGN.md §7). Pin any role to change it (AUTOREVIEWER_MODELS)."""
 
 
 @dataclass(frozen=True)

@@ -81,6 +81,8 @@ async def test_a_review_cut_short_never_approves(repo: GitRepo, tmp_path: Path) 
     result = await review_and_post(deps, pull(repo))
     assert [r["event"] for r in github.reviews] == ["COMMENT"] and "Partially reviewed" in github.reviews[0]["body"]
     assert (result.conclusion, result.title) == ("neutral", "Partially reviewed")
+    why = "the review hit its time limit before covering the whole change"  # #43's review: the reason, said
+    assert result.summary == f"Partially reviewed: {why}; not approved." and why in github.reviews[0]["body"]
     assert deps.memory is not None and deps.memory.last(conversation_id(repo_of(pull(repo)), 7)) is None
 
 
