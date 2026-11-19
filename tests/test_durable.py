@@ -16,13 +16,11 @@ from dbos import DBOS
 
 from autoreviewer.github import Repo
 from autoreviewer.review import durable
-from autoreviewer.review.agents import conversation_agent
-from autoreviewer.review.conversation import ConversationDeps
 from autoreviewer.review.posting import Publisher
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
-from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding, job_deps, make_repo
-from tests.test_conversation import scripted
+from tests.review_fakes import BOT, FakeGitHub, GitRepo, finding, job_deps, make_repo
+from tests.test_conversation import deps, scripted
 
 REPO_ = Repo(1, "mpfaffenberger", "demo")
 
@@ -60,9 +58,7 @@ async def test_each_reply_is_answered_once_on_the_answer_queue(tmp_path: Path) -
         Finding.model_validate(finding(5))
     )
     first, second = github.say("alice", 1, "why?"), github.say("alice", 1, "and?")
-    conversation_deps = ConversationDeps(
-        github, LocalSource(github.repo), lambda ws: conversation_agent(scripted("holds"), ws), tmp_path, BOT
-    )
+    conversation_deps = deps(github, github.repo, tmp_path, scripted("holds"))
     durable.configure(tmp_path / "dbos.sqlite")
     await durable.launch(job_deps(github, tmp_path, []), conversation_deps, concurrency=1)
     try:

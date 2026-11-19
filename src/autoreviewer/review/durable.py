@@ -96,7 +96,9 @@ def answer_id(reply: ThreadReply) -> str:
     return f"answer:{reply.owner}/{reply.repo}#{reply.number}:{reply.comment_id}".lower()
 
 
-@DBOS.step()  # no retries: a model call isn't free, and conversation.answer finds an answer already posted
+# Retried: GitHub or a model failing for a moment shouldn't lose the answer. An answer already posted is found by
+# its marker, and a runaway one returns "gave up" instead of raising, so it isn't retried.
+@DBOS.step(retries_allowed=True, max_attempts=3)
 async def _answer(reply: ThreadReply) -> str:
     return await conversation.answer(_require_conversation_deps(), reply)
 

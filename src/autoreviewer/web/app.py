@@ -8,7 +8,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -18,13 +18,15 @@ from autoreviewer.servers import CONTEXT_WINDOWS, ReasoningEffort
 from autoreviewer.web.config import CONVERSATION, AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
+    from pydantic_ai import Agent
     from pydantic_ai.models import Model
 
     from autoreviewer.github import GitHubApp
     from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.job import AgentFactory, Lens
-    from autoreviewer.review.schemas import LensKind
+    from autoreviewer.review.schemas import LensKind, Verification
     from autoreviewer.review.simplify import SimplifierFactory
+    from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import (
     Ignore,
     MalformedPayload,
@@ -263,15 +265,24 @@ def thread_reply_handler(settings: Settings) -> ReplyHandler | None:
 
 def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps:
     """Answers on the conversation role's model, over a fresh checkout of the PR's head."""
-    from autoreviewer.review.agents import conversation_agent
+    from autoreviewer.review.agents import checker_agent, conversation_agent
     from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.workspace import GitHubSource
 
-    model, window = ModelPlan.from_settings(settings).conversation()
+    plan = ModelPlan.from_settings(settings)
+    model, window = plan.conversation()
+
+    def checker(workspace: Workspace, kind: str) -> Agent[None, Verification]:
+        """The finding's own kind of checker; only kinds that can block are re-checked (security, correctness)."""
+        checked: Literal["correctness", "security"] = "security" if kind == "security" else "correctness"
+        checker_model, checker_window = plan.verifier(checked)
+        return checker_agent(checked, checker_model, workspace, context_window=checker_window)
+
     return ConversationDeps(
         github=github,
         source=GitHubSource(github),
         agents=lambda workspace: conversation_agent(model, workspace, context_window=window),
+        checkers=checker,
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
     )

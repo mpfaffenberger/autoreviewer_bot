@@ -270,7 +270,7 @@ class FakeGitHub:
     async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
         """Comment ids are 1-based positions in `review_comments`; a reply records the comment it answers."""
         return [
-            ThreadComment(i, c["author"], c["comment"].body)
+            ThreadComment(i, c["author"], c["comment"].body, c["comment"].path)
             for i, c in enumerate(self.review_comments, start=1)
             if i == root_id or c.get("in_reply_to") == root_id
         ]
