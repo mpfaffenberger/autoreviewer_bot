@@ -93,7 +93,10 @@ _REVIEW_THREADS = """query($owner: String!, $name: String!, $number: Int!, $afte
     }
   } }
 }"""
-_RESOLVE_THREAD = """mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }"""
+_SET_THREAD_RESOLVED = {
+    True: "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
+    False: "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }",
+}
 
 
 class CommitNotFound(Exception):
@@ -157,7 +160,7 @@ class PullRequests(PullRequestReader, Protocol):
 
     async def review_threads(self, repo: Repo, number: int) -> list[ReviewThread]: ...
 
-    async def resolve_thread(self, repo: Repo, thread_id: str) -> None: ...
+    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None: ...
 
 
 class Conversations(PullRequests, Protocol):
@@ -376,9 +379,9 @@ class GitHubApp:
                 return threads
             after = page["pageInfo"]["endCursor"]
 
-    async def resolve_thread(self, repo: Repo, thread_id: str) -> None:
+    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None:
         github = self._as_installation(repo.installation_id)
-        await github.async_graphql(_RESOLVE_THREAD, {"id": thread_id})
+        await github.async_graphql(_SET_THREAD_RESOLVED[resolved], {"id": thread_id})
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         return [

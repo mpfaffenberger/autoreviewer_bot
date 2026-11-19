@@ -28,7 +28,7 @@ from autoreviewer.github import (
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
-from autoreviewer.review.lint import LintError, lint_findings
+from autoreviewer.review.lint import LINT_KINDS, LintError, lint_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
@@ -89,7 +89,7 @@ async def _run_lens(
         lens, verifier = spec.agents(workspace)
         paths = [change.path for change in pr.reviewable]
         instructions = spec.instructions(paths) if spec.instructions else None
-        return await review_lens(
+        outcome = await review_lens(
             pr,
             lens,
             verifier,
@@ -101,6 +101,8 @@ async def _run_lens(
             capabilities=[deadline.watch(spec.kind)] if deadline else (),
             max_posted=spec.max_posted,
         )
+        outcome.covered.add(spec.kind)  # finished: an advisory lens that failed covers nothing
+        return outcome
     except Exception:
         if spec.kind not in ADVISORY_KINDS:
             raise
@@ -303,10 +305,10 @@ async def review_change(
                 continuation = Continuation(prior, history, head_sha, changed_since)
         persistence, run_id = memory.persistence(conversation) if memory else (None, "")
         try:
-            linted = await lint_findings(workspace.root, selection.reviewable, patches)
+            linted, lint_ran = await lint_findings(workspace.root, selection.reviewable, patches), True
         except LintError:  # a broken linter costs the lint checks, never the review
             logger.exception("%s at %s: lint checks skipped", conversation, head_sha[:7])
-            linted = []
+            linted, lint_ran = [], False
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
         progress = progress or Progress()
@@ -360,6 +362,7 @@ async def review_change(
                     )
                 )
         outcome = correctness.result()
+        outcome.covered |= {"correctness", *(LINT_KINDS if lint_ran else ())}
         for task in extra:
             outcome.absorb(task.result())
         suggestions = simplify_task.result() if simplify_task is not None else []
@@ -372,6 +375,11 @@ async def review_change(
     if deadline is not None:
         blocking_lenses = {"reviewer", *(spec.kind for spec in lenses if spec.kind not in ADVISORY_KINDS)}
         outcome.cut_short = bool(deadline.wrapped_up & blocking_lenses)
+        outcome.covered -= {"correctness" if lens == "reviewer" else lens for lens in deadline.wrapped_up}
+    # A capped lens verifies only its best candidates and drops the rest: at its cap, it may have dropped one.
+    outcome.covered -= {
+        spec.kind for spec in lenses if sum(f.kind == spec.kind for f in outcome.reported) >= spec.max_posted
+    }
     # A review cut short isn't continued from: files it never read wouldn't count as "changed since".
     remember = None
     if memory is not None and not outcome.cut_short:

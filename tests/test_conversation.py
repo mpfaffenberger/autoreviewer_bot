@@ -143,6 +143,22 @@ async def test_a_withdrawal_is_marked_and_its_thread_resolved(
     assert github.resolved_threads == ({"T1"} if withdrawn else set())
 
 
+async def test_a_finding_that_holds_again_reopens_its_thread(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #42: a withdrawal isn't final, and a reinstated finding mustn't stay hidden."""
+    github, reply = await thread_with_reply(repo)
+    github.resolved_threads.add("T1")  # withdrawn earlier, and resolved with it
+    assert await answer(deps(github, repo, tmp_path, scripted("holds")), reply) == "answered"
+    assert github.resolved_threads == set()
+
+
+async def test_a_thread_github_wont_update_costs_nothing(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #42 (P1): raising here would retry the answer and skip reconsidering the verdict."""
+    github, reply = await thread_with_reply(repo)
+    github.fail_threads = True
+    assert await answer(deps(github, repo, tmp_path, scripted("withdrawn")), reply) == "withdrawn"
+    assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=True))
+
+
 async def test_threads_the_bot_didnt_start_are_left_alone(repo: GitRepo, tmp_path: Path) -> None:
     github, reply = await thread_with_reply(repo)
     github.review_comments[0]["author"] = "alice"

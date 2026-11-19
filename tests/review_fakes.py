@@ -185,6 +185,8 @@ class FakeGitHub:
     review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_review_comments: bool = False
     resolved_threads: set[str] = field(default_factory=set[str])
+    fail_threads: bool = False
+    """Make resolving or reopening a thread fail, like GitHub's GraphQL API on a bad day."""
     fail_posted_comments: int = 0
     """How many reads of the PR's comments fail (like a transient 5xx) before they work again."""
     comment_delay: float = 0.0
@@ -297,8 +299,10 @@ class FakeGitHub:
             if c.get("in_reply_to") is None
         ]
 
-    async def resolve_thread(self, repo: Repo, thread_id: str) -> None:
-        self.resolved_threads.add(thread_id)
+    async def set_thread_resolved(self, repo: Repo, thread_id: str, *, resolved: bool) -> None:
+        if self.fail_threads:
+            raise RuntimeError("502 Bad Gateway")
+        (self.resolved_threads.add if resolved else self.resolved_threads.discard)(thread_id)
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         """Like GitHub: a comment stays on its line on later heads unless marked `outdated`."""

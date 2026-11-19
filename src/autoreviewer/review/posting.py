@@ -14,7 +14,15 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 
-from autoreviewer.github import PostedComment, PullRequests, Repo, ReviewComment, ReviewEvent, ReviewRejected
+from autoreviewer.github import (
+    PostedComment,
+    PullRequests,
+    Repo,
+    ReviewComment,
+    ReviewEvent,
+    ReviewRejected,
+    ReviewThread,
+)
 from autoreviewer.review.pipeline import Outcome, Withdrawal, blocks, blocks_at, normal_title, same_defect
 from autoreviewer.review.render import comment_body, review_body
 from autoreviewer.review.schemas import Finding
@@ -290,35 +298,29 @@ async def reconsider(github: PullRequests, repo: Repo, number: int, *, author: s
 async def resolve_fixed(
     github: PullRequests, repo: Repo, number: int, *, head_sha: str, author: str, outcome: Outcome
 ) -> list[int]:
-    """Resolve the threads of the bot's findings the code has moved past, after a complete review of `head_sha`:
-    GitHub shows the comment as outdated (the code under it changed), and this review didn't find it again (the
-    same kind, file, and title, confirmed or still unverified). A note says so first. Returns their comment ids.
+    """Resolve the threads of the bot's findings the code has moved past, after a review of `head_sha`: GitHub
+    shows the comment as outdated (the code under it changed), this review checked that kind in full
+    (Outcome.covered), and it reported nothing of that kind in that file, in any state. A note says so first.
+    Returns their comment ids.
 
-    Never on a review cut short, which may simply not have got that far. A finding still there is found again by
-    the lens; if it's missed, it's found again by a later review, as any finding is."""
-    if outcome.cut_short:
-        return []
-    found = {
-        (f.kind, f.path, normal_title(f.title))
-        for f in [*outcome.inline, *outcome.general, *(f for f, _ in outcome.unverified)]
-    }
+    Conservative on purpose: a reworded finding, or another one in the file, keeps the thread open."""
+    reported = {(f.kind, f.path) for f in outcome.reported}
     gone: list[int] = []
     for comment in await github.posted_comments(repo, number, author=author):
-        match, title = finding_marker(comment.body), _TITLE.match(comment.body)
-        if comment.in_reply_to is not None or comment.line is not None or not match or not match[3] or not title:
-            continue  # a reply, still on the head's code, or not a finding the review could have found again
-        if (match[3], comment.path, normal_title(title[1])) not in found:
+        if comment.in_reply_to is not None or comment.line is not None or not (match := finding_marker(comment.body)):
+            continue  # a reply, still on the head's code, or not a finding
+        if (kind := match[3]) in outcome.covered and (kind, comment.path) not in reported:
             gone.append(comment.id)
-    if not gone:
-        return []
-    open_threads = {t.root_comment_id: t.id for t in await github.review_threads(repo, number) if not t.resolved}
+    threads = await _threads_by_root(github, repo, number) if gone else {}
     resolved = []
     for root in gone:
-        if (thread := open_threads.get(root)) is None:
-            continue  # already resolved: by its author, or by an earlier run of this
-        note = f"The code here changed, and the review of `{head_sha[:7]}` didn't find this again: resolving."
+        if (thread := threads.get(root)) is None or thread.resolved:
+            continue  # resolved already: by its author, or by an earlier run of this
+        note = (
+            f"The code here changed, and the review of `{head_sha[:7]}` found nothing like this in the file: resolving."
+        )
         await github.reply(repo, number, root, note)
-        await github.resolve_thread(repo, thread)
+        await github.set_thread_resolved(repo, thread.id, resolved=True)
         resolved.append(root)
     logger.info(
         "%s/%s#%d at %s: resolved %d fixed finding(s)", repo.owner, repo.name, number, head_sha[:7], len(resolved)
@@ -326,8 +328,12 @@ async def resolve_fixed(
     return resolved
 
 
-async def resolve_thread_of(github: PullRequests, repo: Repo, number: int, root_id: int) -> None:
-    """Resolve the thread under comment `root_id`, unless it's resolved already."""
-    for thread in await github.review_threads(repo, number):
-        if thread.root_comment_id == root_id and not thread.resolved:
-            await github.resolve_thread(repo, thread.id)
+async def mark_thread(github: PullRequests, repo: Repo, number: int, root_id: int, *, resolved: bool) -> None:
+    """Resolve, or reopen, the thread under comment `root_id`, unless it's that way already."""
+    thread = (await _threads_by_root(github, repo, number)).get(root_id)
+    if thread is not None and thread.resolved != resolved:
+        await github.set_thread_resolved(repo, thread.id, resolved=resolved)
+
+
+async def _threads_by_root(github: PullRequests, repo: Repo, number: int) -> dict[int, ReviewThread]:
+    return {thread.root_comment_id: thread for thread in await github.review_threads(repo, number)}
