@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME
 
 from autoreviewer.review.agents import LENS_LIMITS, correctness_agent
-from autoreviewer.review.compaction import compaction_stats, same_call
+from autoreviewer.review.compaction import compaction_stats, max_result_tokens, same_call
 from autoreviewer.review.workspace import Workspace
 
 pytestmark = pytest.mark.anyio
@@ -76,3 +78,31 @@ async def test_when_cheap_passes_are_not_enough_the_history_is_summarized(worksp
 async def test_the_review_still_works_without_any_compaction(workspace: Workspace) -> None:
     stats, summaries = await run(workspace, [("diff", {}), ("changed_files", {})], window=1_000_000)
     assert stats == {"cleared": 0, "superseded": 0} and summaries == 0
+
+
+async def test_a_big_tool_result_is_spilled_and_read_back_in_full(workspace: Workspace) -> None:
+    """Nov 19: nothing bounded a tool result, and a 262,755-token prompt cost #41 its review. A result over its
+    share of the window is spilled: the history keeps a preview and a handle, and nothing is lost."""
+    (workspace.root / "big.py").write_text("".join(f"# line {i}: abc abc abc abc abc abc abc\n" for i in range(4000)))
+    window = 40_000
+    returns: dict[str, str] = {}
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returns.update(
+            {part.tool_name: str(part.content) for message in messages for part in getattr(message, "parts", [])
+             if isinstance(part, ToolReturnPart)}
+        )  # fmt: skip
+        if "read_file" not in returns:
+            return ModelResponse(parts=[ToolCallPart("read_file", {"path": "big.py"})])
+        if READ_TOOL_NAME not in returns:
+            handle = re.search(r"handle='([^']+)'", returns["read_file"])
+            assert handle, returns["read_file"][:300]
+            return ModelResponse(parts=[ToolCallPart(READ_TOOL_NAME, {"handle": handle[1], "pattern": "line 700:"})])
+        done = {"findings": [], "overall_correct": True, "reviewed": []}
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, done)])
+
+    agent = correctness_agent(FunctionModel(respond), workspace, context_window=window)
+    await agent.run("Review the change.", usage_limits=LENS_LIMITS)
+    assert len(returns["read_file"]) < max_result_tokens(window)  # in characters, so certainly in tokens
+    assert "# line 700: abc" not in returns["read_file"]  # past the preview...
+    assert "# line 700: abc" in returns[READ_TOOL_NAME]  # ...and still readable

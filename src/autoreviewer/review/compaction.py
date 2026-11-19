@@ -8,12 +8,18 @@ its target, escalates cheapest-first until it fits again:
 2. drop earlier copies of an identical tool call (the checkout is read-only, so the output is too);
 3. blank old tool results, keeping the latest pairs (the reviewer can re-run a tool);
 4. summarize older history with the run's own model (the only tier that costs a request).
+
+Those tiers never shrink the newest tool results, so each one is bounded where it's produced instead
+(`tool_output_limits`): a result over its share of the window is spilled, and the reviewer pages through
+it with `read_tool_result`. Without that bound, a few big reads overflowed Qwen's window (Nov 19: a
+262,755-token prompt against 229,376, which cost #41 its review).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import timedelta
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart, ToolReturnPart
 from pydantic_ai_harness.compaction import (
@@ -22,6 +28,14 @@ from pydantic_ai_harness.compaction import (
     DeduplicateFileReads,
     SummarizingCompaction,
     TieredCompaction,
+)
+from pydantic_ai_harness.tool_output_limits import (
+    READ_TOOL_NAME,
+    Band,
+    LocalFileStore,
+    Spill,
+    ToolOutputLimits,
+    Truncate,
 )
 
 TARGET_FRACTION = 0.6
@@ -33,7 +47,18 @@ CLEARED = "[tool result cleared: call the tool again if you still need it]"
 SUPERSEDED = "[same call made again later: see the newer result]"
 
 IDEMPOTENT_TOOLS = frozenset(
-    {"changed_files", "diff", "show_file", "read_file", "grep", "list_files", "search_files", "find_files", "file_info"}
+    {
+        "changed_files",
+        "diff",
+        "show_file",
+        "read_file",
+        "grep",
+        "list_files",
+        "search_files",
+        "find_files",
+        "file_info",
+        READ_TOOL_NAME,
+    }
 )
 """Read-only tools over an immutable checkout: the same call always returns the same output."""
 
@@ -57,6 +82,27 @@ def review_compaction(context_window: int) -> TieredCompaction[None]:
         ],
         target_fraction=TARGET_FRACTION,
         context_window=context_window,
+    )
+
+
+def max_result_tokens(context_window: int) -> int:
+    """The most one tool result may cost: the results ClearToolResults keeps, plus a couple more arriving in
+    the same step, must fit in the compaction target with room to spare."""
+    return int(context_window * TARGET_FRACTION) // (KEEP_RECENT_TOOL_PAIRS + 2)
+
+
+SPILLS = LocalFileStore(cleanup_after=timedelta(days=7))
+"""Spilled results, on the bot's own disk: the checkout is read-only. Kept a week, since a lens conversation
+continues on the PR's next push and may read an old handle again."""
+
+
+def tool_output_limits(context_window: int) -> ToolOutputLimits[None]:
+    """Bound every tool result when it's produced: over `max_result_tokens`, it's spilled, and the reviewer gets
+    a preview and a handle to page through the rest (lossless). If the spill can't be written, it's truncated."""
+    return ToolOutputLimits(
+        bands=[Band(over=max_result_tokens(context_window), action=Spill(then=Truncate()))],
+        over_tokens=True,
+        store=SPILLS,
     )
 
 
