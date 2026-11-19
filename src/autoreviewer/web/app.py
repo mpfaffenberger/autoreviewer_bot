@@ -271,7 +271,7 @@ def main() -> None:
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
-        lens_version=lens_version(settings.models["correctness"]),
+        lens_version=lens_version(settings.models["correctness"], settings.reasoning.get("correctness")),
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
         lenses=build_lenses(settings),

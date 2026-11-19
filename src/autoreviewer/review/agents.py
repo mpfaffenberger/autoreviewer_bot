@@ -113,12 +113,13 @@ REPORT_TOOL = "report_finding"
 """The tool a lens calls to hand over a finding mid-run (pipeline.Judge)."""
 
 
-def lens_version(model_name: str) -> str:
+def lens_version(model_name: str, reasoning: ReasoningEffort | None = None) -> str:
     """Fingerprint of what shapes a lens conversation; a saved one is only continued if it matches."""
     material = "\n".join(
         [
             _prompt("correctness.md"),
             model_name,
+            f"reasoning={reasoning}",
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
             ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
             LENS_RULES,
