@@ -150,3 +150,13 @@ async def test_a_linters_finding_is_resolved_only_when_the_linter_ran(
         monkeypatch.setattr(job, "lint_findings", broken)
     await review_and_post(job_deps(github, tmp_path), PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
     assert github.resolved_threads == (set() if ruff_fails else {"T1"})
+
+
+async def test_a_failed_correctness_lens_resolves_none_of_its_threads(repo: GitRepo, tmp_path: Path) -> None:
+    """A lens that failed comes back as an empty outcome: that's "couldn't say", not "found nothing"."""
+    github = FakeGitHub(repo)
+    await Publisher(github, REPO, 7, head_sha="a" * 40, author=BOT, block_at=1)(blocking(5))
+    github.review_comments[0]["outdated"] = True
+    deps = replace(job_deps(github, tmp_path), agents=lens_agents([], crash=True))
+    await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
+    assert github.resolved_threads == set()

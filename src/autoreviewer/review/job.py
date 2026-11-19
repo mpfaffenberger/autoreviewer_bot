@@ -83,31 +83,35 @@ async def _run_lens(
     publish: Publish | None,
     deadline: Deadline | None,
 ) -> Outcome:
-    """One extra lens over `pr`. An advisory lens that fails costs only its advice; a lens that can block
-    fails the review, since approving without it would fail open."""
+    """One extra lens over `pr`."""
+    lens, verifier = spec.agents(workspace)
+    instructions = spec.instructions([change.path for change in pr.reviewable]) if spec.instructions else None
+    return await review_lens(
+        pr,
+        lens,
+        verifier,
+        kind=spec.kind,
+        instructions=instructions,
+        progress=progress,
+        block_at=block_at,
+        publish=publish,
+        capabilities=[deadline.watch(spec.kind)] if deadline else (),
+        max_posted=spec.max_posted,
+    )
+
+
+async def _survive(kind: str, block_at: int, run: Awaitable[Outcome]) -> Outcome:
+    """The lens's outcome; if it fails (a model error after the client's retries, say), an empty one naming it,
+    and the other lenses carry on. An advisory lens costs only its advice; a lens that can block leaves the
+    review cut short, which never approves, so nothing fails open. Cancellation isn't caught: a superseded
+    review still stops."""
     try:
-        lens, verifier = spec.agents(workspace)
-        paths = [change.path for change in pr.reviewable]
-        instructions = spec.instructions(paths) if spec.instructions else None
-        outcome = await review_lens(
-            pr,
-            lens,
-            verifier,
-            kind=spec.kind,
-            instructions=instructions,
-            progress=progress,
-            block_at=block_at,
-            publish=publish,
-            capabilities=[deadline.watch(spec.kind)] if deadline else (),
-            max_posted=spec.max_posted,
-        )
-        outcome.covered.add(spec.kind)  # finished: an advisory lens that failed covers nothing
-        return outcome
+        outcome = await run
     except Exception:
-        if spec.kind not in ADVISORY_KINDS:
-            raise
-        logger.warning("the %s lens failed; posting none of its findings", spec.kind, exc_info=True)
-        return Outcome(block_at=block_at)
+        logger.warning("the %s lens failed; the review goes on without it", kind, exc_info=True)
+        return Outcome(block_at=block_at, failed={kind})
+    outcome.covered.add(kind)  # finished: only a lens that ran to the end covers its kind (resolve_fixed)
+    return outcome
 
 
 def _only(pr: PullRequestText, paths: set[str]) -> PullRequestText:
@@ -314,24 +318,27 @@ async def review_change(
         progress = progress or Progress()
         # Continuing: only files changed since the last review, so each push doesn't repeat suggestions.
         scope = {change.path for change in continuation.changed_since} if continuation else None
-        # A TaskGroup, not gather: if one lens fails, the others are cancelled instead of burning GPU on a
-        # review that has already failed.
+        # Each lens survives the others' failures (_survive): one model error costs that lens, not the review.
         async with asyncio.TaskGroup() as lenses_group:
             correctness = lenses_group.create_task(
-                review(
-                    pr,
-                    lens,
-                    verifier,
-                    continuation=continuation,
-                    lens_capabilities=[
-                        *([persistence] if persistence else ()),
-                        *([deadline.watch("reviewer")] if deadline else ()),
-                    ],
-                    conversation=conversation,
-                    block_at=block_at,
-                    checked=linted,
-                    progress=progress,
-                    publish=publish,
+                _survive(
+                    "correctness",
+                    block_at,
+                    review(
+                        pr,
+                        lens,
+                        verifier,
+                        continuation=continuation,
+                        lens_capabilities=[
+                            *([persistence] if persistence else ()),
+                            *([deadline.watch("reviewer")] if deadline else ()),
+                        ],
+                        conversation=conversation,
+                        block_at=block_at,
+                        checked=linted,
+                        progress=progress,
+                        publish=publish,
+                    ),
                 )
             )
             extra = []
@@ -347,7 +354,7 @@ async def review_change(
                         publish=publish,
                         deadline=deadline,
                     )
-                    extra.append(lenses_group.create_task(run))
+                    extra.append(lenses_group.create_task(_survive(spec.kind, block_at, run)))
             simplify_task = None
             if simplifier is not None:
                 simplify_task = lenses_group.create_task(
@@ -362,7 +369,8 @@ async def review_change(
                     )
                 )
         outcome = correctness.result()
-        outcome.covered |= {"correctness", *(LINT_KINDS if lint_ran else ())}
+        if lint_ran:
+            outcome.covered |= set(LINT_KINDS)
         for task in extra:
             outcome.absorb(task.result())
         suggestions = simplify_task.result() if simplify_task is not None else []
@@ -372,9 +380,10 @@ async def review_change(
     logger.info(
         "%s at %s: %s", conversation, head_sha[:7], "continued the last review" if continuation else "fresh review"
     )
+    blocking_lenses = {"reviewer", *(spec.kind for spec in lenses if spec.kind not in ADVISORY_KINDS)}
+    timed_out = deadline is not None and bool(deadline.wrapped_up & blocking_lenses)
+    outcome.cut_short = timed_out or bool(outcome.failed_blocking)
     if deadline is not None:
-        blocking_lenses = {"reviewer", *(spec.kind for spec in lenses if spec.kind not in ADVISORY_KINDS)}
-        outcome.cut_short = bool(deadline.wrapped_up & blocking_lenses)
         outcome.covered -= {"correctness" if lens == "reviewer" else lens for lens in deadline.wrapped_up}
     # A capped lens verifies only its best candidates and drops the rest: at its cap, it may have dropped one.
     outcome.covered -= {
@@ -488,6 +497,8 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
     # A finding withdrawn in conversation and found again on unchanged code doesn't block (the verdict and the
     # check below both count with it).
     result.outcome.withdrawn = await publisher.withdrawn()
+    # A lens that failed after posting: its comments are on the PR, so the verdict counts them (#43's review).
+    result.outcome.absorb(Outcome(inline=[f for f in publisher.findings if f not in result.outcome.posted]))
     await post_review(
         deps.github,
         repo,
@@ -579,7 +590,7 @@ def _summary(outcome: Outcome) -> CheckResult:
     if outcome.cut_short:
         return CheckResult(
             "Partially reviewed",
-            f"Hit the time limit before covering the whole change; not approved.{notes}",
+            f"Partially reviewed: {outcome.why_partial}; not approved.{notes}",
             "neutral",
         )
     return CheckResult("No blocking issues", f"Approved.{notes}", "success")

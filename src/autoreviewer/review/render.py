@@ -54,8 +54,8 @@ def review_body(outcome: Outcome, *, footer: str) -> str:
     """The review's summary: blocking findings first, advisory ones after, then where they are."""
     posted = outcome.posted
     cut_short = (
-        "**Partially reviewed:** the review hit its time limit before covering the whole change, so it doesn't "
-        "approve. Push again or comment a review request to retry.\n\n"
+        f"**Partially reviewed:** {outcome.why_partial}, so it doesn't approve. Push again or comment a review "
+        "request to retry.\n\n"
         if outcome.cut_short
         else ""
     )

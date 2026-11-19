@@ -136,7 +136,8 @@ calibrated **confidence** (0-10, from Qodo PR-Agent). Lessons taken from publish
 
 `review_lens(kind="security")` in `review/pipeline.py`, run alongside correctness, always on the **whole PR**: a
 continued review must re-check every vulnerability, or one found on an earlier commit would quietly stop
-blocking. If it fails, the review fails (no verdict); approving without it would be a fail-open default.
+blocking. If it fails, the review is partial and never approves, since approving without it would be a
+fail-open default.
 
 - **Lens** (`prompts/security.md`, Qwen): learn the security model, compare the change against it, trace
   untrusted input to sensitive operations. Injection and code execution, authn/z, secrets and crypto,
@@ -236,8 +237,8 @@ and every agent the harness's `DetectLoops`, so the deadlines are only a backsto
 `review/deadline.py`: after the **soft deadline** (`AUTOREVIEWER_SOFT_DEADLINE_MINUTES`, 30) every lens
 wraps up. A capability removes its tools and tells it time is up, so it returns its final report with what
 it found. After the **hard deadline** (`AUTOREVIEWER_HARD_DEADLINE_MINUTES`, 50) the job cancels the review:
-"Review timed out", no verdict, and findings already posted stay. A review whose correctness or security
-lens was cut short **never approves**: it requests changes if it found blocking issues, and otherwise
+"Review timed out", no verdict, and findings already posted stay. A review whose correctness or security lens was cut short, or failed outright (a model error after the
+client's retries), **never approves**: it requests changes if it found blocking issues, and otherwise
 posts a neutral COMMENT ("partially reviewed") with a neutral check, and isn't remembered for continuing
 (files it never read wouldn't count as changed since). The CLI exits 3 for it, and the evals use the
 bot's limits.
@@ -266,6 +267,15 @@ findings and never block (`ADVISORY_KINDS`): failing the build is CI's job. The 
 correctness and DRY to leave them alone; correctness once posted one as a blocking P1.
 A type *checker* (`ty`) would need the PR's dependencies installed, which means running the PR's
 build code, so it waits for the sandbox.
+
+**A lens failing costs that lens, not the review** (Nov 19). #41's review died after eight minutes on one
+request that Qwen refused, and every lens's work went with it. Each lens now runs under `job._survive`: a
+failure is logged, the lens counts as having found nothing, and the others finish. An advisory lens costs only
+its advice. A failed blocking lens makes the review partial (above), and the review says which one failed.
+
+**Tool results are bounded where they're produced** (`compaction.tool_output_limits`). The compaction tiers
+never shrink the newest results, so one over `window × 0.6 / 8` is spilled: the history keeps a preview and a
+handle, and the reviewer pages through the rest with `read_tool_result`.
 
 ### Measuring it
 

@@ -18,8 +18,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness import DetectLoops, FileSystem
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
+from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME
 
-from autoreviewer.review.compaction import review_compaction
+from autoreviewer.review.compaction import review_compaction, tool_output_limits
 from autoreviewer.review.gittools import git_tools
 from autoreviewer.review.schemas import (
     LensKind,
@@ -95,7 +96,12 @@ def _agent[OutputT](
         output_type=output_type,
         instructions=instructions,
         # DetectLoops nudges a model repeating identical calls, alternating between two, or repeating itself.
-        capabilities=[*_read_only_repo(workspace.root), review_compaction(context_window), DetectLoops()],
+        capabilities=[
+            *_read_only_repo(workspace.root),
+            tool_output_limits(context_window),
+            review_compaction(context_window),
+            DetectLoops(),
+        ],
         toolsets=[git_tools(workspace)],
         retries=RETRIES,
     )
@@ -129,7 +135,7 @@ def lens_version(model_name: str, reasoning: ReasoningEffort | None = None) -> s
             model_name,
             f"reasoning={reasoning}",
             json.dumps(LensReport.model_json_schema(), sort_keys=True),
-            ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL])),
+            ",".join(sorted([*READ_ONLY_TOOL_NAMES, REPORT_TOOL, READ_TOOL_NAME])),
             LENS_RULES,
         ]
     )
