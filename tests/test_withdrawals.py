@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from autoreviewer.github import Repo
+from autoreviewer.github import PostedComment, Repo
 from autoreviewer.review.job import review_and_post
-from autoreviewer.review.pipeline import Outcome
+from autoreviewer.review.pipeline import Outcome, normal_title
 from autoreviewer.review.posting import Publisher, answer_markers, post_review, reconsider, withdrawals
+from autoreviewer.review.render import comment_body, posted_title
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, finding, job_deps
@@ -202,3 +203,14 @@ async def test_the_next_review_of_the_pr_counts_withdrawals(
     deps = job_deps(github, tmp_path, [finding(5)])
     await review_and_post(deps, PullRequestUpdated(1, "mpfaffenberger", "demo", 7, repo.head))
     assert github.reviews[-1]["event"] == event
+
+
+@pytest.mark.parametrize("title", ["", "Mean is ** (off) by one"])
+def test_a_posted_title_reads_back_as_written(title: str) -> None:
+    """From the bot's review of #49: comment_body and posted_title share one heading; an empty title is still
+    a title (withdrawals() dropped it when it tested the string's truth)."""
+    body = comment_body(blocking(5, title=title))
+    assert posted_title(body) == title
+    root = PostedComment("stats.py", 5, f"{body}\n\n<!-- autoreviewer:{'0' * 16} p1 correctness -->", 1)
+    answer = PostedComment("stats.py", 5, f"ok\n\n{answer_markers(9, withdrawn=True)}", 2, 1)
+    assert [w.title for w in withdrawals([root, answer])] == [normal_title(title)]

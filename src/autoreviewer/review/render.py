@@ -34,7 +34,14 @@ def sanitize(text: str, *, limit: int = MAX_TEXT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-_POSTED_TITLE = re.compile(r"\A\*\*\[P[0-3]\] ([^\n]*)\*\* \(")
+_HEADING = "**{rank}{title}** ({kind}{gate})"
+"""A finding comment's first line: comment_body writes it, posted_title reads it back."""
+_POSTED_TITLE = re.compile(
+    r"\A"
+    + re.escape(_HEADING.partition("{rank}")[0])
+    + r"\[P[0-3]\] ([^\n]*)"
+    + re.escape(_HEADING.partition("{title}")[2].partition("{kind}")[0])
+)
 
 
 def posted_title(body: str) -> str | None:
@@ -46,7 +53,7 @@ def posted_title(body: str) -> str | None:
 def comment_body(finding: Finding, *, blocking: bool = True) -> str:
     gate = "" if blocking else ", non-blocking"
     rank = "" if finding.kind == "simplify" else f"[P{finding.priority}] "
-    parts = [f"**{rank}{finding.title}** ({finding.kind}{gate})", finding.explanation]
+    parts = [_HEADING.format(rank=rank, title=finding.title, kind=finding.kind, gate=gate), finding.explanation]
     if finding.suggestion:
         parts.append(f"**Suggested fix:** {finding.suggestion}")
     body = sanitize("\n\n".join(parts))
