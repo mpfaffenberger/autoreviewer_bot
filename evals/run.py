@@ -187,11 +187,15 @@ async def main() -> None:
     parser.add_argument("--only", nargs="*", help="case names to run (default: all)")
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="cases at once")
-    parser.add_argument("--soft-minutes", type=float, default=ReviewDeps.soft_deadline_s / 60)
-    parser.add_argument("--hard-minutes", type=float, default=ReviewDeps.hard_deadline_s / 60)
+    parser.add_argument("--soft-minutes", type=float, default=Settings.soft_deadline_minutes)
+    parser.add_argument("--hard-minutes", type=float, default=Settings.hard_deadline_minutes)
     parser.add_argument("--suite", choices=("correctness", "security", "dry"), default="correctness")
     parser.add_argument("--lens", action="append", choices=("security", "dry"), default=[], help="extra lens to run")
     args = parser.parse_args()
+    if args.concurrency < 1:
+        parser.error("--concurrency must be at least 1")
+    if not 0 < args.soft_minutes < args.hard_minutes:
+        parser.error("--soft-minutes must be positive and below --hard-minutes, or reviews never wrap up")
 
     plan = plan_from_env()
     agents = correctness_agents(plan)
