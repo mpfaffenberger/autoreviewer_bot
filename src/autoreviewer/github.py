@@ -385,7 +385,8 @@ class GitHubApp:
                     bool(node["isResolved"]),
                     str(root["id"]),
                     bool(root["isMinimized"]),
-                    # GitHub reports the classifier lowercased: "resolved" is the one the bot uses (_SET_SETTLED).
+                    # minimizedReason is a String, lowercased, not the classifier enum the mutation takes
+                    # ("RESOLVED"): live on #44, Nov 19, comment 4635273385 read minimizedReason=resolved.
                     bool(root["isMinimized"]) and root.get("minimizedReason") == "resolved",
                 )
                 for node in page["nodes"]

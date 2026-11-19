@@ -144,7 +144,7 @@ class FakeGitHub:
                     {
                         "id": i,
                         "isResolved": done,
-                        "comments": {"nodes": [{"databaseId": c, "id": f"N{c}", **MINIMIZED.get(c, {})} for c in ids]},
+                        "comments": {"nodes": [{"databaseId": c, "id": f"N{c}", **MINIMIZED[c]} for c in ids]},
                     }
                     for i, done, ids in nodes
                 ],
@@ -158,7 +158,7 @@ class FakeGitHub:
         return httpx2.Response(200, json={"data": {mutation[0]: {"clientMutationId": None}}})
 
 
-MINIMIZED = {
+MINIMIZED = {  # as GitHub reports them: lowercase strings (live on #44, Nov 19), not the mutation's enum
     11: {"isMinimized": False, "minimizedReason": None},
     12: {"isMinimized": True, "minimizedReason": "resolved"},
     13: {"isMinimized": True, "minimizedReason": "spam"},
