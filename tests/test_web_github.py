@@ -135,7 +135,7 @@ class FakeGitHub:
             assert (variables["owner"], variables["name"], variables["number"]) == (REPO.owner, REPO.name, 7)
             pages = {
                 None: ([("T11", False, [11]), ("T00", True, [])], "page2"),  # a thread with no comments left
-                "page2": ([("T12", True, [12])], None),
+                "page2": ([("T12", True, [12]), ("T13", False, [13])], None),
             }
             nodes, cursor = pages[variables.get("after")]
             threads = {
@@ -144,7 +144,7 @@ class FakeGitHub:
                     {
                         "id": i,
                         "isResolved": done,
-                        "comments": {"nodes": [{"databaseId": c, "id": f"N{c}", "isMinimized": c == 12} for c in ids]},
+                        "comments": {"nodes": [{"databaseId": c, "id": f"N{c}", **MINIMIZED.get(c, {})} for c in ids]},
                     }
                     for i, done, ids in nodes
                 ],
@@ -156,6 +156,13 @@ class FakeGitHub:
             assert "classifier: RESOLVED" in query
         self.writes.append(("graphql", mutation[0], variables))
         return httpx2.Response(200, json={"data": {mutation[0]: {"clientMutationId": None}}})
+
+
+MINIMIZED = {
+    11: {"isMinimized": False, "minimizedReason": None},
+    12: {"isMinimized": True, "minimizedReason": "resolved"},
+    13: {"isMinimized": True, "minimizedReason": "spam"},
+}
 
 
 @pytest.fixture
@@ -272,7 +279,11 @@ async def test_review_threads_are_read_page_by_page_and_settled_both_ways(
     the thread's first comment as resolved: resolving the thread itself was FORBIDDEN to the App, live (#44)."""
     fake, app = fake_and_app
     threads = await app.review_threads(REPO, 7)
-    assert threads == [ReviewThread("T11", 11, False, "N11", False), ReviewThread("T12", 12, True, "N12", True)]
+    assert threads == [
+        ReviewThread("T11", 11, False, "N11", False, False),
+        ReviewThread("T12", 12, True, "N12", True, True),  # minimized as resolved: the bot's settle
+        ReviewThread("T13", 13, False, "N13", True, False),  # minimized as spam: a moderator's hide
+    ]
     await app.set_settled(REPO, threads[0], settled=True)
     await app.set_settled(REPO, threads[1], settled=False)
     assert fake.writes[-2:] == [

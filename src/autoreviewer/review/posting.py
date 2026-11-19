@@ -326,8 +326,8 @@ async def settle_fixed(
     threads = await _threads_by_root(github, repo, number) if gone else {}
     resolved = []
     for root in gone:
-        if (thread := threads.get(root)) is None or thread.resolved or thread.settled:
-            continue  # done already: resolved by a person, or settled by an earlier run of this
+        if (thread := threads.get(root)) is None or thread.resolved or thread.hidden:
+            continue  # done already: resolved by a person, settled earlier, or hidden by a moderator
         note = (
             f"The code here changed, and the review of `{head_sha[:7]}` found nothing like this in the file: "
             "marking it resolved."
@@ -348,7 +348,9 @@ async def mark_thread(github: PullRequests, repo: Repo, number: int, root_id: in
 
 
 async def _settle(github: PullRequests, repo: Repo, thread: ReviewThread, *, settled: bool) -> None:
-    if thread.settled != settled:
+    """Minimize the thread's finding as resolved unless it's hidden already; show it again only if it was
+    minimized as resolved. A moderator's hide (spam, off-topic) is theirs: never undone."""
+    if (not thread.hidden) if settled else thread.settled:
         await github.set_settled(repo, thread, settled=settled)
 
 
