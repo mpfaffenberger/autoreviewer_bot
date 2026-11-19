@@ -80,21 +80,22 @@ async def test_the_review_still_works_without_any_compaction(workspace: Workspac
     assert stats == {"cleared": 0, "superseded": 0} and summaries == 0
 
 
-async def test_a_big_tool_result_is_spilled_and_read_back_in_full(workspace: Workspace) -> None:
+@pytest.mark.parametrize(("window", "spilled"), [(40_000, True), (400_000, False)])
+async def test_a_big_tool_result_is_spilled_and_read_back_in_full(
+    workspace: Workspace, window: int, spilled: bool
+) -> None:
     """Nov 19: nothing bounded a tool result, and a 262,755-token prompt cost #41 its review. A result over its
     share of the window is spilled: the history keeps a preview and a handle, and nothing is lost."""
     (workspace.root / "big.py").write_text("".join(f"# line {i}: abc abc abc abc abc abc abc\n" for i in range(4000)))
-    window = 40_000
     returns: dict[str, str] = {}
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         returns.update(
-            {part.tool_name: str(part.content) for message in messages for part in getattr(message, "parts", [])
-             if isinstance(part, ToolReturnPart)}
-        )  # fmt: skip
+            {p.tool_name: str(p.content) for m in messages for p in m.parts if isinstance(p, ToolReturnPart)}
+        )
         if "read_file" not in returns:
             return ModelResponse(parts=[ToolCallPart("read_file", {"path": "big.py"})])
-        if READ_TOOL_NAME not in returns:
+        if spilled and READ_TOOL_NAME not in returns:
             handle = re.search(r"handle='([^']+)'", returns["read_file"])
             assert handle, returns["read_file"][:300]
             return ModelResponse(parts=[ToolCallPart(READ_TOOL_NAME, {"handle": handle[1], "pattern": "line 700:"})])
@@ -103,6 +104,9 @@ async def test_a_big_tool_result_is_spilled_and_read_back_in_full(workspace: Wor
 
     agent = correctness_agent(FunctionModel(respond), workspace, context_window=window)
     await agent.run("Review the change.", usage_limits=LENS_LIMITS)
+    if not spilled:  # ~12k tokens fit a 400k window's ~30k budget: passed through whole
+        assert "# line 700: abc" in returns["read_file"] and READ_TOOL_NAME not in returns
+        return
     assert len(returns["read_file"]) < max_result_tokens(window)  # in characters, so certainly in tokens
     assert "# line 700: abc" not in returns["read_file"]  # past the preview...
     assert "# line 700: abc" in returns[READ_TOOL_NAME]  # ...and still readable

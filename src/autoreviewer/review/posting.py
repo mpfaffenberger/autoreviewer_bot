@@ -121,12 +121,18 @@ class Publisher:
         self.posted: dict[str, int] = {}
         """Fingerprint -> the most urgent priority posted for it (this review, or found on the PR)."""
         self._findings: list[Finding] = []
+        """What this review posted, or found already standing on the PR for the same defect."""
         self._existing: dict[str, int] | None = None
         self._placed: dict[Placement, int] = {}
         """(path, line on this head, kind) -> the most urgent priority of the comments of that kind GitHub still
         shows there, from any commit: a superseded review's comments cover the same defect on the new head. Only
         markers that record a kind count (older ones can't be placed)."""
         self._lock = asyncio.Lock()
+
+    @property
+    def findings(self) -> list[Finding]:
+        """What this review's comments say, so the verdict counts them even if the lens behind one failed."""
+        return list(self._findings)
 
     async def __call__(self, finding: Finding) -> None:
         key = fingerprint(self._head_sha, finding)

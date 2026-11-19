@@ -85,8 +85,7 @@ async def _run_lens(
 ) -> Outcome:
     """One extra lens over `pr`."""
     lens, verifier = spec.agents(workspace)
-    paths = [change.path for change in pr.reviewable]
-    instructions = spec.instructions(paths) if spec.instructions else None
+    instructions = spec.instructions([change.path for change in pr.reviewable]) if spec.instructions else None
     return await review_lens(
         pr,
         lens,
@@ -379,7 +378,7 @@ async def review_change(
     )
     blocking_lenses = {"reviewer", *(spec.kind for spec in lenses if spec.kind not in ADVISORY_KINDS)}
     timed_out = deadline is not None and bool(deadline.wrapped_up & blocking_lenses)
-    outcome.cut_short = timed_out or bool(outcome.failed - ADVISORY_KINDS)
+    outcome.cut_short = timed_out or bool(outcome.failed_blocking)
     # A review cut short isn't continued from: files it never read wouldn't count as "changed since".
     remember = None
     if memory is not None and not outcome.cut_short:
@@ -488,6 +487,8 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
     # A finding withdrawn in conversation and found again on unchanged code doesn't block (the verdict and the
     # check below both count with it).
     result.outcome.withdrawn = await publisher.withdrawn()
+    # A lens that failed after posting: its comments are on the PR, so the verdict counts them (#43's review).
+    result.outcome.absorb(Outcome(inline=[f for f in publisher.findings if f not in result.outcome.posted]))
     await post_review(
         deps.github,
         repo,

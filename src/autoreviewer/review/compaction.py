@@ -87,13 +87,14 @@ def review_compaction(context_window: int) -> TieredCompaction[None]:
 
 def max_result_tokens(context_window: int) -> int:
     """The most one tool result may cost: the results ClearToolResults keeps, plus a couple more arriving in
-    the same step, must fit in the compaction target with room to spare."""
+    the same step, fill at most the compaction target."""
     return int(context_window * TARGET_FRACTION) // (KEEP_RECENT_TOOL_PAIRS + 2)
 
 
 SPILLS = LocalFileStore(cleanup_after=timedelta(days=7))
-"""Spilled results, on the bot's own disk: the checkout is read-only. Kept a week, since a lens conversation
-continues on the PR's next push and may read an old handle again."""
+"""Spilled results, in the harness's per-user temp directory: the checkout is read-only. A cache, not state: a
+continued conversation may read an old handle again, and one that's gone (a week on, or after a restart, since
+the container's /tmp isn't kept) just means calling the tool again."""
 
 
 def tool_output_limits(context_window: int) -> ToolOutputLimits[None]:

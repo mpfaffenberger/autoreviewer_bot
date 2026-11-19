@@ -114,9 +114,14 @@ class Outcome:
         return [*self.inline, *self.general]
 
     @property
+    def failed_blocking(self) -> list[str]:
+        """The lenses that could block and failed: without them, the review can't approve."""
+        return sorted(self.failed - ADVISORY_KINDS)
+
+    @property
     def why_partial(self) -> str:
         """Why a cut-short review covers only part of the change."""
-        if failed := sorted(self.failed - ADVISORY_KINDS):
+        if failed := self.failed_blocking:
             return f"the {' and '.join(failed)} review failed"
         return "the review hit its time limit before covering the whole change"
 
