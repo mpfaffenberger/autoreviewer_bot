@@ -20,24 +20,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pydantic_ai import Agent
-from pydantic_ai.models import Model
-
 from autoreviewer.github import PullRequestState, Repo
-from autoreviewer.review.agents import (
-    DEEPSEEK_CONTEXT_WINDOW,
-    QWEN_CONTEXT_WINDOW,
-    boodleton_model,
-    correctness_agent,
-    lens_pair,
-    verifier_agent,
-)
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.job import AgentFactory, CheckResult, Lens, ReviewDeps, Reviewed, review_change
-from autoreviewer.review.schemas import Finding, LensKind, LensReport, Verification
-from autoreviewer.review.workspace import Workspace
-from autoreviewer.web.app import lens
-from autoreviewer.web.config import Settings, model_lanes_from
+from autoreviewer.review.schemas import Finding
+from autoreviewer.web.app import ModelPlan, correctness_agents, lens, lens_agents
+from autoreviewer.web.config import Settings, model_lanes_from, models_from
 from evals.cases import CASES, HIT_TOLERANCE, Case
 from evals.dry_cases import CASES as DRY_CASES
 from evals.security_cases import CASES as SECURITY_CASES
@@ -93,18 +81,14 @@ def build_repo(case: Case, parent: Path) -> tuple[GitRepo, list[int]]:
     return GitRepo(path, base, head), lines
 
 
-def models_from_env() -> tuple[Model, Model]:
-    """(lens model, verifier model) on Boodleton, as configured for the bot, with the bot's lanes."""
-    base_url = os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1")
-    key = os.environ["BOODLETON_API_KEY"]
-    lanes = model_lanes_from(os.environ)  # the bot's rule, blank included
-
-    def model(name: str) -> Model:
-        return boodleton_model(name, base_url=base_url, api_key=key, lanes=lanes.get(name))
-
-    lens = os.environ.get("AUTOREVIEWER_LENS_MODEL", Settings.lens_model)
-    verifier = os.environ.get("AUTOREVIEWER_VERIFIER_MODEL", Settings.verifier_model)
-    return model(lens), model(verifier)
+def plan_from_env() -> ModelPlan:
+    """The bot's models, pins (AUTOREVIEWER_MODELS) and lanes, read from the same environment, on Boodleton."""
+    return ModelPlan(
+        models_from(os.environ),
+        os.environ.get("BOODLETON_BASE_URL", "http://127.0.0.1:8484/v1"),
+        os.environ["BOODLETON_API_KEY"],
+        model_lanes_from(os.environ),
+    )
 
 
 def hits(findings: list[Finding], case: Case, lines: list[int]) -> bool:
@@ -195,18 +179,9 @@ async def main() -> None:
     parser.add_argument("--lens", action="append", choices=("security", "dry"), default=[], help="extra lens to run")
     args = parser.parse_args()
 
-    lens_model, verifier_model = models_from_env()
-
-    def agents(workspace: Workspace) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
-        return (
-            correctness_agent(lens_model, workspace, context_window=QWEN_CONTEXT_WINDOW),
-            verifier_agent(verifier_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),
-        )
-
-    def pair(kind: LensKind) -> AgentFactory:
-        return lambda workspace: lens_pair(kind, lens_model, verifier_model, workspace)
-
-    lenses = [lens(kind, pair(kind)) for kind in args.lens]  # the bot's own settings for each kind
+    plan = plan_from_env()
+    agents = correctness_agents(plan)
+    lenses = [lens(kind, lens_agents(plan, kind)) for kind in args.lens]  # the bot's own settings for each kind
 
     suite = {"correctness": CASES, "security": SECURITY_CASES, "dry": DRY_CASES}[args.suite]
     cases = [c for c in suite if not args.only or c.name in args.only]

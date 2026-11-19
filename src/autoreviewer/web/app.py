@@ -5,15 +5,17 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
-from autoreviewer.web.config import Settings
+from autoreviewer.servers import CONTEXT_WINDOWS
+from autoreviewer.web.config import AgentKind, Settings
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -98,29 +100,50 @@ def create_app(
     return app
 
 
-def _models(settings: Settings) -> tuple[Model, Model]:
-    """(the lens's model, the verifier's model) on Boodleton, each limited to its lanes."""
-    from autoreviewer.review.agents import boodleton_model
+@dataclass(frozen=True)
+class ModelPlan:
+    """Which model each agent runs on (config.models_from), built on Boodleton, each model limited to its lanes. The
+    bot and the evals both build their agents from one, so they can't drift apart."""
 
-    def model(name: str) -> Model:
-        return boodleton_model(
-            name,
-            base_url=settings.boodleton_base_url,
-            api_key=settings.boodleton_api_key,
-            lanes=settings.model_lanes.get(name),
-        )
+    models: Mapping[str, str]
+    base_url: str
+    api_key: str = field(repr=False)
+    lanes: Mapping[str, int]
 
-    return model(settings.lens_model), model(settings.verifier_model)
+    @classmethod
+    def from_settings(cls, settings: Settings) -> ModelPlan:
+        return cls(settings.models, settings.boodleton_base_url, settings.boodleton_api_key, settings.model_lanes)
+
+    def finder(self, kind: AgentKind) -> tuple[Model, int]:
+        """The model and its context window for `kind`'s finder (a lens, or the simplifier's proposer)."""
+        return self._build(self.models[kind])
+
+    def verifier(self, kind: AgentKind) -> tuple[Model, int]:
+        """The model and its context window for the agent that checks `kind`'s findings."""
+        return self._build(self.models[f"{kind}.verifier"])
+
+    def _build(self, name: str) -> tuple[Model, int]:
+        from autoreviewer.review.agents import boodleton_model
+
+        model = boodleton_model(name, base_url=self.base_url, api_key=self.api_key, lanes=self.lanes.get(name))
+        return model, CONTEXT_WINDOWS[name]
 
 
 def build_agent_factory(settings: Settings) -> AgentFactory:
-    """(lens, verifier) over a checkout, on the configured Boodleton models: shared by the bot and the CLI."""
+    """(lens, verifier) for correctness over a checkout, on the configured models: shared by the bot and the CLI."""
+    return correctness_agents(ModelPlan.from_settings(settings))
+
+
+def correctness_agents(plan: ModelPlan) -> AgentFactory:
     from autoreviewer.review.agents import correctness_agent, verifier_agent
 
-    lens_model, verifier_model = _models(settings)
+    (lens_model, lens_window), (verifier_model, verifier_window) = (
+        plan.finder("correctness"),
+        plan.verifier("correctness"),
+    )
     return lambda workspace: (
-        correctness_agent(lens_model, workspace, context_window=settings.lens_context_window),
-        verifier_agent(verifier_model, workspace, context_window=settings.verifier_context_window),
+        correctness_agent(lens_model, workspace, context_window=lens_window),
+        verifier_agent(verifier_model, workspace, context_window=verifier_window),
     )
 
 
@@ -130,27 +153,24 @@ findings for little gain; 5 keeps most of them while a PR's blocking findings st
 
 
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:
-    """The enabled lenses beside correctness, on the same models."""
-    from autoreviewer.review.agents import lens_pair
-
-    lens_model, verifier_model = _models(settings)
-
-    def agents(kind: LensKind) -> AgentFactory:
-        return lambda workspace: lens_pair(
-            kind,
-            lens_model,
-            verifier_model,
-            workspace,
-            lens_window=settings.lens_context_window,
-            verifier_window=settings.verifier_context_window,
-        )
-
+    """The enabled lenses beside correctness, each on its own models (Settings.models)."""
+    plan = ModelPlan.from_settings(settings)
     kinds: list[LensKind] = []
     if settings.security:
         kinds.append("security")
     if settings.dry:
         kinds.append("dry")
-    return tuple(lens(kind, agents(kind)) for kind in kinds)
+    return tuple(lens(kind, lens_agents(plan, kind)) for kind in kinds)
+
+
+def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
+    """(lens, verifier) for `kind` over a checkout, on the plan's models for it: shared by the bot and the evals."""
+    from autoreviewer.review.agents import lens_pair
+
+    (lens_model, lens_window), (verifier_model, verifier_window) = plan.finder(kind), plan.verifier(kind)
+    return lambda workspace: lens_pair(
+        kind, lens_model, verifier_model, workspace, lens_window=lens_window, verifier_window=verifier_window
+    )
 
 
 def lens(kind: LensKind, agents: AgentFactory) -> Lens:
@@ -165,23 +185,39 @@ def lens(kind: LensKind, agents: AgentFactory) -> Lens:
 
 
 def build_simplifier_factory(settings: Settings) -> SimplifierFactory | None:
-    """Proposals on the lens's model, checks on the verifier's; None when simplifications are off."""
+    """None when simplifications are off."""
+    return simplifier_agents(ModelPlan.from_settings(settings)) if settings.simplify else None
+
+
+def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
+    """Proposals and checks on the plan's models for the simplifier."""
     from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
     from autoreviewer.review.simplify import Simplifier
 
-    if not settings.simplify:
-        return None
-    propose_model, check_model = _models(settings)
+    (propose_model, propose_window), (check_model, check_window) = plan.finder("simplify"), plan.verifier("simplify")
     return lambda workspace: Simplifier(
-        simplify_agent(propose_model, workspace, context_window=settings.lens_context_window),
-        simplify_checker_agent(check_model, workspace, context_window=settings.verifier_context_window),
+        simplify_agent(propose_model, workspace, context_window=propose_window),
+        simplify_checker_agent(check_model, workspace, context_window=check_window),
     )
 
 
 def models_note(settings: Settings) -> str:
-    kinds = ["correctness", *(name for name, on in (("security", settings.security), ("DRY", settings.dry)) if on)]
-    lenses = ", ".join(kinds[:-1]) + f" and {kinds[-1]}" if len(kinds) > 1 else kinds[0]
-    return f"{lenses} by `{settings.lens_model}`, verified by `{settings.verifier_model}`"
+    """The review footer's "correctness and security by `a`, verified by `b`", one clause per pair of models."""
+    enabled: list[tuple[AgentKind, str]] = [("correctness", "correctness")]
+    if settings.security:
+        enabled.append(("security", "security"))
+    if settings.dry:
+        enabled.append(("dry", "DRY"))
+    groups: dict[tuple[str, str], list[str]] = {}
+    for kind, name in enabled:
+        groups.setdefault((settings.models[kind], settings.models[f"{kind}.verifier"]), []).append(name)
+    return "; ".join(
+        f"{_and(names)} by `{finder}`, verified by `{checker}`" for (finder, checker), names in groups.items()
+    )
+
+
+def _and(names: list[str]) -> str:
+    return ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
 
 
 def main() -> None:
@@ -215,7 +251,7 @@ def main() -> None:
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
-        lens_version=lens_version(settings.lens_model),
+        lens_version=lens_version(settings.models["correctness"]),
         block_at=settings.block_at_priority,
         simplifier=build_simplifier_factory(settings),
         lenses=build_lenses(settings),

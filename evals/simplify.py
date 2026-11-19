@@ -21,20 +21,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from autoreviewer.github import Repo
-from autoreviewer.review.agents import (
-    DEEPSEEK_CONTEXT_WINDOW,
-    QWEN_CONTEXT_WINDOW,
-    simplify_agent,
-    simplify_checker_agent,
-)
 from autoreviewer.review.diff import select
 from autoreviewer.review.pipeline import PullRequestText
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import Finding
-from autoreviewer.review.simplify import Simplifier, SimplifierFactory, simplify
-from autoreviewer.review.workspace import Workspace, read_changes
+from autoreviewer.review.simplify import SimplifierFactory, simplify
+from autoreviewer.review.workspace import read_changes
+from autoreviewer.web.app import simplifier_agents
 from evals.cases import Case
-from evals.run import RESULTS, ROOT, build_repo, models_from_env
+from evals.run import RESULTS, ROOT, build_repo, plan_from_env
 from evals.simplify_cases import CASES
 from tests.review_fakes import LocalSource
 
@@ -127,13 +122,7 @@ async def main() -> None:
     parser.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
     args = parser.parse_args()
 
-    propose_model, check_model = models_from_env()
-
-    def simplifier(workspace: Workspace) -> Simplifier:
-        return Simplifier(
-            simplify_agent(propose_model, workspace, context_window=QWEN_CONTEXT_WINDOW),
-            simplify_checker_agent(check_model, workspace, context_window=DEEPSEEK_CONTEXT_WINDOW),
-        )
+    simplifier = simplifier_agents(plan_from_env())
 
     cases = [c for c in CASES if not args.only or c.name in args.only]
     slots = asyncio.Semaphore(CONCURRENCY)
