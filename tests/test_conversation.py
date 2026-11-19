@@ -13,16 +13,9 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from autoreviewer.github import Repo
 from autoreviewer.review import durable
 from autoreviewer.review.agents import checker_agent, conversation_agent
-from autoreviewer.review.conversation import (
-    MAX_ANSWERS,
-    MAX_QUOTED,
-    WITHDRAWN_MARKER,
-    ConversationDeps,
-    answer,
-    answered_marker,
-)
+from autoreviewer.review.conversation import MAX_ANSWERS, MAX_QUOTED, ConversationDeps, answer
 from autoreviewer.review.durable import answer_id
-from autoreviewer.review.posting import Publisher
+from autoreviewer.review.posting import Publisher, answer_markers
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.app import thread_reply_handler
 from autoreviewer.web.config import Settings
@@ -122,6 +115,7 @@ def deps(
         checkers=lambda ws, kind: checker_agent("correctness", check, ws, context_window=100_000),
         work_dir=tmp_path,
         bot_login=BOT,
+        block_at=1,
     )
 
 
@@ -132,7 +126,7 @@ async def test_a_reply_gets_one_sanitized_answer_in_the_thread(repo: GitRepo, tm
     [posted] = [c for c in github.review_comments if c.get("in_reply_to") == 1 and c["author"] == BOT]
     body = posted["comment"].body
     assert "@\u200bsomeone" in body  # no pings from model text
-    assert body.endswith(answered_marker(reply.comment_id)) and WITHDRAWN_MARKER not in body
+    assert body.endswith(answer_markers(reply.comment_id, withdrawn=False))
     assert await answer(deps(github, repo, tmp_path, model), reply) == "already answered"  # a replay
     assert len(github.review_comments) == 3
 
@@ -140,7 +134,7 @@ async def test_a_reply_gets_one_sanitized_answer_in_the_thread(repo: GitRepo, tm
 async def test_a_withdrawal_is_marked(repo: GitRepo, tmp_path: Path) -> None:
     github, reply = await thread_with_reply(repo)
     assert await answer(deps(github, repo, tmp_path, scripted("withdrawn")), reply) == "withdrawn"
-    assert github.review_comments[-1]["comment"].body.endswith(WITHDRAWN_MARKER)
+    assert github.review_comments[-1]["comment"].body.endswith(answer_markers(reply.comment_id, withdrawn=True))
 
 
 async def test_threads_the_bot_didnt_start_are_left_alone(repo: GitRepo, tmp_path: Path) -> None:

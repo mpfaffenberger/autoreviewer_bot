@@ -293,8 +293,14 @@ class FakeGitHub:
             self.fail_posted_comments -= 1
             raise RuntimeError("502 Bad Gateway")
         return [
-            PostedComment(c["comment"].path, None if c.get("outdated") else c["comment"].line, c["comment"].body)
-            for c in self.review_comments
+            PostedComment(
+                c["comment"].path,
+                None if c.get("outdated") else c["comment"].line,
+                c["comment"].body,
+                i,
+                c.get("in_reply_to"),
+            )
+            for i, c in enumerate(self.review_comments, start=1)
             if c["author"] == author
         ]
 

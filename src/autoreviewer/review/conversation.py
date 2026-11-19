@@ -10,7 +10,6 @@ MAX_ANSWERS per thread, which also ends a ping-pong between two bots.
 from __future__ import annotations
 
 import logging
-import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,7 +21,7 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 
 from autoreviewer.github import Conversations, Repo, ThreadComment
 from autoreviewer.review.agents import CONVERSATION_LIMITS, VERIFIER_LIMITS
-from autoreviewer.review.posting import finding_marker
+from autoreviewer.review.posting import answer_markers, answered, finding_marker, reconsider
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ADVISORY_KINDS, ThreadAnswer, Verification
 from autoreviewer.review.workspace import RepoSource, Workspace
@@ -46,15 +45,6 @@ Outcome = Literal[
 ]
 
 
-def answered_marker(comment_id: int) -> str:
-    return f"<!-- autoreviewer:answers {comment_id} -->"
-
-
-WITHDRAWN_MARKER = "<!-- autoreviewer:withdrawn -->"
-"""Ends an answer that withdrew the thread's finding (see the verdict)."""
-_ANSWERED = re.compile(r"<!-- autoreviewer:answers (\d+) -->")
-
-
 @dataclass(frozen=True)
 class ConversationDeps:
     github: Conversations
@@ -63,19 +53,20 @@ class ConversationDeps:
     checkers: Checkers
     work_dir: Path
     bot_login: str
+    block_at: int
 
 
 async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
     """Answer `reply` once, if it's under one of the bot's findings. A re-run (say, after a crash) finds an answer
     already posted by its marker, so it doesn't answer twice; two runs for one comment that overlap could, which
     the durable workflow's ID (one per comment) rules out."""
-    repo = Repo(reply.installation_id, reply.owner, reply.repo)
+    repo = _repo(reply)
     thread = await deps.github.thread(repo, reply.number, reply.root_id)
     marker = finding_marker(thread[0].body) if thread and thread[0].author == deps.bot_login else None
     if marker is None:
         return "not our thread"
     answers = [comment for comment in thread[1:] if comment.author == deps.bot_login]
-    if any(int(match[1]) == reply.comment_id for c in answers if (match := _ANSWERED.search(c.body))):
+    if any((done := answered(comment.body)) and done[0] == reply.comment_id for comment in answers):
         return "already answered"
     if len(answers) >= MAX_ANSWERS:
         logger.info("%s/%s#%d thread %d: %d answers already", reply.owner, reply.repo, reply.number, reply.root_id,
@@ -108,8 +99,8 @@ async def answer(deps: ConversationDeps, reply: ThreadReply) -> Outcome:
                 text, withdrawn = f"I re-checked the code on its own: this still holds. {check.output.reason}", False
     logger.info("%s/%s#%d thread %d: finding %s (%s)", reply.owner, reply.repo, reply.number, reply.root_id,
                 "withdrawn" if withdrawn else verdict.finding, verdict.reason)  # fmt: skip
-    body = f"{sanitize(text)}\n\n{answered_marker(reply.comment_id)}"
-    await deps.github.reply(repo, reply.number, reply.root_id, body + (f"\n{WITHDRAWN_MARKER}" if withdrawn else ""))
+    body = f"{sanitize(text)}\n\n{answer_markers(reply.comment_id, withdrawn=withdrawn)}"
+    await deps.github.reply(repo, reply.number, reply.root_id, body)
     return "withdrawn" if withdrawn else "answered"
 
 
@@ -137,3 +128,12 @@ def _prompt(title: str, thread: list[ThreadComment], comment_id: int) -> str:
             f"Answer comment {comment_id}.",
         ]
     )
+
+
+async def reconsider_verdict(deps: ConversationDeps, reply: ThreadReply) -> bool:
+    """After a withdrawal: approve the PR's head if nothing blocking is left standing (posting.reconsider)."""
+    return await reconsider(deps.github, _repo(reply), reply.number, author=deps.bot_login, block_at=deps.block_at)
+
+
+def _repo(reply: ThreadReply) -> Repo:
+    return Repo(reply.installation_id, reply.owner, reply.repo)

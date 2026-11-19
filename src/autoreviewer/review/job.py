@@ -477,6 +477,9 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         deps.memory.remember(conversation, result.remember)
     if latest.head_sha != pull.head_sha:
         raise Superseded
+    # A finding withdrawn in conversation and found again on unchanged code doesn't block (the verdict and the
+    # check below both count with it).
+    result.outcome.withdrawn = await publisher.withdrawn()
     await post_review(
         deps.github,
         repo,

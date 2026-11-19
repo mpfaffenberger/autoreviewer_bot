@@ -294,6 +294,7 @@ def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps
         checkers=checker,
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
+        block_at=settings.block_at_priority,
     )
 
 

@@ -23,6 +23,7 @@ from autoreviewer.review.compaction import compaction_stats
 from autoreviewer.review.diff import ChangedPath, commentable_lines
 from autoreviewer.review.memory import PriorReview
 from autoreviewer.review.progress import Progress
+from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ADVISORY_KINDS, Finding, LensKind, LensReport, Verification
 
 logger = logging.getLogger("autoreviewer.review")
@@ -49,7 +50,35 @@ class PullRequestText:
 
 def blocks(finding: Finding, block_at: int) -> bool:
     """Whether a confirmed finding blocks the merge: urgent enough, and not merely advice."""
-    return finding.kind not in ADVISORY_KINDS and finding.priority <= block_at
+    return blocks_at(finding.kind, finding.priority, block_at)
+
+
+def blocks_at(kind: str | None, priority: int, block_at: int) -> bool:
+    """The blocking rule on its own; a kind of None (a marker from before kinds were recorded) may block."""
+    return kind not in ADVISORY_KINDS and priority <= block_at
+
+
+@dataclass(frozen=True)
+class Withdrawal:
+    """A finding the bot withdrew in its thread, whose comment GitHub still shows on the current head."""
+
+    path: str
+    line: int
+    kind: str
+    priority: int
+    title: str
+    """As posted, normalised (see `covers`)."""
+
+    def covers(self, finding: Finding) -> bool:
+        """Whether `finding` is this one found again: same place, kind, and title, and no more urgent. Anything
+        else blocks as usual: another defect on that line, or the same one found more urgent."""
+        same = (finding.path, finding.line, finding.kind) == (self.path, self.line, self.kind)
+        return same and finding.priority >= self.priority and normal_title(finding.title) == self.title
+
+
+def normal_title(title: str) -> str:
+    """A title as a comment shows it (sanitised), with case and spacing ignored."""
+    return " ".join(sanitize(title).split()).casefold()
 
 
 @dataclass
@@ -74,6 +103,9 @@ class Outcome:
     """A lens that can block hit the time limit before covering the whole change: never an approval."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
+    withdrawn: tuple[Withdrawal, ...] = ()
+    """Findings withdrawn in conversation on unchanged code (posting.Publisher.withdrawn): one found again is not
+    posted again, and doesn't block."""
 
     @property
     def posted(self) -> list[Finding]:
@@ -93,7 +125,7 @@ class Outcome:
                     target[target.index(same)] = finding
 
     def is_blocking(self, finding: Finding) -> bool:
-        return blocks(finding, self.block_at)
+        return blocks(finding, self.block_at) and not any(w.covers(finding) for w in self.withdrawn)
 
     @property
     def blocking(self) -> bool:

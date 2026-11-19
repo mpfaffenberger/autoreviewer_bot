@@ -217,8 +217,8 @@ async def test_single_comments_and_review_listings(fake_and_app: tuple[FakeGitHu
     }
     assert await app.review_bodies(REPO, 7, commit_sha=HEAD, author=BOT_LOGIN) == ["verdict", ""]
     assert await app.posted_comments(REPO, 7, author=BOT_LOGIN) == [
-        PostedComment("f1.py", 7, f"finding {MARKER}"),
-        PostedComment("f2.py", None, "outdated"),
+        PostedComment("f1.py", 7, f"finding {MARKER}", 11),
+        PostedComment("f2.py", None, "outdated", 12),
     ]
 
 

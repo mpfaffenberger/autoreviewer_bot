@@ -61,6 +61,9 @@ class PostedComment:
     line: int | None
     """None once the code it was on has changed (GitHub shows it as outdated)."""
     body: str
+    id: int = 0
+    in_reply_to: int | None = None
+    """The thread's first comment, for a reply; None for a comment that starts a thread."""
 
 
 @dataclass(frozen=True)
@@ -98,16 +101,6 @@ class Commands(PullRequestReader, Protocol):
     async def react(self, repo: Repo, comment_id: int, content: Reaction) -> None: ...
 
 
-class Conversations(PullRequestReader, Protocol):
-    """What answering a reply in one of the bot's threads needs: read the thread, and reply in it."""
-
-    async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
-        """The thread's first comment, then its replies, oldest first."""
-        ...
-
-    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None: ...
-
-
 class PullRequests(PullRequestReader, Protocol):
     """Everything the bot's review job needs: reading, plus check runs and posting reviews."""
 
@@ -137,6 +130,17 @@ class PullRequests(PullRequestReader, Protocol):
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         """Every inline comment `author` left on the PR, where GitHub places it on the current head."""
         ...
+
+
+class Conversations(PullRequests, Protocol):
+    """What answering a reply in one of the bot's threads needs: read the thread and reply in it, plus what a
+    withdrawal needs to reconsider the verdict (reviews and check runs)."""
+
+    async def thread(self, repo: Repo, number: int, root_id: int) -> list[ThreadComment]:
+        """The thread's first comment, then its replies, oldest first."""
+        ...
+
+    async def reply(self, repo: Repo, number: int, root_id: int, body: str) -> None: ...
 
 
 async def _get_pull(github: GitHub, repo: Repo, number: int) -> PullRequestState:
@@ -330,7 +334,13 @@ class GitHubApp:
 
     async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
         return [
-            PostedComment(str(c.get("path") or ""), c.get("line"), str(c.get("body") or ""))
+            PostedComment(
+                str(c.get("path") or ""),
+                c.get("line"),
+                str(c.get("body") or ""),
+                int(c.get("id") or 0),
+                c.get("in_reply_to_id"),
+            )
             for c in await self._review_comments(repo, number)
             if (c.get("user") or {}).get("login") == author
         ]

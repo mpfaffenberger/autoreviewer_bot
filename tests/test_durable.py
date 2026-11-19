@@ -21,6 +21,7 @@ from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, finding, job_deps, make_repo
 from tests.test_conversation import deps, scripted
+from tests.test_withdrawals import reviewed
 
 REPO_ = Repo(1, "mpfaffenberger", "demo")
 
@@ -69,6 +70,21 @@ async def test_each_reply_is_answered_once_on_the_answer_queue(tmp_path: Path) -
         durable.shutdown()
     assert len({handle.workflow_id for handle in handles}) == 2
     assert [c["author"] for c in github.review_comments].count(BOT) == 3  # the finding and two answers
+
+
+async def test_a_withdrawal_reconsiders_the_verdict(tmp_path: Path) -> None:
+    """From the bot's review of #38: the answer workflow's second step, after a withdrawal."""
+    github = await reviewed(make_repo(tmp_path / "origin"), Finding.model_validate(finding(5)))
+    comment = github.say("alice", 1, "That can't happen: the caller checks.")
+    conversation_deps = deps(github, github.repo, tmp_path, scripted("withdrawn"))  # the checker agrees
+    durable.configure(tmp_path / "dbos.sqlite")
+    await durable.launch(job_deps(github, tmp_path, []), conversation_deps, concurrency=1)
+    try:
+        reply = ThreadReply(1, "mpfaffenberger", "demo", 7, comment, 1)
+        assert await (await durable.enqueue_answer(reply)).get_result() == "withdrawn"
+    finally:
+        durable.shutdown()
+    assert [r["event"] for r in github.reviews] == ["REQUEST_CHANGES", "APPROVE"]
 
 
 async def test_a_queued_review_runs_all_three_phases(launch: Launch) -> None:
