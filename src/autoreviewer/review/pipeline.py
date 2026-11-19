@@ -100,7 +100,9 @@ class Outcome:
     """The lens's overall verdict on the change (Codex-style), alongside its findings."""
     reviewed: list[str] = field(default_factory=list[str])
     cut_short: bool = False
-    """A lens that can block hit the time limit before covering the whole change: never an approval."""
+    """A lens that can block hit the time limit before covering the whole change, or failed: never an approval."""
+    failed: set[str] = field(default_factory=set[str])
+    """Lenses that raised (a model error after the client's retries, say), so found nothing (job._survive)."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
     withdrawn: tuple[Withdrawal, ...] = ()
@@ -111,11 +113,19 @@ class Outcome:
     def posted(self) -> list[Finding]:
         return [*self.inline, *self.general]
 
+    @property
+    def why_partial(self) -> str:
+        """Why a cut-short review covers only part of the change."""
+        if failed := sorted(self.failed - ADVISORY_KINDS):
+            return f"the {' and '.join(failed)} review failed"
+        return "the review hit its time limit before covering the whole change"
+
     def absorb(self, other: Outcome) -> None:
         """Add another lens's results. Where correctness and security posted on one line (likely one defect
         seen twice), the more urgent finding stays; other kinds (types, DRY, simplify) are separate issues."""
         self.rejected += other.rejected
         self.unverified += other.unverified
+        self.failed |= other.failed
         self.low_confidence += other.low_confidence
         for target, findings in ((self.inline, other.inline), (self.general, other.general)):
             for finding in findings:

@@ -87,12 +87,26 @@ async def test_one_line_reported_by_both_lenses_posts_the_more_urgent(repo: GitR
     assert (github.reviews[0]["event"], result.title) == ("REQUEST_CHANGES", "1 blocking issue(s)")
 
 
-async def test_a_failed_security_review_fails_closed(repo: GitRepo, tmp_path: Path) -> None:
-    """Approving without the security check would be a fail-open default: no verdict at all instead."""
+@pytest.mark.parametrize(("found", "conclusion"), [([], "neutral"), ([finding(5)], "failure")])
+async def test_a_failed_security_review_never_approves_and_says_why(
+    repo: GitRepo, tmp_path: Path, found: list[dict[str, Any]], conclusion: str
+) -> None:
+    """Approving without the security check would fail open. Since Nov 19 (#41 lost a whole review to one
+    model error) the failure costs that lens only: correctness's findings still post, and the review is partial."""
     github = FakeGitHub(repo)
-    deps = replace(job_deps(github, tmp_path, []), lenses=security_lens([], crash=True))
+    deps = replace(job_deps(github, tmp_path, found), lenses=security_lens([], crash=True))
     result = await review_and_post(deps, pull(repo))
-    assert result.title == "Review failed" and github.reviews == []
+    assert result.conclusion == conclusion and "the security review failed" in github.reviews[-1]["body"]
+    assert github.reviews[-1]["event"] != "APPROVE" and len(github.review_comments) == len(found)
+
+
+async def test_a_failed_correctness_review_keeps_the_other_lenses(repo: GitRepo, tmp_path: Path) -> None:
+    """The #41 case: the correctness reviewer's request failed. Security's finding still blocks."""
+    github = FakeGitHub(repo)
+    deps = replace(job_deps(github, tmp_path), agents=lens_agents([], crash=True), lenses=security_lens([INJECTION]))
+    result = await review_and_post(deps, pull(repo))
+    assert result.conclusion == "failure" and "the correctness review failed" in github.reviews[-1]["body"]
+    assert [c["comment"].body.split("**")[1] for c in github.review_comments] == ["[P1] User input reaches a shell"]
 
 
 async def test_security_reviews_the_whole_pr_even_when_correctness_continues(repo: GitRepo, tmp_path: Path) -> None:
@@ -118,8 +132,8 @@ async def test_security_reviews_the_whole_pr_even_when_correctness_continues(rep
     assert prior is not None and prior.dropped == []  # the security verifier's rejections aren't the lens's memory
 
 
-async def test_a_failing_lens_cancels_the_others(repo: GitRepo, tmp_path: Path) -> None:
-    """No GPU time on a review that has already failed: a sibling left running would finish later."""
+async def test_a_failing_lens_leaves_the_others_running(repo: GitRepo, tmp_path: Path) -> None:
+    """A failed lens no longer fails the review, so the others finish their work and it counts."""
     finished: list[str] = []
 
     async def slow(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -133,8 +147,7 @@ async def test_a_failing_lens_cancels_the_others(repo: GitRepo, tmp_path: Path) 
     github = FakeGitHub(repo)
     deps = replace(job_deps(github, tmp_path, []), lenses=security_lens([], crash=True), simplifier=slow_simplifier)
     result = await review_and_post(deps, pull(repo))
-    await asyncio.sleep(0.6)  # long enough for an orphaned simplifier to finish
-    assert result.title == "Review failed" and finished == []
+    assert result.title == "Partially reviewed" and finished == ["simplifier"]
 
 
 async def test_a_lint_finding_on_the_same_line_never_hides_a_vulnerability(repo: GitRepo, tmp_path: Path) -> None:
