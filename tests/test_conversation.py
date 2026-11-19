@@ -8,17 +8,19 @@ from typing import Any
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
+from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.github import Repo
-from autoreviewer.review import durable
+from autoreviewer.review import conversation, durable
 from autoreviewer.review.agents import checker_agent, conversation_agent
-from autoreviewer.review.conversation import MAX_ANSWERS, MAX_QUOTED, ConversationDeps, answer
+from autoreviewer.review.conversation import MAX_ANSWERS, MAX_QUOTED, ConversationDeps, answer, reconsider_verdict
 from autoreviewer.review.durable import answer_id
 from autoreviewer.review.posting import Publisher, answer_markers
 from autoreviewer.review.schemas import Finding
+from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.app import thread_reply_handler
-from autoreviewer.web.config import Settings
+from autoreviewer.web.config import Settings, models_from
 from autoreviewer.web.routing import Ignore, ThreadReply, route
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding
 
@@ -285,3 +287,41 @@ async def test_a_runaway_answer_gives_up_without_posting(repo: GitRepo, tmp_path
 
     assert await answer(deps(github, repo, tmp_path, FunctionModel(forever)), reply) == "gave up"
     assert len(github.review_comments) == 2  # the finding and the reply; no answer
+
+
+def test_the_bots_blind_recheck_uses_the_findings_own_checker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From the bot's review of #37: conversation_deps' checker factory, as the bot builds it. A security finding is
+    re-checked by the security checker (with its references); anything else that can block, by correctness's."""
+    from autoreviewer.review import agents
+    from autoreviewer.web.app import conversation_deps
+
+    built: list[tuple[str, str]] = []
+
+    def record(kind: str, model: Model, *_: object, **__: object) -> object:
+        built.append((kind, getattr(model, "wrapped", model).model_name))
+        return object()
+
+    monkeypatch.setattr(agents, "checker_agent", record)
+    pins = models_from({"AUTOREVIEWER_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}"})  # tell them apart
+    settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b", models=pins)
+    deps = conversation_deps(settings, object())  # type: ignore[arg-type]
+    for kind in ("security", "correctness", "dry"):
+        deps.checkers(object(), kind)  # type: ignore[arg-type]
+    assert built == [("security", QWEN), ("correctness", DEEPSEEK), ("correctness", DEEPSEEK)]
+
+
+@pytest.mark.parametrize("block_at", [0, 2])
+async def test_reconsidering_uses_the_bots_blocking_threshold(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_at: int
+) -> None:
+    """From the bot's review of #49: reconsider_verdict passes the threshold on, not a default."""
+    seen: list[int] = []
+
+    async def record(*_: object, block_at: int, **__: object) -> bool:
+        seen.append(block_at)
+        return False
+
+    monkeypatch.setattr(conversation, "reconsider", record)
+    github, reply = await thread_with_reply(repo)
+    await reconsider_verdict(replace(deps(github, repo, tmp_path, scripted("holds")), block_at=block_at), reply)
+    assert seen == [block_at]

@@ -34,6 +34,15 @@ def sanitize(text: str, *, limit: int = MAX_TEXT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+_POSTED_TITLE = re.compile(r"\A\*\*\[P[0-3]\] ([^\n]*)\*\* \(")
+
+
+def posted_title(body: str) -> str | None:
+    """The title of a finding as comment_body wrote it, or None for a body it didn't write (a simplification's
+    has no priority)."""
+    return match[1] if (match := _POSTED_TITLE.match(body)) else None
+
+
 def comment_body(finding: Finding, *, blocking: bool = True) -> str:
     gate = "" if blocking else ", non-blocking"
     rank = "" if finding.kind == "simplify" else f"[P{finding.priority}] "

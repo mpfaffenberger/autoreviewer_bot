@@ -61,7 +61,7 @@ class PostedComment:
     line: int | None
     """None once the code it was on has changed (GitHub shows it as outdated)."""
     body: str
-    id: int = 0
+    id: int
     in_reply_to: int | None = None
     """The thread's first comment, for a reply; None for a comment that starts a thread."""
 
