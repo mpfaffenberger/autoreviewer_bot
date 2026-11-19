@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS, lens_pair
+from autoreviewer.review import agents
+from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS, _lanes, lens_pair  # pyright: ignore[reportPrivateUsage]
 from autoreviewer.review.pipeline import blocks
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, KIMI, QWEN
+from autoreviewer.servers import CONTEXT_WINDOWS, DEEPSEEK, DEFAULT_MODEL_LANES, KIMI, QWEN
 from autoreviewer.web.app import MAX_ADVISORY_POSTED, ModelPlan, build_lenses, models_note
 from autoreviewer.web.config import Settings, models_from
 
@@ -93,13 +98,47 @@ def test_lenses_run_in_one_order() -> None:
 
 
 def test_only_models_with_a_fallback_get_one() -> None:
-    """Kimi, a hosted API with quotas, falls back to Qwen; the window fits both. DeepSeek runs alone."""
+    """Kimi, a hosted API with quotas, falls back to Qwen, so its agent gets the smaller of the two context
+    windows. DeepSeek has no fallback."""
     plan = ModelPlan.from_settings(BASE)
     model, window = plan.verifier("docs")
     assert (checks_in_order(model), window) == ([KIMI, QWEN], min(CONTEXT_WINDOWS[KIMI], CONTEXT_WINDOWS[QWEN]))
     assert checks_in_order(plan.verifier("correctness")[0]) == [DEEPSEEK]
 
 
-def test_a_checker_may_not_fall_back_to_its_finders_model() -> None:
-    with pytest.raises(ValueError, match=r"docs\.verifier \(kimi-k3\.1-pro\) falls back to 'qwen3\.8-flash-next'"):
-        models_from({"AUTOREVIEWER_MODELS": f"docs={QWEN}"})
+@pytest.mark.parametrize(
+    "pins",
+    [
+        f"docs={QWEN}",  # its checker, Kimi, falls back to Qwen
+        f"docs={KIMI},docs.verifier={QWEN}",  # it falls back to Qwen, its checker
+    ],
+)
+def test_a_finder_and_its_checker_never_share_a_model_counting_fallbacks(pins: str) -> None:
+    with pytest.raises(ValueError, match=r"docs and docs\.verifier could both run on 'qwen3\.8-flash-next'"):
+        models_from({"AUTOREVIEWER_MODELS": pins})
+
+
+def test_the_fallback_gets_its_own_lanes_and_the_roles_reasoning() -> None:
+    """From the bot's review of #39: Qwen's leg shares Qwen's process-wide limit, and thinks as the role does."""
+    plan = ModelPlan.from_settings(replace(BASE, reasoning={"docs.verifier": "high"}))
+    kimi, qwen = plan.verifier("docs")[0].models  # type: ignore[attr-defined]
+    assert qwen._limiter is _lanes(QWEN, DEFAULT_MODEL_LANES[QWEN])  # pyright: ignore[reportPrivateUsage]
+    assert kimi._limiter is _lanes(KIMI, DEFAULT_MODEL_LANES[KIMI])  # pyright: ignore[reportPrivateUsage]
+    assert [leg.wrapped.settings for leg in (kimi, qwen)] == [{"openai_reasoning_effort": "high"}] * 2
+
+
+@pytest.mark.anyio
+async def test_a_kimi_failure_is_answered_by_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From the bot's review of #39: the wiring, not just the shape. Kimi answers 429; the check still runs."""
+
+    def boodleton(name: str, **_: object) -> FunctionModel:
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if name == KIMI:
+                raise ModelHTTPError(429, KIMI, {"error": "Too Many Requests"})
+            return ModelResponse(parts=[TextPart(f"checked by {name}")])
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(agents, "boodleton_model", boodleton)
+    result = await Agent(ModelPlan.from_settings(BASE).verifier("docs")[0]).run("Check this finding.")
+    assert result.output == f"checked by {QWEN}"

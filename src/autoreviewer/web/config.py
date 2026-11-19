@@ -155,22 +155,23 @@ def parse_lanes(value: str) -> dict[str, int]:
 def models_from(env: Mapping[str, str]) -> dict[str, str]:
     """Each agent role's model: DEFAULT_MODELS, with AUTOREVIEWER_MODELS ("role=model,...", e.g.
     "security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next") pinning roles. Stops startup on an unknown
-    role, a model without a known context window, or a finder on the same model as its checker (different models
-    make different mistakes; that's the point of checking). Shared by the bot and the evals."""
+    role, a model without a known context window, or a finder and its checker that could run on the same model,
+    fallbacks included: different models make different mistakes, which is the point of checking. Shared by the
+    bot and the evals."""
     models = dict(DEFAULT_MODELS)
     for role, model in _role_pairs(env, "AUTOREVIEWER_MODELS", "role=model"):
         if model not in CONTEXT_WINDOWS:
             raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
         models[role] = model
     for kind in AGENT_KINDS:
-        checker = models[verifier_role(kind)]
-        if models[kind] == checker:
-            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
-        if FALLBACKS.get(checker) == models[kind]:
-            raise ValueError(
-                f"AUTOREVIEWER_MODELS: {verifier_role(kind)} ({checker}) falls back to {models[kind]!r}, {kind}'s model"
-            )
+        if shared := sorted(_runs_on(models[kind]) & _runs_on(models[verifier_role(kind)])):
+            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} could both run on {shared[0]!r}")
     return models
+
+
+def _runs_on(model: str) -> set[str]:
+    """The models an agent on `model` may end up on: its own, and its fallback's (servers.FALLBACKS)."""
+    return {model, *([FALLBACKS[model]] if model in FALLBACKS else [])}
 
 
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
