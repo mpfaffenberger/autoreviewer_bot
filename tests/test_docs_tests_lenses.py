@@ -23,6 +23,14 @@ def with_lenses(**switches: bool) -> Settings:
     return Settings(**{**BASE.__dict__, **switches})  # type: ignore[arg-type]
 
 
+def test_the_bots_time_limits_come_from_its_env() -> None:
+    """From the bot's review of #47: Settings.from_env reads them through config.deadlines_from."""
+    assert (Settings.from_env(ENV).soft_deadline_minutes, Settings.from_env(ENV).hard_deadline_minutes) == (30, 50)
+    limits = {"AUTOREVIEWER_SOFT_DEADLINE_MINUTES": "20", "AUTOREVIEWER_HARD_DEADLINE_MINUTES": "40"}
+    settings = Settings.from_env({**ENV, **limits})
+    assert (settings.soft_deadline_minutes, settings.hard_deadline_minutes) == (20, 40)
+
+
 def test_off_by_default_and_switched_on_by_env() -> None:
     assert (Settings.from_env(ENV).docs, Settings.from_env(ENV).tests) == (False, False)
     on = Settings.from_env({**ENV, "AUTOREVIEWER_DOCS": "true", "AUTOREVIEWER_TESTS": "true"})

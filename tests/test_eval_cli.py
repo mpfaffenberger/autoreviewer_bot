@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from autoreviewer.servers import DEEPSEEK, QWEN
 from evals.run import arguments, plan_from_env
 from tests.test_reasoning import effort
 
@@ -31,9 +32,17 @@ def test_bad_arguments_stop_the_run(argv: list[str], error: str, capsys: pytest.
     assert error in capsys.readouterr().err
 
 
-def test_the_plan_reads_the_reasoning_efforts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """From the bot's review of #36: plan_from_env carries AUTOREVIEWER_REASONING to the agents."""
-    monkeypatch.setenv("BOODLETON_API_KEY", "k")
-    monkeypatch.setenv("AUTOREVIEWER_REASONING", "docs=high")
+def test_the_plan_reads_the_bots_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From the bot's reviews of #36 and #47: plan_from_env carries every setting the bot's own plan reads."""
+    for name, value in {
+        "BOODLETON_API_KEY": "k",
+        "BOODLETON_BASE_URL": "http://boodleton.test/v1",
+        "AUTOREVIEWER_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}",
+        "AUTOREVIEWER_MODEL_LANES": f"{QWEN}=2,{DEEPSEEK}=3",
+        "AUTOREVIEWER_REASONING": "docs=high",
+    }.items():
+        monkeypatch.setenv(name, value)
     plan = plan_from_env()
+    assert (plan.base_url, plan.api_key, dict(plan.lanes)) == ("http://boodleton.test/v1", "k", {QWEN: 2, DEEPSEEK: 3})
+    assert (plan.models["security"], plan.models["security.verifier"]) == (DEEPSEEK, QWEN)
     assert (effort(plan.finder("docs")[0]), effort(plan.finder("tests")[0])) == ("high", None)

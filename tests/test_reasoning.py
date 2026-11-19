@@ -55,8 +55,12 @@ def test_the_conversation_agent_thinks_by_default() -> None:
     assert effort(ModelPlan.from_settings(settings).conversation()[0]) == "high"
 
 
-def test_the_lens_tools_are_part_of_its_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    """From the bot's review of #43: read_tool_result joining the tools started saved conversations afresh."""
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("READ_TOOL_NAME", "read_spill"), ("REPORT_TOOL", "report"), ("READ_ONLY_TOOL_NAMES", frozenset({"read_file"}))],
+)
+def test_the_lens_tools_are_part_of_its_version(monkeypatch: pytest.MonkeyPatch, name: str, value: object) -> None:
+    """From the bot's reviews of #43 and #45: a change to any tool the lens has starts saved conversations afresh."""
     before = lens_version(QWEN)
-    monkeypatch.setattr(agents, "READ_TOOL_NAME", "read_spill")
+    monkeypatch.setattr(agents, name, value)
     assert lens_version(QWEN) != before
