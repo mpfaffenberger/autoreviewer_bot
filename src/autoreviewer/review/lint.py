@@ -40,6 +40,10 @@ MAX_LINT_FINDINGS = 30
 RUFF_TIMEOUT_S = 120.0
 
 
+LINT_KINDS = ("types", "lint")
+"""The kinds of finding ruff makes here: type annotations on added lines, and unused imports."""
+
+
 class LintError(RuntimeError):
     pass
 

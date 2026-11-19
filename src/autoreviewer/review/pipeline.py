@@ -105,6 +105,9 @@ class Outcome:
     """Lenses that raised (a model error after the client's retries, say), so found nothing (job._survive)."""
     added_lines: int = 0
     """Lines the PR adds in reviewable files: what simplifications are measured against."""
+    covered: set[str] = field(default_factory=set[str])
+    """Kinds this review checked in full: their lens finished, wasn't cut short, and wasn't capped. Only a comment
+    of a covered kind can be called fixed (posting.resolve_fixed)."""
     withdrawn: tuple[Withdrawal, ...] = ()
     """Findings withdrawn in conversation on unchanged code (posting.Publisher.withdrawn): one found again is not
     posted again, and doesn't block."""
@@ -125,12 +128,18 @@ class Outcome:
             return f"the {' and '.join(failed)} review failed"
         return "the review hit its time limit before covering the whole change"
 
+    @property
+    def reported(self) -> list[Finding]:
+        """Everything the lenses reported, whatever became of it: posted, unverified, rejected, or a hunch."""
+        return [*self.posted, *(f for f, _ in [*self.unverified, *self.rejected]), *self.low_confidence]
+
     def absorb(self, other: Outcome) -> None:
         """Add another lens's results. Where correctness and security posted on one line (likely one defect
         seen twice), the more urgent finding stays; other kinds (types, DRY, simplify) are separate issues."""
         self.rejected += other.rejected
         self.unverified += other.unverified
         self.failed |= other.failed
+        self.covered |= other.covered
         self.low_confidence += other.low_confidence
         for target, findings in ((self.inline, other.inline), (self.general, other.general)):
             for finding in findings:

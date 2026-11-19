@@ -28,7 +28,7 @@ from autoreviewer.github import (
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
-from autoreviewer.review.lint import LintError, lint_findings
+from autoreviewer.review.lint import LINT_KINDS, LintError, lint_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
 from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
@@ -41,7 +41,7 @@ from autoreviewer.review.pipeline import (
     review,
     review_lens,
 )
-from autoreviewer.review.posting import Publisher, post_review
+from autoreviewer.review.posting import Publisher, post_review, resolve_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
@@ -106,10 +106,12 @@ async def _survive(kind: str, block_at: int, run: Awaitable[Outcome]) -> Outcome
     review cut short, which never approves, so nothing fails open. Cancellation isn't caught: a superseded
     review still stops."""
     try:
-        return await run
+        outcome = await run
     except Exception:
         logger.warning("the %s lens failed; the review goes on without it", kind, exc_info=True)
         return Outcome(block_at=block_at, failed={kind})
+    outcome.covered.add(kind)  # finished: only a lens that ran to the end covers its kind (resolve_fixed)
+    return outcome
 
 
 def _only(pr: PullRequestText, paths: set[str]) -> PullRequestText:
@@ -307,10 +309,10 @@ async def review_change(
                 continuation = Continuation(prior, history, head_sha, changed_since)
         persistence, run_id = memory.persistence(conversation) if memory else (None, "")
         try:
-            linted = await lint_findings(workspace.root, selection.reviewable, patches)
+            linted, lint_ran = await lint_findings(workspace.root, selection.reviewable, patches), True
         except LintError:  # a broken linter costs the lint checks, never the review
             logger.exception("%s at %s: lint checks skipped", conversation, head_sha[:7])
-            linted = []
+            linted, lint_ran = [], False
         lens, verifier = agents(workspace)
         pr = PullRequestText(state.title, state.body, selection.reviewable, selection.skipped, patches)
         progress = progress or Progress()
@@ -367,6 +369,8 @@ async def review_change(
                     )
                 )
         outcome = correctness.result()
+        if lint_ran:
+            outcome.covered |= set(LINT_KINDS)
         for task in extra:
             outcome.absorb(task.result())
         suggestions = simplify_task.result() if simplify_task is not None else []
@@ -379,6 +383,12 @@ async def review_change(
     blocking_lenses = {"reviewer", *(spec.kind for spec in lenses if spec.kind not in ADVISORY_KINDS)}
     timed_out = deadline is not None and bool(deadline.wrapped_up & blocking_lenses)
     outcome.cut_short = timed_out or bool(outcome.failed_blocking)
+    if deadline is not None:
+        outcome.covered -= {"correctness" if lens == "reviewer" else lens for lens in deadline.wrapped_up}
+    # A capped lens verifies only its best candidates and drops the rest: at its cap, it may have dropped one.
+    outcome.covered -= {
+        spec.kind for spec in lenses if sum(f.kind == spec.kind for f in outcome.reported) >= spec.max_posted
+    }
     # A review cut short isn't continued from: files it never read wouldn't count as "changed since".
     remember = None
     if memory is not None and not outcome.cut_short:
@@ -499,6 +509,12 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         outcome=result.outcome,
         posted=publisher.posted,
     )
+    try:  # tidying up, after the verdict: a failure here must never cost the review
+        await resolve_fixed(
+            deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=result.outcome
+        )
+    except Exception:
+        logger.warning("%s at %s: could not resolve fixed findings", conversation, pull.head_sha[:7], exc_info=True)
     return _summary(result.outcome)
 
 

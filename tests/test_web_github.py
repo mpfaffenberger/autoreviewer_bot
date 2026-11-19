@@ -8,6 +8,7 @@ review makes, so request shapes and response parsing are checked against what Gi
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +27,7 @@ from autoreviewer.github import (
     Repo,
     ReviewComment,
     ReviewRejected,
+    ReviewThread,
     ThreadComment,
 )
 
@@ -123,7 +125,31 @@ class FakeGitHub:
                 )
             self.writes.append(("create_review", path, json.loads(request.content)))
             return httpx2.Response(200, json={"id": 1})
+        if method == "POST" and path == "/graphql":
+            return self._graphql(json.loads(request.content))
         return httpx2.Response(404, json={"message": f"unexpected {method} {path}"})
+
+    def _graphql(self, request: dict[str, Any]) -> httpx2.Response:
+        query, variables = request["query"], request.get("variables") or {}
+        if "reviewThreads" in query:
+            assert (variables["owner"], variables["name"], variables["number"]) == (REPO.owner, REPO.name, 7)
+            pages = {
+                None: ([("T11", False, [11]), ("T00", True, [])], "page2"),  # a thread with no comments left
+                "page2": ([("T12", True, [12])], None),
+            }
+            nodes, cursor = pages[variables.get("after")]
+            threads = {
+                "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
+                "nodes": [
+                    {"id": i, "isResolved": done, "comments": {"nodes": [{"databaseId": c} for c in ids]}}
+                    for i, done, ids in nodes
+                ],
+            }
+            return httpx2.Response(200, json={"data": {"repository": {"pullRequest": {"reviewThreads": threads}}}})
+        mutation = re.search(r"(un)?resolveReviewThread", query)
+        assert mutation, query
+        self.writes.append(("graphql", mutation[0], variables))
+        return httpx2.Response(200, json={"data": {mutation[0]: {"thread": {"isResolved": not mutation[1]}}}})
 
 
 @pytest.fixture
@@ -231,3 +257,17 @@ async def test_a_thread_is_read_and_answered(fake_and_app: tuple[FakeGitHub, Git
     ]
     await app.reply(REPO, 7, 11, "answer")
     assert fake.writes[-1] == ("reply", "/repos/mpfaffenberger/demo/pulls/7/comments/11/replies", {"body": "answer"})
+
+
+async def test_review_threads_are_read_page_by_page_and_resolved_both_ways(
+    fake_and_app: tuple[FakeGitHub, GitHubApp],
+) -> None:
+    """From the bot's review of #42: the real client's GraphQL, not just the fake's thread list."""
+    fake, app = fake_and_app
+    assert await app.review_threads(REPO, 7) == [ReviewThread("T11", 11, False), ReviewThread("T12", 12, True)]
+    await app.set_thread_resolved(REPO, "T11", resolved=True)
+    await app.set_thread_resolved(REPO, "T12", resolved=False)
+    assert fake.writes[-2:] == [
+        ("graphql", "resolveReviewThread", {"id": "T11"}),
+        ("graphql", "unresolveReviewThread", {"id": "T12"}),
+    ]
