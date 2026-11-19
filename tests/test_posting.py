@@ -256,6 +256,7 @@ async def test_a_failed_read_of_the_prs_comments_is_retried(repo: GitRepo) -> No
     await later(confirmed(line=9))  # the read fails: this one goes in the final review instead
     await later(confirmed(priority=1))  # the read works now: already on the PR
     assert len(github.review_comments) == 1
+    assert later.posted == {fingerprint("b" * 40, confirmed()): 1}  # not line 9: the final review repeats it
 
 
 @pytest.mark.parametrize(("marker", "comments"), [("p1 correctness", 1), ("p1", 2)])
@@ -264,7 +265,7 @@ async def test_a_comment_from_github_is_placed_by_its_markers_kind(repo: GitRepo
     github = FakeGitHub(repo)
     body = f"**[P1] Old finding** (correctness)\n\n<!-- autoreviewer:{'0' * 16} {marker} -->"
     github.review_comments.append({"commit_sha": "a" * 40, "comment": ReviewComment("x.py", 5, body), "author": BOT})
-    await on(github, "b" * 40)(Finding.model_validate({**finding(5, priority=1), "path": "x.py"}))
+    await on(github, "b" * 40)(Finding.model_validate(finding(5, path="x.py")))
     assert len(github.review_comments) == comments
 
 
@@ -276,3 +277,30 @@ async def test_a_placed_comment_stands_in_for_the_other_lens(repo: GitRepo) -> N
     await later(confirmed(priority=1))
     await later(confirmed(kind="security", priority=1))
     assert len(github.review_comments) == 1
+
+
+async def test_a_fresh_publisher_reads_the_prs_comments(repo: GitRepo) -> None:
+    """From the bot's review of #35: after a restart, a comment for this head isn't posted again, even one whose
+    marker predates kinds and so can't be placed."""
+    github = FakeGitHub(repo)
+    body = f"**[P1] Mean is off by one** (correctness)\n\n<!-- autoreviewer:{fingerprint('b' * 40, confirmed())} p1 -->"
+    github.review_comments.append(
+        {"commit_sha": "b" * 40, "comment": ReviewComment("stats.py", 5, body), "author": BOT}
+    )
+    await on(github, "b" * 40)(confirmed())
+    assert len(github.review_comments) == 1
+
+
+async def test_the_most_urgent_of_several_comments_counts(repo: GitRepo) -> None:
+    """From the bot's review of #35: two comments with one fingerprint, P0 first; a P1 finding is covered by it.
+    Markers without a kind, so placement can't stand in for the fingerprint."""
+    github = FakeGitHub(repo)
+    key = fingerprint("b" * 40, confirmed())
+    for priority in (0, 2):
+        body = f"**[P{priority}] Mean is off by one** (correctness)\n\n<!-- autoreviewer:{key} p{priority} -->"
+        github.review_comments.append(
+            {"commit_sha": "b" * 40, "comment": ReviewComment("stats.py", 5, body), "author": BOT}
+        )
+    publish = on(github, "b" * 40)
+    await publish(confirmed(priority=1))
+    assert len(github.review_comments) == 2 and publish.posted[key] == 0
