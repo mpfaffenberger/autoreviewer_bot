@@ -374,7 +374,12 @@ lease. Don't build a distributed lock for a single box.
 `AUTOREVIEWER_MODELS="security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next"`; unlisted roles keep
 the defaults (`config.models_from`). Each agent's context window follows its model (`servers.CONTEXT_WINDOWS`).
 Startup stops on an unknown role, a model without a known window, or a finder pinned to the same model as its
-checker. `AUTOREVIEWER_REASONING="docs=high,tests=high"` sets a reasoning effort per role (low, medium, high).
+checker. A model in `servers.FALLBACKS` is wrapped in pydantic-ai's `FallbackModel`. When it fails with an API error,
+after the client's own retries, the request goes to its fallback, and the agent's context window is the
+smaller of the two. Kimi, a hosted plan with quotas, falls back to Qwen. On Nov 19 Kimi answered 429 for half
+an hour, and every docs and tests check in that time went unverified. A finder and its checker may never run
+on the same model, fallbacks included.
+`AUTOREVIEWER_REASONING="docs=high,tests=high"` sets a reasoning effort per role (low, medium, high).
 DeepSeek doesn't think unless a request asks for an effort (any effort turns it on); Qwen and Kimi think by
 default. Unlisted roles send none. `web.app.ModelPlan` builds every agent's model, for the bot and the evals alike; the review footer names
 each finder/checker pair.
