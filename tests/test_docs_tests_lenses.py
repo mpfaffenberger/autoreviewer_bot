@@ -77,3 +77,8 @@ async def test_the_docs_lens_and_its_checker_hold_text_to_unslop(workspace: Work
                 await agent.run("go")
     rule = '23. Cut filler. "In order to" becomes "to".'
     assert [role for role, instructions in sent.items() if rule in instructions] == ["docs", "docs.verifier"]
+
+
+def test_lenses_run_in_one_order() -> None:
+    every = with_lenses(security=True, dry=True, docs=True, tests=True)
+    assert [spec.kind for spec in build_lenses(every)] == ["security", "dry", "docs", "tests"]

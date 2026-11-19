@@ -26,7 +26,7 @@ VERDICT_MARKER = "<!-- autoreviewer:verdict -->"
 creates around single comments, and from a partial one."""
 PARTIAL_MARKER = "<!-- autoreviewer:partial -->"
 """Ends a "partially reviewed" COMMENT: it never stops a later full review of the commit from posting."""
-_MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) p([0-3]) -->\Z")
+_MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) p([0-3])(?: ([a-z]+))? -->\Z")
 """Only the marker that ends a comment counts: code appends it last, after any model text or suggestion code,
 so a marker an attacker plants in the PR (and gets quoted) can't make a real finding look already posted."""
 
@@ -39,8 +39,9 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
-def covered(posted: Mapping[str, int], key: str, finding: Finding) -> bool:
-    """Whether a comment at least as urgent as `finding` is already posted for its fingerprint."""
+def covered[Key](posted: Mapping[Key, int], key: Key, finding: Finding) -> bool:
+    """Whether a comment at least as urgent as `finding` is already posted under `key` (its fingerprint, or where
+    GitHub shows a comment of its kind)."""
     return key in posted and posted[key] <= finding.priority
 
 
@@ -49,7 +50,7 @@ def inline_comment(finding: Finding, *, head_sha: str, block_at: int) -> ReviewC
     return ReviewComment(
         finding.path,
         finding.line,
-        f"{body}\n\n<!-- autoreviewer:{fingerprint(head_sha, finding)} p{finding.priority} -->",
+        f"{body}\n\n<!-- autoreviewer:{fingerprint(head_sha, finding)} p{finding.priority} {finding.kind} -->",
         finding.start_line,
     )
 
@@ -66,6 +67,10 @@ class Publisher:
         """Fingerprint -> the most urgent priority posted for it (this review, or found on the PR)."""
         self._findings: list[Finding] = []
         self._existing: dict[str, int] | None = None
+        self._placed: dict[tuple[str, int, str], int] = {}
+        """(path, line on this head, kind) -> the most urgent priority of the comments of that kind GitHub still
+        shows there, from any commit: a superseded review's comments cover the same defect on the new head. Only
+        markers that record a kind count (older ones can't be placed)."""
         self._lock = asyncio.Lock()
 
     async def __call__(self, finding: Finding) -> None:
@@ -74,13 +79,14 @@ class Publisher:
         # must not both see "not posted yet". (Posts are few and quick.)
         async with self._lock:
             try:
-                if self._existing is None:
-                    bodies = await self._github.review_comment_bodies(self._repo, self._number, author=self._author)
-                    self._existing = {}
-                    for match in filter(None, (_MARKER.search(body) for body in bodies)):
-                        self._existing[match[1]] = min(int(match[2]), self._existing.get(match[1], 3))
-                if covered(self._existing, key, finding) or covered(self.posted, key, finding):
-                    self.posted[key] = min(finding.priority, self._existing.get(key, 3), self.posted.get(key, 3))
+                existing = self._existing if self._existing is not None else await self._load_existing()
+                if covered(existing, key, finding) or covered(self.posted, key, finding):
+                    self.posted[key] = min(finding.priority, existing.get(key, 3), self.posted.get(key, 3))
+                    return
+                where = (finding.path, finding.line, finding.kind)
+                if covered(self._placed, where, finding):  # posted for an earlier commit, still on this line
+                    self.posted[key] = self._placed[where]
+                    self._findings.append(finding)  # its comment exists: it stands in for the other lens's too
                     return
                 # Already posted as at least as urgent by the other lens: a second comment would only repeat it.
                 if any(same_defect(f, finding) and f.priority <= finding.priority for f in self._findings):
@@ -97,6 +103,22 @@ class Publisher:
                 return
             self.posted[key] = finding.priority
             self._findings.append(finding)  # only once its comment exists can it stand in for a duplicate
+
+    async def _load_existing(self) -> dict[str, int]:
+        """Fingerprints (and placements) of the bot's comments on the PR. Recorded only once the fetch succeeds,
+        so a failed fetch is retried with the next finding instead of switching dedupe off for the review."""
+        comments = await self._github.posted_comments(self._repo, self._number, author=self._author)
+        existing: dict[str, int] = {}
+        for comment in comments:
+            if not (match := _MARKER.search(comment.body)):
+                continue
+            fp, priority, kind = match[1], int(match[2]), match[3]
+            existing[fp] = min(priority, existing.get(fp, 3))
+            if kind and comment.line is not None:
+                where = (comment.path, comment.line, kind)
+                self._placed[where] = min(priority, self._placed.get(where, 3))
+        self._existing = existing
+        return existing
 
 
 async def post_review(

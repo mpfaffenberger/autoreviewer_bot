@@ -18,6 +18,7 @@ from autoreviewer.github import (
     CommitNotFound,
     Comparison,
     Conclusion,
+    PostedComment,
     PullRequestState,
     Reaction,
     Repo,
@@ -181,6 +182,8 @@ class FakeGitHub:
     reactions: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
     review_comments: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     fail_review_comments: bool = False
+    fail_posted_comments: int = 0
+    """How many reads of the PR's comments fail (like a transient 5xx) before they work again."""
     comment_delay: float = 0.0
     """Inline comments posted on their own, as findings are confirmed."""
     check_updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -263,8 +266,16 @@ class FakeGitHub:
         """Every inline comment, posted on its own or inside a review."""
         return [c["comment"] for c in self.review_comments] + [c for r in self.reviews for c in r["comments"]]
 
-    async def review_comment_bodies(self, repo: Repo, number: int, *, author: str) -> list[str]:
-        return [c["comment"].body for c in self.review_comments if c["author"] == author]
+    async def posted_comments(self, repo: Repo, number: int, *, author: str) -> list[PostedComment]:
+        """Like GitHub: a comment stays on its line on later heads unless marked `outdated`."""
+        if self.fail_posted_comments:
+            self.fail_posted_comments -= 1
+            raise RuntimeError("502 Bad Gateway")
+        return [
+            PostedComment(c["comment"].path, None if c.get("outdated") else c["comment"].line, c["comment"].body)
+            for c in self.review_comments
+            if c["author"] == author
+        ]
 
     async def review_bodies(self, repo: Repo, number: int, *, commit_sha: str, author: str) -> list[str]:
         """Like GitHub: each single inline comment comes wrapped in an empty COMMENTED review of its own."""

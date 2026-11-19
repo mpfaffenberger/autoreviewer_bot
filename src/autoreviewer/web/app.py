@@ -151,18 +151,13 @@ DRY comments, mostly true but too many to read; 3 dropped real findings for litt
 while a PR's blocking findings stay easy to see (Mike, Nov 18)."""
 
 LENS_NAMES: dict[LensKind, str] = {"security": "security", "dry": "DRY", "docs": "docs", "tests": "tests"}
-"""How the review footer names each lens."""
+"""How the review footer names each lens; lenses run and are listed in this order."""
 
 
 def enabled_lenses(settings: Settings) -> list[LensKind]:
-    """The lenses switched on beside correctness, in the order they're listed in reviews."""
-    switches: tuple[tuple[LensKind, bool], ...] = (
-        ("security", settings.security),
-        ("dry", settings.dry),
-        ("docs", settings.docs),
-        ("tests", settings.tests),
-    )
-    return [kind for kind, on in switches if on]
+    """The lenses switched on beside correctness, in LENS_NAMES order: Settings has one switch per lens, named after
+    it."""
+    return [kind for kind in LENS_NAMES if getattr(settings, kind)]
 
 
 def build_lenses(settings: Settings) -> tuple[Lens, ...]:
