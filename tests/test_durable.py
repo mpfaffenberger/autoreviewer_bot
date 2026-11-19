@@ -61,7 +61,7 @@ async def test_each_reply_is_answered_once_on_the_answer_queue(tmp_path: Path) -
     )
     first, second = github.say("alice", 1, "why?"), github.say("alice", 1, "and?")
     conversation_deps = ConversationDeps(
-        github, LocalSource(github.repo), lambda ws: conversation_agent(scripted("holds"), ws), tmp_path, BOT
+        github, LocalSource(github.repo), lambda ws: conversation_agent(scripted("holds"), ws), tmp_path, BOT, 1
     )
     durable.configure(tmp_path / "dbos.sqlite")
     await durable.launch(job_deps(github, tmp_path, []), conversation_deps, concurrency=1)
