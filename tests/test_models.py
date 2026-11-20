@@ -80,9 +80,8 @@ def test_the_footer_names_each_pair_of_models() -> None:
 
 def compacts_at(agent: Agent[None, Any]) -> int | None:
     """Where `agent` compacts its history: its TieredCompaction's target."""
-    capabilities = agent._root_capability.capabilities  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-    [compaction] = [c for c in capabilities if isinstance(c, TieredCompaction)]  # pyright: ignore[reportUnknownVariableType]
-    return compaction.target_tokens  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    [compaction] = [c for c in agent.root_capability.capabilities if isinstance(c, TieredCompaction)]
+    return compaction.target_tokens
 
 
 @pytest.mark.anyio
@@ -91,14 +90,15 @@ async def test_each_built_agent_compacts_where_its_model_does(workspace: Workspa
     compacting at DeepSeek's 629k would grow past its 168k window."""
     pinned = settings(models=models_from(PINNED), dry=True)
     lenses = {spec.kind: spec.agents(workspace) for spec in build_lenses(pinned)}
-    lens, verifier = build_agent_factory(pinned)(workspace)
     simplifier = build_simplifier_factory(pinned)
     assert simplifier is not None
     proposer = simplifier(workspace)
     built = {
-        "security": lenses["security"], "dry": lenses["dry"], "correctness": (lens, verifier),
+        "security": lenses["security"],
+        "dry": lenses["dry"],
+        "correctness": build_agent_factory(pinned)(workspace),
         "simplify": (proposer.propose, proposer.check),
-    }  # fmt: skip
+    }
     for kind, (finder, checker) in built.items():
         expected = (COMPACT_AT[pinned.models[kind]], COMPACT_AT[pinned.models[f"{kind}.verifier"]])
         assert (compacts_at(finder), compacts_at(checker)) == expected, kind
