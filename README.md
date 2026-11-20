@@ -52,7 +52,7 @@ uv run prism-config --local-url http://localhost:8000/v1 \
   --finder local:FINDER_MODEL_ID --checker local:CHECKER_MODEL_ID
 ```
 
-Use an address reachable **from the receiver**. For separate servers, container networking, or an authenticated endpoint, see [Local inference](docs/providers.md#local-inference).
+Pass `--local-context N` to use your server’s configured token window instead of the conservative 4096-token compaction trigger. Use an address reachable **from the receiver**. For separate servers, container networking, or an authenticated endpoint, see [Local inference](docs/providers.md#local-inference).
 
 Point the receiver's `PRISM_CONFIG` at that file. Keep provider credentials in the receiver environment, not in Git or the JSON. See the [provider guide](docs/providers.md) for Codex, Copilot, Claude and custom models. Then [register and install your GitHub App](docs/github-app.md): choose your own name and hostname, connect the webhook, and try a review. No shared inference server is required.
 

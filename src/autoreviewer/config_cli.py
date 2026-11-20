@@ -12,6 +12,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--finder", help="provider:model that finds problems")
     parser.add_argument("--checker", help="different provider:model that verifies findings")
+    parser.add_argument("--local-context", type=int, metavar="TOKENS", help="served window per local model")
     parser.add_argument("--local-url", metavar="URL", help="default endpoint for local:<id> models")
     parser.add_argument("--finder-url", metavar="URL", help="override the endpoint for a local:<id> finder")
     parser.add_argument("--checker-url", metavar="URL", help="override the endpoint for a local:<id> checker")
@@ -41,6 +42,10 @@ def main(argv: list[str] | None = None) -> None:
         if args.local_url is not None and not used_default:
             parser.error("--local-url needs a local:<id> role without a role-specific URL")
         options: dict[str, object] = {"finder": finder, "checker": checker, "lanes": lanes}
+        if args.local_context is not None:
+            if not endpoints:
+                parser.error("--local-context requires a local model endpoint")
+            options["local_context"] = dict.fromkeys(endpoints, args.local_context)
         if endpoints:
             options["endpoints"] = endpoints
         config = PrismConfig.model_validate(options)

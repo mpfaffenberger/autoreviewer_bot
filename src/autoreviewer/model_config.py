@@ -51,6 +51,7 @@ class PrismConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     finder: str
     checker: str
+    local_context: dict[str, Annotated[int, Field(ge=16)]] = Field(default_factory=dict)
     endpoints: dict[str, str] = Field(default_factory=dict)
     lanes: dict[str, Annotated[int, Field(ge=1)]] = Field(default_factory=dict)
     compact_at: dict[str, Annotated[int, Field(ge=8)]] = Field(default_factory=dict)
@@ -92,6 +93,8 @@ class PrismConfig(BaseModel):
         if self.finder == self.checker:
             raise ValueError("finder and checker must use different models")
         local_specs = {spec for spec in (self.finder, self.checker) if spec.startswith("local:")}
+        if self.local_context.keys() - local_specs:
+            raise ValueError("local_context only applies to configured local models")
         if missing := local_specs - self.endpoints.keys():
             raise ValueError(f"missing endpoints for local models: {sorted(missing)}")
         if extra := self.endpoints.keys() - local_specs:
@@ -127,7 +130,7 @@ class PrismConfig(BaseModel):
 
         # Leave at least half of a known window for output, tool schemas and counting error.
         # For unknown models use a small default; the operator can supply a measured target.
-        window = model.profile.get("context_window")
+        window = self.local_context.get(spec) if spec.startswith("local:") else model.profile.get("context_window")
         limit = None if window is None else min(window // 2, window - ((model.settings or {}).get("max_tokens") or 0))
         target = self.compact_at.get(spec, limit if limit is not None else 4096)
         if target < 8 or (limit is not None and target > limit):

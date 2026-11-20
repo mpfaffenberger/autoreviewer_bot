@@ -67,3 +67,15 @@ def test_each_local_model_requires_endpoint() -> None:
 def test_invalid_local_endpoint(url: str) -> None:
     with pytest.raises(ValidationError, match="endpoints"):
         PrismConfig(finder=FINDER, checker="openai:checker", endpoints={FINDER: url})
+
+
+def test_local_alias_uses_served_window_not_hosted_profile() -> None:
+    spec = "local:gpt-4o-mini"
+    config = PrismConfig(
+        finder=spec,
+        checker=CHECKER,
+        endpoints={spec: ENDPOINTS[FINDER], CHECKER: ENDPOINTS[CHECKER]},
+        local_context={CHECKER: 65536},
+    )
+    assert config.resolve(spec)[1] == 4096
+    assert config.resolve(CHECKER)[1] == 32768

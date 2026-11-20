@@ -95,3 +95,22 @@ def test_missing_endpoint_not_written(tmp_path: Path, flags: list[str]) -> None:
     with pytest.raises(SystemExit, match="2"):
         main(["--output", str(config), "--finder", "local:a", "--checker", "local:b", *flags])
     assert not config.exists()
+
+
+def test_cli_local_context(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    main(
+        [
+            "--output",
+            str(path),
+            "--finder",
+            "local:one",
+            "--checker",
+            "openai:two",
+            "--local-url",
+            SHARED,
+            "--local-context",
+            "32768",
+        ]
+    )
+    assert PrismConfig.from_file(path).local_context == {"local:one": 32768}

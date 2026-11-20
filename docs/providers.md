@@ -59,6 +59,8 @@ Prism talks to the OpenAI-compatible **Chat Completions** API. It doesn't start 
 
 3. Set `PRISM_CONFIG` to the generated JSON file **inside the receiver** and restart it. Inside a container, `localhost` is the receiver itself. Use the inference container's service name on a shared private network, or an accessible host address (e.g. `host.containers.internal` on Podman). Don't publish unauthenticated inference ports to the internet.
 
+Set `--local-context N` to the **served context window in tokens** (for example, `32768` if the server is configured for 32k). Prism starts compacting at half that window by default. For different windows, set `local_context` per full model ID in `prism.json`, e.g. `{"local:finder": 32768, "local:checker": 65536}`. Without a declared window or explicit `compact_at`, the trigger is 4096 tokens. Local aliases never inherit a hosted model’s context limit.
+
 No cloud key or Python factory is needed. If the server requires authentication, set `PRISM_LOCAL_API_KEY` in the receiver's environment, and include the bearer header when listing models. This key goes to **all** configured `local:` endpoints; only use it with servers you trust with the same credential. Use separate trusted factories for endpoints needing different keys. You can also mix a `local:` finder with a hosted checker; the hosted checker then receives repository context.
 
 ### Other providers
