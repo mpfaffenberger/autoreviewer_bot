@@ -7,10 +7,10 @@ FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim AS build
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --extra claude-code --no-dev --no-install-project
 COPY src ./src
 # No `sandboxd` extra: the receiver never embeds the smolvm engine.
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --extra claude-code --no-dev --no-editable
 
 FROM python:3.13-slim-trixie
 # git: the review checkout and the agents' git tools. ripgrep: their read-only grep/list_files tools.

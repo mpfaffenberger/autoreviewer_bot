@@ -4,10 +4,10 @@ Use a native `provider:model` specification (resolved by `pydantic_ai.models.inf
 
 | Backend | Model specification | Worker dependency |
 | --- | --- | --- |
-| ChatGPT/Codex subscription | `openai-codex:<entitled-model-id>` | Existing `pydantic-ai-slim[openai]==2.68.0` |
+| ChatGPT/Codex subscription | `openai-codex:gpt-6.2-sol` | Existing `pydantic-ai-slim[openai]==2.68.0` |
 | GitHub Copilot | `github-copilot:<chat-completions-model-id>` | Same existing OpenAI extra |
-| Anthropic API | e.g. `anthropic:claude-sonnet-4-6` | Optional `pydantic-ai-slim[anthropic]==2.68.0`; set `ANTHROPIC_API_KEY` |
-| Claude Code via your inference gateway | `claude-code:<gateway-model-id>` | Existing OpenAI extra. Requires an authorized, model-only Chat Completions endpoint; not a local Claude Code login. |
+| Anthropic API | e.g. `anthropic:claude-opus-5-5` | Optional `pydantic-ai-slim[anthropic]==2.68.0`; set `ANTHROPIC_API_KEY` |
+| Claude Code subscription | `claude-code:claude-opus-5-5` | `claude-code` extra (Python 3.13–3.14); included in the receiver image. |
 
 ### Codex: provision credentials outside review jobs
 
@@ -40,7 +40,9 @@ def copilot() -> Model:
 
 ### Claude Code: require a model boundary, not CLI automation
 
-Prism's `claude-code:` prefix is a gateway adapter, not a native subscription login. Set `PRISM_CLAUDE_CODE_BASE_URL` (including the API prefix, e.g. `https://gateway.example.org/v1`) and `PRISM_CLAUDE_CODE_API_KEY` to your gateway's own credentials. The gateway must accept Chat Completions with structured tool calls and must not execute tools itself. Prism does not launch `claude`, read its credentials, or start a CLAI2 session. Without such a gateway use `anthropic:` for direct API access or supply an installed model factory.
+By default Prism uses `ClaudeCodeModel` from the published `pydantic-claude-code` package. No proxy or coding CLI is needed. For a checkout run `uv run --extra claude-code python -m pydantic_ai_claude_code login` as the service identity, outside review jobs. Use `uv run --extra claude-code autoreviewer-web` when starting from the checkout. For a headless receiver, set `CLAUDE_CODE_CREDENTIALS=file` and `XDG_DATA_HOME` to a private persistent directory during login and at runtime; allow the service user to write refreshed credentials there. Use an account authorized for this use and model. Never put the token in `prism.json`.
+
+**Already using a gateway?** Set `PRISM_CLAUDE_CODE_BASE_URL` (including the API prefix, e.g. `https://gateway.example.org/v1`) and `PRISM_CLAUDE_CODE_API_KEY` to your gateway's own credentials. The gateway must accept Chat Completions with structured tool calls and must not execute tools itself. Prism does not launch `claude`, read its credentials, or start a CLAI2 session. Without either gateway variable Prism uses the subscription adapter; `anthropic:` is the separate API-billed option.
 
 ### Other providers and local servers
 

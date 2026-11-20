@@ -60,6 +60,18 @@ class PrismConfig(BaseModel):
             model = getattr(import_module(module), function)()
             if not isinstance(model, Model):
                 raise TypeError(f"{spec} must return a pydantic_ai Model")
+        elif spec.startswith("claude-code:") and not (
+            "PRISM_CLAUDE_CODE_BASE_URL" in os.environ or "PRISM_CLAUDE_CODE_API_KEY" in os.environ
+        ):
+            try:
+                from pydantic_ai_claude_code import ClaudeCodeModel
+            except ModuleNotFoundError as exc:
+                if exc.name != "pydantic_ai_claude_code":
+                    raise
+                raise ValueError(
+                    "Claude Code needs the claude-code extra: uv sync --extra claude-code (Python 3.13-3.14)"
+                ) from exc
+            model = ClaudeCodeModel(spec.split(":", 1)[1])
         elif spec.startswith("claude-code:"):
             # Explicit opt-in to a model-only, operator-provisioned Chat Completions endpoint.
             # Never launch a coding CLI or inherit an unrelated OpenAI credential.

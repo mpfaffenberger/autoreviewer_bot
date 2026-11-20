@@ -137,3 +137,17 @@ def test_claude_code_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRISM_CLAUDE_CODE_API_KEY", "fake")
     model, _ = config.resolve(config.finder)
     assert model.model_name == "my-model" and model.base_url == "https://gateway.example.org/v1/"
+
+
+def test_native_claude_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = pytest.importorskip("pydantic_ai_claude_code")
+    for key in ("PRISM_CLAUDE_CODE_BASE_URL", "PRISM_CLAUDE_CODE_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS", "file")
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"access_token": "fake", "refresh_token": "fake"}))
+    monkeypatch.setenv("CLAUDE_CODE_AUTH_FILE", str(auth))
+    config = PrismConfig(finder="openai-codex:gpt-6.2-sol", checker="claude-code:claude-opus-5-5")
+    model, _ = config.resolve(config.checker)
+    assert isinstance(model, ConcurrencyLimitedModel) and isinstance(model.wrapped, adapter.ClaudeCodeModel)
+    assert model.model_name == "claude-opus-5-5"

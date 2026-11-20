@@ -38,7 +38,7 @@ The [review agents](src/autoreviewer/review/agents.py) use Pydantic AI models. [
 From a checkout with [uv](https://docs.astral.sh/uv/) installed, run `uv run prism-config`. Enter two tool-capable models you have access to: a finder and an independent checker. Or script it:
 
 ```sh
-uv run prism-config --finder openai:gpt-4o --checker openai:gpt-4o-mini --output prism.json
+uv run prism-config --finder openai-codex:gpt-6.2-sol --checker claude-code:claude-opus-5-5 --output prism.json
 ```
 
 Point the receiver's `PRISM_CONFIG` at that file. Keep provider credentials in the receiver environment, not in Git or the JSON. See the [provider guide](docs/providers.md) for Codex, Copilot, Claude and custom models. Then [register and install your GitHub App](docs/github-app.md): choose your own name and hostname, connect the webhook, and try a review. No shared inference server is required.

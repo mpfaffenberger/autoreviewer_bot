@@ -24,6 +24,9 @@ dependencies = [
 [project.optional-dependencies]
 # Only sandboxd embeds the smolvm engine (libkrun); the web receiver's image must not ship it.
 sandboxd = ["pydantic-ai-harness[smol]==0.68.0"]
+claude-code = [
+    "pydantic-claude-code==0.7.6 ; python_full_version < '3.15'",
+]
 
 [project.scripts]
 prism-config = "autoreviewer.config_cli:main"
