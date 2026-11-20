@@ -18,9 +18,9 @@ CASES: list[Case] = [
     Case("docs_lanes_default", SERVERS, "DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 4}",
          "DEFAULT_MODEL_LANES = {QWEN: 4, DEEPSEEK: 2}", "Leave DeepSeek more room for other users",
          corpus=LENS_CORPUS),
-    # DESIGN.md: "`AUTOREVIEWER_DRY=false` turns it off": a contract the env file relies on.
-    Case("docs_env_rename", CONFIG, 'dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True)',
-         'dry=parse_bool(env, "AUTOREVIEWER_DRY_LENS", default=True)', "Name the DRY switch after the lens",
+    # DESIGN.md: "`PRISM_DRY=false` turns it off": a contract the env file relies on.
+    Case("docs_env_rename", CONFIG, 'dry=parse_bool(env, "PRISM_DRY", default=True)',
+         'dry=parse_bool(env, "PRISM_DRY_LENS", default=True)', "Name the DRY switch after the lens",
          corpus=LENS_CORPUS),
     # The error message on the next line still says "lanes >= 1".
     Case("docs_error_message", CONFIG, "        if not count.isdigit() or int(count) < 1:",

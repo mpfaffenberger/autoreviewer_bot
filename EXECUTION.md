@@ -1,10 +1,10 @@
-# autoreviewer: running code (repros and regression tests)
+# Prism: running code (repros and regression tests)
 
 Extends [DESIGN.md](DESIGN.md). Status: **draft**.
 
 Running PR code changes the threat model. Before, we read untrusted *text*;
 now we execute untrusted *code* written by strangers (and their bots) on
-chaos-emerald. Everything below follows from that.
+the review host. Everything below follows from that.
 
 ---
 
@@ -41,7 +41,7 @@ Measured 2026-11-16, not assumed:
 | Check | Result | Consequence |
 |---|---|---|
 | `unshare -Ur` inside a `--cap-drop all --security-opt no-new-privileges` rootless podman container | **fails** (`uid_map: Operation not permitted`) | `BubblewrapSandbox` **cannot** run inside the reviewer container |
-| `bwrap --unshare-all` on the host | works | bwrap is fine *on the host*, but as `bazzite` it can read `~/.config/homelab`, the SSH keys, and Boodleton's OAuth tokens |
+| `bwrap --unshare-all` on the host | works | bwrap is fine *on the host*, but as `bazzite` it can read `~/.config/prism`, the SSH keys, and Boodleton's OAuth tokens |
 | `/dev/kvm` | present | Real VMs are possible |
 | qemu / libvirt / firecracker / gVisor | none installed (Bazzite is immutable) | VM tooling must be layered, or shipped in a container that gets only `/dev/kvm` |
 | RAM visible to Linux | 31 GiB (≈19 available), 32 cores | Sandboxes compete with inference and Boodleton, so cap them hard |
@@ -56,7 +56,7 @@ untrusted agents. Tenant PR code is the most untrusted input we have.
 
 ## 4. Sandbox options
 
-| Option | Boundary | Ops | Tenant code leaves chaos-emerald? | Verdict |
+| Option | Boundary | Ops | Tenant code leaves the review host? | Verdict |
 |---|---|---|---|---|
 | `BubblewrapSandbox(LocalWorkspace)` on the host | shared kernel, same user as all our secrets | none | no | **Rejected** |
 | Podman per job via the podman socket | socket = host-level control | low | no | **Rejected.** The homelab README forbids exactly this |
@@ -85,9 +85,9 @@ process". libkrun adds that socket networking (TSI) "uses the VMM's host network
 is one wall, and **the account the VMM runs as is the second**.
 
 ```
-reviewer (holds LLM key + GitHub tokens)                    sandboxd  (User=smolrunner, sandboxd.socket)
+reviewer (holds LLM key + GitHub tokens)                    sandboxd  (User=smolrunner, prism-sandboxd.socket)
   agent.run(..., workspace=SandboxdBackend(...))              SandboxRegistry: limits, capacity, reaper
-  └─ SandboxdClient ── /run/autoreviewer-sandboxd.sock ──▶   SmolProvider: smol VM with allow_hosts
+  └─ SandboxdClient ── /run/prism/sandboxd.sock ──▶   SmolProvider: smol VM with allow_hosts
        (0660 smolrunner:sandboxd, systemd-owned)              └─ harness SmolSandboxBackend(sandbox=vm)
                                                                    └─ "libkrun VM" child process
 ```
@@ -115,7 +115,7 @@ ask for more than these. VMs are non-persistent and non-detached, so a daemon cr
 1. **smolvm allowlist.** Allowlisted hosts open; everything else, including raw IPs, the LAN, the
    host's LAN IP, the VM gateway and cloud metadata, is refused by smolvm itself (no firewall hits).
 2. **The `smolrunner` account.** `/var/home` is `0700` + `InaccessiblePaths`; the app under
-   `/opt/autoreviewer-sandboxd` is root-owned and read-only to it.
+   `/opt/prism-sandboxd` is root-owned and read-only to it.
 3. **systemd confinement.** `ProtectSystem=strict`, no capabilities, `/dev/kvm` only,
    `NoNewPrivileges`, `MemoryMax=8G` (VMs live in-process, so this caps all of them).
 4. **uid firewall** (`deploy/sandboxd/egress.nft`). With smolvm's allowlist deliberately OFF, a VM
@@ -147,7 +147,7 @@ Check with `busctl --system call org.freedesktop.systemd1 /org/freedesktop/syste
 sudo deploy/sandboxd/install.sh     # install or update (idempotent); adds you to group sandboxd
 deploy/sandboxd/verify.sh           # both layers; run after every install and smolvm upgrade
 sudo deploy/sandboxd/uninstall.sh   # remove everything it created
-journalctl -u autoreviewer-sandboxd # create/destroy/reap log
+journalctl -u prism-sandboxd # create/destroy/reap log
 ```
 
 Still open: the reviewer container reaching the socket (SELinux `container_t` connecting to a socket

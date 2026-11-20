@@ -16,13 +16,13 @@ APP_ENV = {
     "GITHUB_APP_ID": "1",
     "GITHUB_APP_SLUG": "s",
     "GITHUB_WEBHOOK_SECRET": "w",
-    "AUTOREVIEWER_PRIVATE_KEY_PATH": __file__,
+    "PRISM_PRIVATE_KEY_PATH": __file__,
 }
 
 
 @pytest.mark.parametrize("blank", ["", " \t "])
 def test_blank_prism_config_uses_boodleton(blank: str) -> None:
-    env = {**APP_ENV, "BOODLETON_API_KEY": "legacy", "AUTOREVIEWER_REASONING": "conversation=low"}
+    env = {**APP_ENV, "BOODLETON_API_KEY": "legacy", "PRISM_REASONING": "conversation=low"}
     assert Settings.from_env({**env, "PRISM_CONFIG": blank}) == Settings.from_env(env)
 
 

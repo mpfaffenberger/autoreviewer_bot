@@ -18,7 +18,7 @@ from autoreviewer.servers import (
     ReasoningEffort,
 )
 
-DEFAULT_PRIVATE_KEY_PATH = "/run/secrets/github-app.pem"
+DEFAULT_PRIVATE_KEY_PATH = "/run/prism/github-app.pem"
 
 AgentKind = Literal["correctness", "security", "dry", "docs", "tests", "simplify"]
 """Each kind has a finder (the role named after it) and a checker (`<kind>.verifier`)."""
@@ -42,7 +42,7 @@ DEFAULT_MODELS = {
     CONVERSATION: DEEPSEEK,
 }
 """Finders on Qwen (fast), checkers on DeepSeek (better). Docs and tests are found by DeepSeek and checked by Qwen,
-the other model (DESIGN.md §7). Pin any role to change it (AUTOREVIEWER_MODELS)."""
+the other model (DESIGN.md §7). Pin any role to change it (PRISM_MODELS)."""
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ class Settings:
     hard_deadline_minutes: float = 50
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
     model_lanes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_MODEL_LANES))
-    """At most this many requests at once to each model, across every review (AUTOREVIEWER_MODEL_LANES,
+    """At most this many requests at once to each model, across every review (PRISM_MODEL_LANES,
     "model=n,..."; defaults in servers.DEFAULT_MODEL_LANES). Models not listed are unlimited."""
     max_concurrent_jobs: int = 1
     """One review at a time: each already runs a Qwen agent per lens in parallel, about as many as Qwen has lanes
@@ -88,10 +88,10 @@ class Settings:
     """The model each agent role runs on (see models_from); its context window follows (servers.CONTEXT_WINDOWS)."""
     reasoning: Mapping[str, ReasoningEffort] = field(default_factory=lambda: dict(DEFAULT_REASONING))
     """The reasoning effort sent for each role that has one (see reasoning_from); unlisted roles send none."""
-    work_dir: Path = Path("/var/lib/autoreviewer/work")
-    database: Path = Path("/var/lib/autoreviewer/dbos.sqlite")
+    work_dir: Path = Path("/var/lib/prism/work")
+    database: Path = Path("/var/lib/prism/dbos.sqlite")
     """DBOS system database: queued and in-flight reviews survive restarts here."""
-    steps_dir: Path = Path("/var/lib/autoreviewer/steps")
+    steps_dir: Path = Path("/var/lib/prism/steps")
     """Per-PR lens conversations, so a new commit continues the last review (see review/memory.py)."""
 
     prism: PrismConfig | None = None
@@ -102,7 +102,7 @@ class Settings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
-        key_path = Path(env.get("AUTOREVIEWER_PRIVATE_KEY_PATH", DEFAULT_PRIVATE_KEY_PATH))
+        key_path = Path(env.get("PRISM_PRIVATE_KEY_PATH", DEFAULT_PRIVATE_KEY_PATH))
         prism_path = env.get("PRISM_CONFIG", "").strip()
         prism = PrismConfig.from_file(prism_path) if prism_path else None
         return cls(
@@ -111,7 +111,7 @@ class Settings:
             app_slug=env["GITHUB_APP_SLUG"],
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
-            max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
+            max_concurrent_jobs=int(env.get("PRISM_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
             model_lanes=(
                 {spec: prism.lane_count(spec) for spec in (prism.finder, prism.checker)}
                 if prism
@@ -119,14 +119,14 @@ class Settings:
             ),
             soft_deadline_minutes=(deadlines := deadlines_from(env))[0],
             hard_deadline_minutes=deadlines[1],
-            block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
-            simplify=parse_bool(env, "AUTOREVIEWER_SIMPLIFY", default=True),
-            security=parse_bool(env, "AUTOREVIEWER_SECURITY", default=True),
-            dry=parse_bool(env, "AUTOREVIEWER_DRY", default=True),
-            docs=parse_bool(env, "AUTOREVIEWER_DOCS", default=False),
-            tests=parse_bool(env, "AUTOREVIEWER_TESTS", default=False),
-            conversations=parse_bool(env, "AUTOREVIEWER_CONVERSATIONS", default=False),
-            logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
+            block_at_priority=int(env.get("PRISM_BLOCK_AT_PRIORITY", "1")),
+            simplify=parse_bool(env, "PRISM_SIMPLIFY", default=True),
+            security=parse_bool(env, "PRISM_SECURITY", default=True),
+            dry=parse_bool(env, "PRISM_DRY", default=True),
+            docs=parse_bool(env, "PRISM_DOCS", default=False),
+            tests=parse_bool(env, "PRISM_TESTS", default=False),
+            conversations=parse_bool(env, "PRISM_CONVERSATIONS", default=False),
+            logfire_include_content=parse_bool(env, "PRISM_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
             boodleton_api_key="" if prism else env["BOODLETON_API_KEY"],
             models=(
@@ -135,9 +135,9 @@ class Settings:
                 else models_from(env)
             ),
             reasoning=dict(DEFAULT_REASONING) if prism else reasoning_from(env),
-            work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
-            database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
-            steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
+            work_dir=Path(env.get("PRISM_WORK_DIR", str(cls.work_dir))),
+            database=Path(env.get("PRISM_DATABASE", str(cls.database))),
+            steps_dir=Path(env.get("PRISM_STEPS_DIR", str(cls.steps_dir))),
         )
 
 
@@ -155,34 +155,34 @@ def parse_bool(env: Mapping[str, str], name: str, *, default: bool) -> bool:
 
 
 def model_lanes_from(env: Mapping[str, str]) -> dict[str, int]:
-    """AUTOREVIEWER_MODEL_LANES, or the defaults when it's missing or blank (a placeholder line must never switch
+    """PRISM_MODEL_LANES, or the defaults when it's missing or blank (a placeholder line must never switch
     the limits off). Shared by the bot and the evals."""
-    return parse_lanes(env.get("AUTOREVIEWER_MODEL_LANES", "")) or dict(DEFAULT_MODEL_LANES)
+    return parse_lanes(env.get("PRISM_MODEL_LANES", "")) or dict(DEFAULT_MODEL_LANES)
 
 
 def parse_lanes(value: str) -> dict[str, int]:
     """ "model=3,other=4" -> {"model": 3, "other": 4}; a malformed entry stops startup. Blank -> {}."""
     lanes: dict[str, int] = {}
-    for name, count in _pairs(value, "AUTOREVIEWER_MODEL_LANES", "model=lanes (lanes >= 1)"):
+    for name, count in _pairs(value, "PRISM_MODEL_LANES", "model=lanes (lanes >= 1)"):
         if not count.isdigit() or int(count) < 1:
-            raise ValueError(f"AUTOREVIEWER_MODEL_LANES: expected model=lanes (lanes >= 1), got {name}={count}")
+            raise ValueError(f"PRISM_MODEL_LANES: expected model=lanes (lanes >= 1), got {name}={count}")
         lanes[name] = int(count)
     return lanes
 
 
 def models_from(env: Mapping[str, str]) -> dict[str, str]:
-    """Each agent role's model: DEFAULT_MODELS, with AUTOREVIEWER_MODELS ("role=model,...", e.g.
+    """Each agent role's model: DEFAULT_MODELS, with PRISM_MODELS ("role=model,...", e.g.
     "security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next") pinning roles. Stops startup on an unknown
     role, a model without a known context window, or a finder on the same model as its checker (different models
     make different mistakes; that's the point of checking). Shared by the bot and the evals."""
     models = dict(DEFAULT_MODELS)
-    for role, model in _role_pairs(env, "AUTOREVIEWER_MODELS", "role=model"):
+    for role, model in _role_pairs(env, "PRISM_MODELS", "role=model"):
         if model not in CONTEXT_WINDOWS:
-            raise ValueError(f"AUTOREVIEWER_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
+            raise ValueError(f"PRISM_MODELS: no known context window for {model!r} (servers.CONTEXT_WINDOWS)")
         models[role] = model
     for kind in AGENT_KINDS:
         if models[kind] == models[verifier_role(kind)]:
-            raise ValueError(f"AUTOREVIEWER_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
+            raise ValueError(f"PRISM_MODELS: {kind} and {verifier_role(kind)} are both {models[kind]!r}")
     return models
 
 
@@ -192,23 +192,23 @@ DEFAULT_REASONING: dict[str, ReasoningEffort] = {CONVERSATION: "high"}
 
 
 def deadlines_from(env: Mapping[str, str]) -> tuple[float, float]:
-    """(soft, hard) review time limits in minutes: AUTOREVIEWER_SOFT_DEADLINE_MINUTES and
-    AUTOREVIEWER_HARD_DEADLINE_MINUTES over Settings' defaults. Shared by the bot and the evals."""
-    soft = float(env.get("AUTOREVIEWER_SOFT_DEADLINE_MINUTES", Settings.soft_deadline_minutes))
-    return soft, float(env.get("AUTOREVIEWER_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
+    """(soft, hard) review time limits in minutes: PRISM_SOFT_DEADLINE_MINUTES and
+    PRISM_HARD_DEADLINE_MINUTES over Settings' defaults. Shared by the bot and the evals."""
+    soft = float(env.get("PRISM_SOFT_DEADLINE_MINUTES", Settings.soft_deadline_minutes))
+    return soft, float(env.get("PRISM_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
 
 
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
-    """AUTOREVIEWER_REASONING ("role=effort,...", e.g. "docs=high,tests=high"): the reasoning effort each role's
+    """PRISM_REASONING ("role=effort,...", e.g. "docs=high,tests=high"): the reasoning effort each role's
     requests carry, over DEFAULT_REASONING. Other roles send none, which leaves the server's default: DeepSeek
     doesn't think then (any effort turns it on), while Qwen thinks by default. Stops startup on an unknown role or
     effort."""
     # str -> its ReasoningEffort literal: a lookup the type checker can follow, where `in` wouldn't narrow.
     efforts: dict[str, ReasoningEffort] = {effort: effort for effort in REASONING_EFFORTS}
     reasoning: dict[str, ReasoningEffort] = dict(DEFAULT_REASONING)
-    for role, value in _role_pairs(env, "AUTOREVIEWER_REASONING", "role=effort"):
+    for role, value in _role_pairs(env, "PRISM_REASONING", "role=effort"):
         if (effort := efforts.get(value)) is None:
-            raise ValueError(f"AUTOREVIEWER_REASONING: {role}={value!r}; efforts: {', '.join(REASONING_EFFORTS)}")
+            raise ValueError(f"PRISM_REASONING: {role}={value!r}; efforts: {', '.join(REASONING_EFFORTS)}")
         reasoning[role] = effort
     return reasoning
 

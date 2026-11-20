@@ -60,13 +60,13 @@ def test_invalid_origin(origin: str) -> None:
 
 @pytest.mark.parametrize("custom", [True, False])
 def test_convert_preserves_existing_credentials(tmp_path: Path, custom: bool) -> None:
-    directory = tmp_path / ("other path" if custom else ".config/homelab")
+    directory = tmp_path / ("other path" if custom else ".config/prism")
     directory.mkdir(parents=True)
-    pem = directory / "autoreviewer-app.pem"
+    pem = directory / "prism-app.pem"
     pem.write_text("original")
     env = {"HOME": str(tmp_path), "PATH": os.defpath}
     if custom:
-        env["AUTOREVIEWER_CREDENTIAL_DIR"] = str(directory)
+        env["PRISM_CREDENTIAL_DIR"] = str(directory)
     result = subprocess.run([SETUP / "convert.sh", "FakeCode"], env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 1
     assert str(pem) in result.stderr

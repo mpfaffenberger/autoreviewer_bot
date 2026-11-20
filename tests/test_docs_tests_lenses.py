@@ -16,7 +16,7 @@ from autoreviewer.web.config import Settings, models_from
 
 BASE = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
 ENV = {"GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "s", "GITHUB_WEBHOOK_SECRET": "w", "BOODLETON_API_KEY": "b",
-       "AUTOREVIEWER_PRIVATE_KEY_PATH": __file__}  # fmt: skip
+       "PRISM_PRIVATE_KEY_PATH": __file__}  # fmt: skip
 
 
 def with_lenses(**switches: bool) -> Settings:
@@ -26,14 +26,14 @@ def with_lenses(**switches: bool) -> Settings:
 def test_the_bots_time_limits_come_from_its_env() -> None:
     """From the bot's review of #47: Settings.from_env reads them through config.deadlines_from."""
     assert (Settings.from_env(ENV).soft_deadline_minutes, Settings.from_env(ENV).hard_deadline_minutes) == (30, 50)
-    limits = {"AUTOREVIEWER_SOFT_DEADLINE_MINUTES": "20", "AUTOREVIEWER_HARD_DEADLINE_MINUTES": "40"}
+    limits = {"PRISM_SOFT_DEADLINE_MINUTES": "20", "PRISM_HARD_DEADLINE_MINUTES": "40"}
     settings = Settings.from_env({**ENV, **limits})
     assert (settings.soft_deadline_minutes, settings.hard_deadline_minutes) == (20, 40)
 
 
 def test_off_by_default_and_switched_on_by_env() -> None:
     assert (Settings.from_env(ENV).docs, Settings.from_env(ENV).tests) == (False, False)
-    on = Settings.from_env({**ENV, "AUTOREVIEWER_DOCS": "true", "AUTOREVIEWER_TESTS": "true"})
+    on = Settings.from_env({**ENV, "PRISM_DOCS": "true", "PRISM_TESTS": "true"})
     assert (on.docs, on.tests) == (True, True)
 
 
@@ -96,4 +96,4 @@ def test_lenses_run_in_one_order() -> None:
 def test_boodletons_aliases_cant_be_pinned(alias: str) -> None:
     """glm53 is DeepSeek and qwen3.8-27b is Qwen: as pins they'd let a finder and its checker share a model."""
     with pytest.raises(ValueError, match="no known context window"):
-        models_from({"AUTOREVIEWER_MODELS": f"docs.verifier={alias}"})
+        models_from({"PRISM_MODELS": f"docs.verifier={alias}"})

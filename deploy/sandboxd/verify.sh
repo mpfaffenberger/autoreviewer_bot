@@ -8,12 +8,12 @@
 set -eu
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-UNIT_FILE=/etc/systemd/system/autoreviewer-sandboxd.service
+UNIT_FILE=/etc/systemd/system/prism-sandboxd.service
 IMAGE=$(sed -n 's/.*--permit-image \([^ ]*\).*/\1/p' "$UNIT_FILE" | head -n 1)
 HOST_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 
 echo "== 1/2 layer one: smolvm allowlist, through the installed daemon"
-sg sandboxd -c "cd '$REPO' && SANDBOXD_SOCKET=/run/autoreviewer-sandboxd.sock SANDBOXD_TEST_IMAGE='$IMAGE' \
+sg sandboxd -c "cd '$REPO' && SANDBOXD_SOCKET=/run/prism/sandboxd.sock SANDBOXD_TEST_IMAGE='$IMAGE' \
     uv run pytest -m smolvm -q -p no:cacheprovider -k 'allowlist or no_network'"
 
 echo "== 2/2 layer two: uid firewall alone (smolvm allowlist off)"
@@ -22,8 +22,8 @@ unit="sbx-backstop-$$"
 # (EXECUTION.md, "Incident"). Output goes to the journal instead.
 status=0
 sudo systemd-run --wait --collect --quiet --unit="$unit" \
-    -p User=smolrunner -p Group=smolrunner -p Environment=HOME=/var/lib/smolrunner -p RuntimeMaxSec=300 \
-    /opt/autoreviewer-sandboxd/.venv/bin/python /opt/autoreviewer-sandboxd/backstop_probe.py "$IMAGE" "$HOST_IP" \
+    -p User=smolrunner -p Group=smolrunner -p Environment=HOME=/var/lib/prism/sandboxd -p RuntimeMaxSec=300 \
+    /opt/prism-sandboxd/.venv/bin/python /opt/prism-sandboxd/backstop_probe.py "$IMAGE" "$HOST_IP" \
     || status=$?
 sudo journalctl -u "$unit" -o cat --no-pager | grep BACKSTOP || true
 exit "$status"

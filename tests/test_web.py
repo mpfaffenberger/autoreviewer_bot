@@ -30,7 +30,7 @@ pytestmark = pytest.mark.anyio
 
 SECRET = "test-webhook-secret"
 REPO = "mpfaffenberger/pydantic-ai-claude-code"
-SLUG = "chaos-emerald-reviewer"
+SLUG = "example-reviewer"
 
 
 def pull_request_payload(*, action: str = "opened", repo: str = REPO, draft: bool = False) -> dict[str, Any]:
@@ -83,7 +83,7 @@ class Receiver:
 
 @pytest.fixture
 async def receiver() -> AsyncIterator[Receiver]:
-    settings = Settings(app_id=1, app_slug="chaos-emerald-reviewer", webhook_secret=SECRET, private_key="unused")
+    settings = Settings(app_id=1, app_slug="example-reviewer", webhook_secret=SECRET, private_key="unused")
     handler = FakeHandler()
     app = create_app(settings, handler)
     transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)  # see the 500 a failure produces
@@ -249,11 +249,11 @@ async def test_a_closed_pull_request_reaches_the_closed_handler() -> None:
     assert closed == [PullRequestClosed(182623847, "mpfaffenberger", "pydantic-ai-claude-code", 7)]
 
 
-# --- `@chaos-emerald-reviewer review` comments ------------------------------------------------------
+# --- `@example-reviewer review` comments ------------------------------------------------------
 
 
 def comment_payload(
-    body: str = "@chaos-emerald-reviewer review",
+    body: str = "@example-reviewer review",
     *,
     commenter: str = "someone",
     association: str = "NONE",
@@ -291,7 +291,7 @@ REQUESTED = ReviewRequested(
             comment_payload(commenter="drive-by", association="CONTRIBUTOR", pr_author="someone-else"),
             Ignore("drive-by may not use the bot on someone else's pull request"),
         ),
-        (comment_payload(commenter="chaos-emerald-reviewer[bot]"), Ignore("the bot's own comment")),
+        (comment_payload(commenter="example-reviewer[bot]"), Ignore("the bot's own comment")),
         (comment_payload(action="edited"), Ignore("only new comments are read")),
         (comment_payload(on_pull_request=False), Ignore("comment on an issue, not a pull request")),
         (comment_payload("LGTM"), Ignore("no command for the bot")),
@@ -315,14 +315,14 @@ def test_route_review_commands(payload: dict[str, Any], expected: object) -> Non
 @pytest.mark.parametrize(
     ("body", "command"),
     [
-        ("@chaos-emerald-reviewer review", True),
-        ("Thanks! @Chaos-Emerald-Reviewer REVIEW please", True),
-        ("first line\n  @chaos-emerald-reviewer   review\n", True),
-        ("> @chaos-emerald-reviewer review\nquoting the instructions", False),
-        ("@chaos-emerald-reviewer reviewed this already", False),
-        ("@chaos-emerald-reviewer-two review", False),
-        ("me@chaos-emerald-reviewer review", False),
-        ("@chaos-emerald-reviewer what do you think?", False),
+        ("@example-reviewer review", True),
+        ("Thanks! @Example-Reviewer REVIEW please", True),
+        ("first line\n  @example-reviewer   review\n", True),
+        ("> @example-reviewer review\nquoting the instructions", False),
+        ("@example-reviewer reviewed this already", False),
+        ("@example-reviewer-two review", False),
+        ("me@example-reviewer review", False),
+        ("@example-reviewer what do you think?", False),
     ],
 )
 def test_what_counts_as_a_review_command(body: str, command: bool) -> None:

@@ -1,7 +1,7 @@
 """Run the simplify lens over deliberately bloated functions: how much bloat do its suggestions cut, and
 does the code still pass the tests once they're applied?
 
-    set -a; . ~/.config/homelab/autoreviewer.env; set +a
+    set -a; . ~/.config/prism/prism.env; set +a
     BOODLETON_BASE_URL=http://127.0.0.1:8484/v1 uv run python -m evals.simplify [--only NAME ...] [--label NAME]
 
 Only the simplifier and its checker run (no correctness review). Results land in

@@ -1,0 +1,13 @@
+[Unit]
+Description=Egress firewall for smolrunner, the prism sandbox account
+Before=prism-sandboxd.service
+After=nftables.service firewalld.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/prism-sandboxd/egress.nft
+ExecStop=/usr/sbin/nft delete table inet prism_sandbox
+
+[Install]
+WantedBy=multi-user.target

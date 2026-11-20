@@ -9,13 +9,13 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-systemctl disable --now autoreviewer-sandboxd.socket autoreviewer-sandboxd.service \
-    autoreviewer-sandbox-egress.service 2>/dev/null || true
-rm -f /etc/systemd/system/autoreviewer-sandboxd.socket /etc/systemd/system/autoreviewer-sandboxd.service \
-    /etc/systemd/system/autoreviewer-sandbox-egress.service
+systemctl disable --now prism-sandboxd.socket prism-sandboxd.service \
+    prism-sandbox-egress.service 2>/dev/null || true
+rm -f /etc/systemd/system/prism-sandboxd.socket /etc/systemd/system/prism-sandboxd.service \
+    /etc/systemd/system/prism-sandbox-egress.service
 systemctl daemon-reload
-nft delete table inet autoreviewer_sandbox 2>/dev/null || true
-rm -rf /opt/autoreviewer-sandboxd /etc/autoreviewer-sandboxd /var/cache/autoreviewer-sandboxd-uv /var/lib/smolrunner
+nft delete table inet prism_sandbox 2>/dev/null || true
+rm -rf /opt/prism-sandboxd /etc/prism-sandboxd /var/cache/prism-sandboxd-uv /var/lib/prism/sandboxd
 getent passwd smolrunner >/dev/null && userdel smolrunner
 getent group sandboxd >/dev/null && groupdel sandboxd
 echo "removed (left /usr/local/bin/uv in place)"

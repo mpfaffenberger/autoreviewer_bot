@@ -270,7 +270,7 @@ def _and(names: list[str]) -> str:
 
 
 def thread_reply_handler(settings: Settings) -> ReplyHandler | None:
-    """Replies under the bot's findings are queued for an answer only with AUTOREVIEWER_CONVERSATIONS on."""
+    """Replies under the bot's findings are queued for an answer only with PRISM_CONVERSATIONS on."""
     from autoreviewer.review import durable
 
     return durable.enqueue_answer if settings.conversations else None

@@ -129,7 +129,7 @@ async def test_show_file_gives_the_version_before_the_pr(workspace: Workspace) -
     assert await call(workspace, "show_file", path="notes.py", ref="base") == "notes.py does not exist at base"
 
 
-@pytest.mark.parametrize("bad", ["/run/secrets/github-app.pem", "../outside.py", "--output=/tmp/x", "a\0b", ""])
+@pytest.mark.parametrize("bad", ["/run/prism/github-app.pem", "../outside.py", "--output=/tmp/x", "a\0b", ""])
 async def test_git_tools_refuse_paths_outside_the_repo(workspace: Workspace, bad: str) -> None:
     with pytest.raises(ModelRetry):
         await call(workspace, "diff", path=bad)

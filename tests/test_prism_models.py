@@ -45,7 +45,7 @@ def settings(tmp_path: Path) -> Settings:
             "GITHUB_APP_ID": "1",
             "GITHUB_APP_SLUG": "s",
             "GITHUB_WEBHOOK_SECRET": "w",
-            "AUTOREVIEWER_PRIVATE_KEY_PATH": __file__,
+            "PRISM_PRIVATE_KEY_PATH": __file__,
             "PRISM_CONFIG": str(path),
         }
     )

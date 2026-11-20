@@ -1,7 +1,7 @@
 """Git tools for the review agents: see what changed, at any PR size, without a raw git command.
 
 Typed on purpose. A raw `git` passthrough can't be made safe by blocking flags: e.g.
-`git diff --no-index /run/secrets/github-app.pem /dev/null` would print the App's private key, which
+`git diff --no-index /run/prism/github-app.pem /dev/null` would print the App's private key, which
 is mounted in this container. These tools can only name the PR's own commits and paths inside the repo.
 """
 

@@ -1,5 +1,5 @@
-# autoreviewer webhook receiver. Build from the repo root:
-#   podman build -t localhost/autoreviewer:latest -f deploy/web/Containerfile .
+# prism webhook receiver. Build from the repo root:
+#   podman build -t localhost/prism:latest -f deploy/web/Containerfile .
 # Both stages are trixie + CPython 3.13 at /usr/local/bin, so the venv's interpreter links resolve.
 # Trixie, not bookworm: DBOS's SQLite schema needs SQLite >= 3.42 (unixepoch('subsec')); bookworm has 3.40.
 

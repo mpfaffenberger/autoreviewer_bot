@@ -1,7 +1,7 @@
 """Review any GitHub PR on demand, including repos where the App isn't installed. Nothing is posted.
 
-    podman exec autoreviewer autoreviewer-review-pr https://github.com/owner/repo/pull/123
-    podman exec -e GITHUB_TOKEN=... autoreviewer autoreviewer-review-pr owner/repo#123   # private repos
+    podman exec prism autoreviewer-review-pr https://github.com/owner/repo/pull/123
+    podman exec -e GITHUB_TOKEN=... prism autoreviewer-review-pr owner/repo#123   # private repos
 
 Runs the bot's own pipeline (git workspace, lens, verifier, compaction, limits) inside the bot's
 hardened container, and prints the verdict the bot would give.

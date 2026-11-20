@@ -9,7 +9,7 @@
 set -eu
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-PREFIX=/opt/autoreviewer-sandboxd
+PREFIX=/opt/prism-sandboxd
 UV_SOURCE=${UV:-$(command -v uv || true)}
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -23,7 +23,7 @@ fi
 
 getent group sandboxd >/dev/null || groupadd --system sandboxd
 getent passwd smolrunner >/dev/null || useradd --system --user-group --no-create-home \
-    --home-dir /var/lib/smolrunner --shell /usr/sbin/nologin --comment "autoreviewer sandboxd" smolrunner
+    --home-dir /var/lib/prism/sandboxd --shell /usr/sbin/nologin --comment "prism sandboxd" smolrunner
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     usermod --append --groups sandboxd "$SUDO_USER"
 fi
@@ -46,21 +46,21 @@ install -m 0644 "$REPO/pyproject.toml" "$REPO/uv.lock" "$REPO/EXECUTION.md" \
 (
     cd "$PREFIX"
     UV_PYTHON_INSTALL_DIR="$PREFIX/python" UV_PYTHON_PREFERENCE=only-managed \
-        UV_CACHE_DIR=/var/cache/autoreviewer-sandboxd-uv \
+        UV_CACHE_DIR=/var/cache/prism-sandboxd-uv \
         /usr/local/bin/uv sync --frozen --no-dev --extra sandboxd --no-editable --python 3.13 --quiet
 )
 chown -R root:root "$PREFIX"
 chmod -R u=rwX,go=rX "$PREFIX"
 
-install -d -m 0755 /etc/autoreviewer-sandboxd
-install -m 0644 "$REPO/deploy/sandboxd/egress.nft" /etc/autoreviewer-sandboxd/egress.nft
-install -m 0644 "$REPO/deploy/sandboxd/autoreviewer-sandbox-egress.service" \
-    "$REPO/deploy/sandboxd/autoreviewer-sandboxd.service" \
-    "$REPO/deploy/sandboxd/autoreviewer-sandboxd.socket" /etc/systemd/system/
+install -d -m 0755 /etc/prism-sandboxd
+install -m 0644 "$REPO/deploy/sandboxd/egress.nft" /etc/prism-sandboxd/egress.nft
+install -m 0644 "$REPO/deploy/sandboxd/prism-sandbox-egress.service" \
+    "$REPO/deploy/sandboxd/prism-sandboxd.service" \
+    "$REPO/deploy/sandboxd/prism-sandboxd.socket" /etc/systemd/system/
 
 systemctl daemon-reload
-systemctl enable autoreviewer-sandbox-egress.service autoreviewer-sandboxd.socket
-systemctl restart autoreviewer-sandbox-egress.service  # reload the rules on update
-systemctl stop autoreviewer-sandboxd.service           # the next connection starts the new code
-systemctl restart autoreviewer-sandboxd.socket
-systemctl --no-pager --lines=0 status autoreviewer-sandboxd.socket
+systemctl enable prism-sandbox-egress.service prism-sandboxd.socket
+systemctl restart prism-sandbox-egress.service  # reload the rules on update
+systemctl stop prism-sandboxd.service           # the next connection starts the new code
+systemctl restart prism-sandboxd.socket
+systemctl --no-pager --lines=0 status prism-sandboxd.socket

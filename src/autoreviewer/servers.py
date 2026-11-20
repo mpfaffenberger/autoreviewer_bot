@@ -1,5 +1,5 @@
-"""Facts about the model servers on chaos-emerald. Change them here when a server is reconfigured; DESIGN.md §7
-("Lanes") has the measurements behind them."""
+"""Facts about the model servers in the reference deployment. Change them here when a server is reconfigured.
+DESIGN.md §7 ("Lanes") has the measurements behind them."""
 
 from typing import Literal, get_args
 

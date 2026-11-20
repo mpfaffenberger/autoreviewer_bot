@@ -47,9 +47,9 @@ def test_the_defaults_match_the_model_servers() -> None:
 @pytest.mark.parametrize("value", [None, "", "  "])
 def test_a_missing_or_blank_setting_keeps_the_default_lanes(value: str | None) -> None:
     env = {"GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "s", "GITHUB_WEBHOOK_SECRET": "w", "BOODLETON_API_KEY": "b",
-           "AUTOREVIEWER_PRIVATE_KEY_PATH": __file__}  # fmt: skip
+           "PRISM_PRIVATE_KEY_PATH": __file__}  # fmt: skip
     if value is not None:
-        env["AUTOREVIEWER_MODEL_LANES"] = value
+        env["PRISM_MODEL_LANES"] = value
     assert Settings.from_env(env).model_lanes == DEFAULT_MODEL_LANES
 
 
