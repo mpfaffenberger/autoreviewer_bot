@@ -1,17 +1,17 @@
 [Unit]
-Description=autoreviewer sandboxd: smolvm microVMs for untrusted PR code
-Documentation=file:///opt/autoreviewer-sandboxd/EXECUTION.md
+Description=prism sandboxd: smolvm microVMs for untrusted PR code
+Documentation=file:///opt/prism-sandboxd/EXECUTION.md
 # No firewall, no daemon: if the egress backstop isn't loaded, sandboxd must not start.
-Requires=autoreviewer-sandbox-egress.service autoreviewer-sandboxd.socket
-After=autoreviewer-sandbox-egress.service autoreviewer-sandboxd.socket network-online.target
+Requires=prism-sandbox-egress.service prism-sandboxd.socket
+After=prism-sandbox-egress.service prism-sandboxd.socket network-online.target
 Wants=network-online.target
 
 [Service]
 User=smolrunner
 Group=smolrunner
 SupplementaryGroups=sandboxd
-# The listening socket comes from autoreviewer-sandboxd.socket (socket activation).
-ExecStart=/opt/autoreviewer-sandboxd/.venv/bin/autoreviewer-sandboxd \
+# The listening socket comes from prism-sandboxd.socket (socket activation).
+ExecStart=/opt/prism-sandboxd/.venv/bin/autoreviewer-sandboxd \
     --max-sandboxes 2 --max-age 1200 --max-cpus 4 --max-memory-mb 3072 \
     --permit-host pypi.org --permit-host files.pythonhosted.org \
     --permit-image python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
@@ -19,11 +19,11 @@ Restart=on-failure
 RestartSec=5
 
 # State (VM disks, image cache) and runtime files are private to smolrunner.
-StateDirectory=smolrunner
+StateDirectory=prism/sandboxd
 StateDirectoryMode=0700
-RuntimeDirectory=autoreviewer-sandbox
+RuntimeDirectory=prism/sandboxd
 RuntimeDirectoryMode=0700
-Environment=HOME=/var/lib/smolrunner XDG_RUNTIME_DIR=/run/autoreviewer-sandbox
+Environment=HOME=/var/lib/prism/sandboxd XDG_RUNTIME_DIR=/run/prism/sandboxd
 UMask=0077
 
 # Confinement around the VMM, which smolvm's security model asks for: a guest that escapes the VM
@@ -56,4 +56,4 @@ TasksMax=512
 
 [Install]
 # Started on demand by the socket; enabling the socket is enough.
-Also=autoreviewer-sandboxd.socket
+Also=prism-sandboxd.socket

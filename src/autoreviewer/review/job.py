@@ -127,7 +127,7 @@ class ReviewDeps:
     """Build (lens, verifier) over a checkout."""
     work_dir: Path
     bot_login: str
-    """Our own GitHub login, e.g. chaos-emerald-reviewer[bot]; used to avoid reviewing a commit twice."""
+    """Our own GitHub login, e.g. example-reviewer[bot]; used to avoid reviewing a commit twice."""
     models_note: str
     """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
     memory: ReviewMemory | None = None

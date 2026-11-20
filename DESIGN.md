@@ -1,7 +1,7 @@
-# autoreviewer: design
+# Prism: design
 
 A Macroscope-style GitHub PR reviewer, built on `pydantic-ai-harness`, served on
-the homelab beside Boodleton and running on chaos-emerald's own models.
+the homelab beside Boodleton and running on self-hosted models.
 
 Status: **draft for Mike to review**. The open questions are in §12.
 
@@ -11,10 +11,10 @@ Status: **draft for Mike to review**. The open questions are in §12.
 
 | Behaviour | Rule |
 |---|---|
-| Trigger | PR `opened`, `reopened`, `ready_for_review`, `synchronize` (push), or a `@chaos-emerald-reviewer review` comment (e.g. PRs opened before the bot was installed; open PRs are never backfilled in bulk) |
+| Trigger | PR `opened`, `reopened`, `ready_for_review`, `synchronize` (push), or a `@YOUR-APP-SLUG review` comment (e.g. PRs opened before the bot was installed; open PRs are never backfilled in bulk) |
 | Lenses | **Correctness**, **DRY / don't-reinvent-the-wheel**, **Security** |
 | Output | One GitHub review: a summary plus inline comments anchored to diff lines |
-| Verdict | **Any open P0/P1 finding → `REQUEST_CHANGES`.** Otherwise `APPROVE` (P2/P3 findings are posted as non-blocking comments). `AUTOREVIEWER_BLOCK_AT_PRIORITY=3` makes every finding block |
+| Verdict | **Any open P0/P1 finding → `REQUEST_CHANGES`.** Otherwise `APPROVE` (P2/P3 findings are posted as non-blocking comments). `PRISM_BLOCK_AT_PRIORITY=3` makes every finding block |
 | Noise policy | The lens is thorough and scores its own confidence; the verifier and code filter. Still **no nits**: style, naming, and taste are never findings |
 | Conversation | Anyone (humans *and* bots) can reply in a finding's thread. The reviewer answers, holds its position, or withdraws the finding |
 | Follow-up pushes | Re-checks open findings. Fixed ones get a "fixed in `abc123`" reply and the thread is resolved. Then it reviews only the new commits |
@@ -36,7 +36,7 @@ like* Macroscope on *our* DeepSeek/Qwen, so that capability doesn't fit.
 ## 2. Architecture
 
 ```
-GitHub ──webhook──▶ Cloudflare ──▶ Caddy :8443 ──▶ autoreviewer:8000  (FastAPI)
+GitHub ──webhook──▶ Cloudflare ──▶ Caddy :8443 ──▶ prism:8000  (FastAPI)
                                                      │  verify HMAC, route event
                                                      ▼
                                               DBOS durable queue (SQLite)
@@ -154,7 +154,7 @@ fail-open default.
   concrete exploit with nothing on the path stopping it, not excluded. Adapted from Anthropic's findings
   filter.
 - Findings share the P0-P3 gate. When both lenses report one line, the more urgent finding is posted.
-  `AUTOREVIEWER_SECURITY=false` turns it off.
+  `PRISM_SECURITY=false` turns it off.
 
 ### DRY (advisory)
 
@@ -165,9 +165,9 @@ files, and not unused imports or other leftovers (linters and the correctness le
 `prompts/dry_verifier.md` checks the existing thing is real and covers this use, edge cases included.
 DRY findings never block (`ADVISORY_KINDS`), at most 5 (`MAX_DRY_POSTED`) are verified and posted per review,
 the lens's best 5 by its own ranking (counting only findings past the free filters), and a continued review only looks at files changed since the last one.
-`AUTOREVIEWER_DRY=false` turns it off.
+`PRISM_DRY=false` turns it off.
 
-**Docs and tests lenses** (Nov 18, off until their evals are in: `AUTOREVIEWER_DOCS`, `AUTOREVIEWER_TESTS`). Both
+**Docs and tests lenses** (Nov 18, off until their evals are in: `PRISM_DOCS`, `PRISM_TESTS`). Both
 are advisory like DRY: never block, at most `MAX_ADVISORY_POSTED` (5) each, only files changed since the last
 review when continuing. Both are found by DeepSeek and checked by Qwen, the other model. Kimi K3.1 Pro checked
 them for a day (Nov 18-19) and was dropped when its hosted quota ran out twice.
@@ -202,8 +202,8 @@ worth keeping is adapted from pstack's comment-sicko. It runs alongside the corr
    secret, or (Python) leaving the file unparseable (`compile(..., ONLY_AST)`, never executed).
 3. DeepSeek checks each survivor behaves identically and is genuinely simpler.
 4. Survivors are posted as GitHub multi-line `suggestion` comments (one click to apply). They **never
-   block**, at any `AUTOREVIEWER_BLOCK_AT_PRIORITY`, and the review summary says how much of the added
-   code they cut. A failure anywhere costs only the suggestions. `AUTOREVIEWER_SIMPLIFY=false` turns it off.
+   block**, at any `PRISM_BLOCK_AT_PRIORITY`, and the review summary says how much of the added
+   code they cut. A failure anywhere costs only the suggestions. `PRISM_SIMPLIFY=false` turns it off.
 
 When a review continues on new commits, only files changed since the last review are considered, so
 pushes don't repeat the same suggestions.
@@ -234,9 +234,9 @@ Every lens gets one shared scope rule (`agents.FOCUS`): review the lines the PR 
 affect, and read the rest of the codebase only to understand them. Runaway reviews were scope drift, or a model stuck in a loop: verifiers get an 80-step budget
 and every agent the harness's `DetectLoops`, so the deadlines are only a backstop.
 
-`review/deadline.py`: after the **soft deadline** (`AUTOREVIEWER_SOFT_DEADLINE_MINUTES`, 30) every lens
+`review/deadline.py`: after the **soft deadline** (`PRISM_SOFT_DEADLINE_MINUTES`, 30) every lens
 wraps up. A capability removes its tools and tells it time is up, so it returns its final report with what
-it found. After the **hard deadline** (`AUTOREVIEWER_HARD_DEADLINE_MINUTES`, 50) the job cancels the review:
+it found. After the **hard deadline** (`PRISM_HARD_DEADLINE_MINUTES`, 50) the job cancels the review:
 "Review timed out", no verdict, and findings already posted stay. A review whose correctness or security lens was cut short, or failed outright (a model error after the
 client's retries), **never approves**: it requests changes if it found blocking issues, and otherwise
 posts a neutral COMMENT ("partially reviewed") with a neutral check, and isn't remembered for continuing
@@ -245,7 +245,7 @@ bot's limits.
 
 A running review checks every minute whether its PR moved on (a newer push, or closed) and stops at
 once if so: its result would be thrown away, and the newer head's review may be waiting for its slot.
-`@chaos-emerald-reviewer review` re-runs a review of the current commit that ended without a verdict
+`@YOUR-APP-SLUG review` re-runs a review of the current commit that ended without a verdict
 (cancelled, crashed, partially reviewed, timed out, failed). It resumes or forks the durable workflow,
 reusing the check run; a redelivered push never does.
 
@@ -281,7 +281,7 @@ handle, and the reviewer pages through the rest with `read_tool_result`.
 
 `evals/` runs the real reviewer over seeded bugs in this repo's own code, with no GitHub calls:
 
-    set -a; . ~/.config/homelab/autoreviewer.env; set +a
+    set -a; . ~/.config/prism/prism.env; set +a
     BOODLETON_BASE_URL=http://127.0.0.1:8484/v1 uv run python -m evals.run --label NAME
 
 Isolated cases put one bug in a tiny PR. Buried cases plant one bug inside a real feature commit of
@@ -297,9 +297,9 @@ also redacts anything that looks like a credential before posting.
 ## 5. Conversations (bots replying to the bot)
 
 Events: `pull_request_review_comment` (thread replies) and `issue_comment`
-(PR-level `@chaos-emerald-reviewer …`).
+(PR-level `@YOUR-APP-SLUG …`).
 
-**Built so far: `@chaos-emerald-reviewer review`** (`web/routing.py` → `web/commands.py`).
+**Built so far: `@YOUR-APP-SLUG review`** (`web/routing.py` → `web/commands.py`).
 
 - Accepted from the PR's author (human or bot) and from OWNER / MEMBER / COLLABORATOR; anyone else is
   ignored. The bot's own comments, edits, and quoted (`>`) lines never count as commands.
@@ -309,7 +309,7 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
 - It acknowledges with a reaction: 👀 means a review is queued or running, 👍 means that commit's review
   already finished. Reactions are cosmetic, so if one fails the delivery doesn't.
 
-**Built: answers in the bot's threads** (`review/conversation.py`, `AUTOREVIEWER_CONVERSATIONS`).
+**Built: answers in the bot's threads** (`review/conversation.py`, `PRISM_CONVERSATIONS`).
 
 - A `pull_request_review_comment` that replies in a thread becomes a `ThreadReply` if it's new (not an edit),
   not the bot's own, on an open PR, and by the PR's author (human or bot) or a maintainer.
@@ -401,11 +401,11 @@ lease. Don't build a distributed lock for a single box.
 | `docs`, `tests` and their checkers | DeepSeek finds, Qwen checks | Their evals ran this way; still two different models |
 
 **Pinning.** Any role can be pinned to another model with one setting, e.g.
-`AUTOREVIEWER_MODELS="security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next"`; unlisted roles keep
+`PRISM_MODELS="security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next"`; unlisted roles keep
 the defaults (`config.models_from`). Each agent's context window follows its model (`servers.CONTEXT_WINDOWS`).
 Startup stops on an unknown role, a model without a known window, or a finder pinned to the same model as its
 checker.
-`AUTOREVIEWER_REASONING="docs=high,tests=high"` sets a reasoning effort per role (low, medium, high).
+`PRISM_REASONING="docs=high,tests=high"` sets a reasoning effort per role (low, medium, high).
 DeepSeek doesn't think unless a request asks for an effort (any effort turns it on); Qwen thinks by
 default. Unlisted roles send none. `web.app.ModelPlan` builds every agent's model, for the bot and the evals alike; the review footer names
 each finder/checker pair.
@@ -433,7 +433,7 @@ the model names in reviewer config. Prefer the allowlist.
 
 **Lanes (measured 2026-11-18, widened Nov 20).** Qwen's server runs 5 streams of 168k tokens; DeepSeek's has
 more but is shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
-`ConcurrencyLimitedModel`): `AUTOREVIEWER_MODEL_LANES`, default Qwen 5 and DeepSeek 4 (`servers.py`).
+`ConcurrencyLimitedModel`): `PRISM_MODEL_LANES`, default Qwen 5 and DeepSeek 4 (`servers.py`).
 
 **Compaction points and reply room (Nov 20).** An agent compacts its history above `servers.COMPACT_AT`: 140k on
 Qwen (Mike's call, higher than the old 60% of the window, so reviewers compact less), 60% of DeepSeek's 1M window.
@@ -449,7 +449,7 @@ the longest prompt was 216k (p99 136k, median 31k), so the cut rejected nothing.
 all five streams fill at once the server could run out of memory. Rollback: delete the `.env` and restart
 `qwen38-flash-next-tf`. Excess requests wait in
 the bot rather than in the model server's queue, where everyone else waits too. One review runs at a time
-(`AUTOREVIEWER_MAX_CONCURRENT_JOBS=1`): a review already runs three Qwen finders in parallel, and two at once left
+(`PRISM_MAX_CONCURRENT_JOBS=1`): a review already runs three Qwen finders in parallel, and two at once left
 6 of 9 requests queued at the server and pushed both past their deadline.
 
 ## 8. Subscriptions ("as a service")
@@ -459,7 +459,7 @@ account or org and picks repos, and GitHub handles the consent UI.
 
 **Today:** the App is private, so only its owner can install it, and the installation's repository
 selection on GitHub is the *only* list of reviewed repos. (There used to be a second, bot-side
-`AUTOREVIEWER_REPOS` allowlist; it drifted from the installation and silently ignored repos, so it was
+`PRISM_REPOS` allowlist; it drifted from the installation and silently ignored repos, so it was
 removed.) **Before the App is made public, the `pending` approval gate below must exist**, or any
 installer gets free GPU time.
 
@@ -475,21 +475,21 @@ Contents: R, Metadata: R.** Events: `pull_request`,
 
 ---
 
-## 9. Hosting on chaos-emerald (Boodleton-style)
+## 9. Homelab hosting (Boodleton-style)
 
-- **Hostname:** `review.chaos-emerald.com`, Cloudflare-proxied, routed to **Caddy** (8443 is already forwarded, so no new router hole):
+- **Example hostname:** `review.example.com`, Cloudflare-proxied, routed to **Caddy** (8443 is already forwarded, so no new router hole):
   ```caddy
-  review.chaos-emerald.com {
-  	encode zstd gzip
-  	reverse_proxy autoreviewer:8000
+  review.example.com {
+      encode zstd gzip
+      reverse_proxy prism:8000
   }
   ```
 - **Cloudflare gotcha:** the edge is already 403-ing `minecraft.` with some rule. Make sure WAF / Bot Fight Mode doesn't challenge GitHub's webhook POSTs; add a skip rule for `/webhook`. HMAC (`X-Hub-Signature-256`, constant-time compare) is the real authentication.
 - **Live progress:** while a review runs, its check run (the "autoreviewer" row in the PR's Checks tab) shows the phase, model-request and tool-call counts, the latest thinking, and recent tool calls, updated at most every 30 s (`review/progress.py`, a capability watching each model response). The trail stays on the finished check run. Model text is sanitized and fenced in code blocks, so it can't ping anyone, leak a token, or inject markdown.
-- **Telemetry:** Logfire (`telemetry.py`). Every pydantic-ai agent run (model requests, tool calls, tokens), every webhook request, and every log line, with the same token scrubbing as stdout. Services: `autoreviewer` and `autoreviewer-ondemand`. Off until `LOGFIRE_TOKEN` is in `autoreviewer.env`. Traces include the reviewed code by default; `AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT=false` keeps prompts and tool results out (needed before reviewing other people's private code).
+- **Telemetry:** Logfire (`telemetry.py`). Every pydantic-ai agent run (model requests, tool calls, tokens), every webhook request, and every log line, with the same token scrubbing as stdout. The receiver and on-demand CLI report as separate services. Off until `LOGFIRE_TOKEN` is in `prism.env`. Traces include the reviewed code by default; `PRISM_LOGFIRE_INCLUDE_CONTENT=false` keeps prompts and tool results out (needed before reviewing other people's private code).
 - **Webhook handler:** verify HMAC, enqueue, return `202` well inside GitHub's 10-second timeout. Never do model work inline.
-- **Quadlet** `homelab-deploy/quadlet/autoreviewer.container`, copying Boodleton's hardening: `ReadOnly=true`, `DropCapability=all`, `NoNewPrivileges=true`, `Network=homelab-public.network`, tmpfs `/tmp` with a size cap (repo tarballs land here), `--memory=2g --pids-limit=256`, data volume `~/.local/share/autoreviewer:/var/lib/autoreviewer:Z`.
-- **Secrets** in `~/.config/homelab/` (0600), following the homelab README convention: `autoreviewer.env` (webhook secret, App ID, Boodleton key) and `autoreviewer.pem` (App private key, mounted read-only).
+- **Quadlet** `deploy/web/prism.container`, copying Boodleton's hardening: `ReadOnly=true`, `DropCapability=all`, `NoNewPrivileges=true`, `Network=homelab-public.network`, tmpfs `/tmp` with a size cap (repo tarballs land here), `--memory=2g --pids-limit=256`, data volume `~/.local/share/prism:/var/lib/prism:Z`.
+- **Secrets** in `~/.config/prism/` (files mode 0600): `prism-app.env` (GitHub App settings), `prism-app.pem` (private key, mounted read-only) and `prism.env` (provider credentials and receiver settings).
 - Add the service to the README's routing table and update commands.
 
 ---
@@ -549,7 +549,7 @@ def build_lens_agent(lens: Lens) -> Agent[ReviewDeps, list[Finding]]:
 
 | # | Ships | Done when |
 |---|---|---|
-| M0 | **Done 2026-11-16.** GitHub App `chaos-emerald-reviewer` (id 5786748), receiver at `review.chaos-emerald.com/webhook` (signature check, repo allowlist, dedupe), quadlet, Caddy route | PR #18 in `pydantic-ai-claude-code` got the neutral "autoreviewer is listening" check run. Jobs run in an in-process `Dispatcher`; DBOS replaces it behind the same `submit()` in M1, when a review must survive a restart |
+| M0 | **Done 2026-11-16.** GitHub App, receiver at `/webhook` (signature check, repo allowlist, dedupe), quadlet, Caddy route | PR #18 in `pydantic-ai-claude-code` got the neutral "autoreviewer is listening" check run. Jobs run in an in-process `Dispatcher`; DBOS replaces it behind the same `submit()` in M1, when a review must survive a restart |
 | M1 | **Done 2026-11-16.** Correctness lens (`qwen3.8-flash-next`) + verifier (`deepseek-v4.1-flash`) with read-only file tools over a safe checkout, computed verdict, inline comments, check run, stale-head check; **DBOS** workflow per PR head (`review:owner/repo#N@sha`, SQLite, queue concurrency 2, max 3 recoveries) | PR #19: seeded bug flagged, fix approved. PR #20: container SIGKILLed mid-review, DBOS recovered it with one check run and one review |
 | **Eval gate** | `pydantic_evals` corpus of ~30 PRs (seeded bugs, duplicated helpers, injected vulns, plus clean PRs) | Precision ≥ 0.8 on the clean set, *before* adding lenses |
 | M2 | DRY + security lenses, fingerprints, incremental re-review, auto-resolve fixed threads | The eval corpus passes per lens |
@@ -569,5 +569,5 @@ competes on.
 2. **Money?** Free for approved users / Stripe later / GitHub Marketplace later?
 3. **Clean PR verdict:** `APPROVE`, or just a passing check plus a `COMMENT` summary?
 4. **Model split:** is Qwen for the lenses and DeepSeek for verifying/chatting OK, given the GPU sharing?
-5. **Name / App slug:** `autoreviewer`? Something sillier?
+5. **App slug:** choose a unique name during GitHub App registration.
 6. **Boodleton key allowlist patch:** OK to add a per-key `models` allowlist to Boodleton (§7)?

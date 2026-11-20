@@ -23,7 +23,7 @@ CASES: list[Case] = [
     Case("tests_skip_added", "tests/test_models.py", "def test_a_bad_pin_stops_startup(",
          '@pytest.mark.skip(reason="noisy on CI")\ndef test_a_bad_pin_stops_startup(', "Quiet a noisy test",
          anchor="@pytest.mark.skip", corpus=LENS_CORPUS),
-    # New behaviour (case-insensitive keys in AUTOREVIEWER_MODELS and _LANES) that no test exercises.
+    # New behaviour (case-insensitive keys in PRISM_MODELS and _LANES) that no test exercises.
     Case("tests_untested_lower", CONFIG, "        pairs.append((key.strip(), val.strip()))",
          "        pairs.append((key.strip().lower(), val.strip()))", "Accept settings keys in any case",
          corpus=LENS_CORPUS),

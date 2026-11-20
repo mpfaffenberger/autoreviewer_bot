@@ -14,7 +14,7 @@ from autoreviewer.web.app import ModelPlan, build_agent_factory, build_lenses, b
 from autoreviewer.web.config import AGENT_ROLES, Settings, models_from
 
 PINS = f" security={DEEPSEEK}, security.verifier={QWEN} ,simplify.verifier={QWEN},simplify={DEEPSEEK}"
-PINNED = {"AUTOREVIEWER_MODELS": PINS}
+PINNED = {"PRISM_MODELS": PINS}
 
 
 def settings(**changes: object) -> Settings:
@@ -47,7 +47,7 @@ def test_a_pin_moves_only_the_roles_it_names() -> None:
 )
 def test_a_bad_pin_stops_startup(value: str, error: str) -> None:
     with pytest.raises(ValueError, match=error):
-        models_from({"AUTOREVIEWER_MODELS": value})
+        models_from({"PRISM_MODELS": value})
 
 
 @pytest.mark.anyio

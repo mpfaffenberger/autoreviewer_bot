@@ -1,0 +1,34 @@
+[Unit]
+Description=prism GitHub webhook receiver
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/prism:latest
+ContainerName=prism
+# No published port: Caddy reaches it as prism:8000 on homelab-public.
+Network=homelab-public.network
+# App ID, slug, webhook secret (written by deploy/github-app/convert.sh).
+EnvironmentFile=%h/.config/prism/prism-app.env
+# Provider credentials and receiver settings; GitHub controls which repositories the App can review.
+EnvironmentFile=%h/.config/prism/prism.env
+Volume=%h/.config/prism/prism-app.pem:/run/prism/github-app.pem:ro,Z
+Volume=%h/.config/prism/prism.json:/run/prism/prism.json:ro,Z
+Environment=PRISM_CONFIG=/run/prism/prism.json
+Environment=PRISM_PRIVATE_KEY_PATH=/run/prism/github-app.pem
+# Checkouts for reviews: disk-backed (a tmpfs would count against the memory limit).
+Volume=%h/.local/share/prism:/var/lib/prism:Z
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m
+DropCapability=all
+NoNewPrivileges=true
+# uid 999 in the container is the invoking user on the host, so the 0600 key stays readable without loosening it.
+PodmanArgs=--userns=keep-id:uid=999,gid=999 --pids-limit=256 --memory=2g
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

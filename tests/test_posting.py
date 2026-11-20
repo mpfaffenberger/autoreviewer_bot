@@ -32,7 +32,7 @@ def confirmed(line: int = 5, *, kind: str = "correctness", priority: int = 1) ->
 
 
 def publisher(github: FakeGitHub) -> Publisher:
-    return Publisher(github, REPO, 7, head_sha=github.repo.head, author="chaos-emerald-reviewer[bot]", block_at=1)
+    return Publisher(github, REPO, 7, head_sha=github.repo.head, author=BOT, block_at=1)
 
 
 async def test_each_finding_is_posted_once_even_when_a_review_is_replayed(repo: GitRepo) -> None:
@@ -100,7 +100,7 @@ async def test_a_finding_is_posted_while_the_lens_is_still_reviewing(repo: GitRe
         return True
 
     agent = correctness_agent(FunctionModel(lens), workspace)
-    publish = Publisher(github, REPO, 7, head_sha=repo.head, author="chaos-emerald-reviewer[bot]", block_at=1)
+    publish = Publisher(github, REPO, 7, head_sha=repo.head, author=BOT, block_at=1)
     outcome = await review(
         await pr_text(workspace), agent, verifier_agent(verifier_model(confirm), workspace), publish=publish
     )

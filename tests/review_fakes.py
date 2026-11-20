@@ -40,7 +40,7 @@ from autoreviewer.review.schemas import LensKind, LensReport, Verification
 from autoreviewer.review.simplify import Simplifier, SimplifierFactory
 from autoreviewer.review.workspace import Workspace, fetch
 
-BOT = "chaos-emerald-reviewer[bot]"
+BOT = "example-reviewer[bot]"
 
 BASE_SOURCE = "def average(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total / len(xs)\n"
 HEAD_SOURCE = "def average(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total / len(xs) - 1\n"

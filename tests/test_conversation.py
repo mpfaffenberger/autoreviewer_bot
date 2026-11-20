@@ -26,7 +26,7 @@ from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding
 
 pytestmark = pytest.mark.anyio
 
-SLUG = "chaos-emerald-reviewer"
+SLUG = "example-reviewer"
 REPO = Repo(1, "mpfaffenberger", "demo")
 
 
@@ -321,7 +321,7 @@ def test_the_bots_blind_recheck_uses_the_findings_own_checker(monkeypatch: pytes
         return object()
 
     monkeypatch.setattr(agents, "checker_agent", record)
-    pins = models_from({"AUTOREVIEWER_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}"})  # tell them apart
+    pins = models_from({"PRISM_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}"})  # tell them apart
     settings = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b", models=pins)
     deps = conversation_deps(settings, object())  # type: ignore[arg-type]
     for kind in ("security", "correctness", "dry"):

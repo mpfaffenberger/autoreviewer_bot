@@ -35,7 +35,7 @@ pytestmark = pytest.mark.anyio
 
 APP_ID = 5786748
 REPO = Repo(installation_id=182623847, owner="mpfaffenberger", name="demo")
-BOT_LOGIN = "chaos-emerald-reviewer[bot]"
+BOT_LOGIN = "example-reviewer[bot]"
 HEAD = "a" * 40
 MARKER = "<!-- autoreviewer:0123456789abcdef p1 correctness -->"
 

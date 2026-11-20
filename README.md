@@ -29,7 +29,9 @@ Already have the App installed? Open a PR, push a commit, or comment `@YOUR-APP-
 
 Prism keeps the conversation with the finding. It can explain why the issue still holds or withdraw it when the code supports the objection. A withdrawn comment can be collapsed without marking the GitHub thread resolved.
 
-## Under the hood
+## Inside Prism
+
+[![Architecture diagram showing signed GitHub events, durable review jobs, finder and checker models, private state, thread replies, the preview CLI, and the isolated sandbox daemon.](docs/brand/architecture.svg)](docs/brand/architecture.svg)
 
 The [review agents](src/autoreviewer/review/agents.py) use Pydantic AI models. [Durable workflows](src/autoreviewer/review/durable.py) track review work across webhook deliveries.
 

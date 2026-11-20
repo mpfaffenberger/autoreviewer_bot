@@ -10,9 +10,9 @@ from tests.test_reasoning import effort
 
 
 def test_the_time_limits_default_to_the_bots_env_included() -> None:
-    """From the bot's review of #33: Settings' class defaults ignored AUTOREVIEWER_*_DEADLINE_MINUTES."""
+    """From the bot's review of #33: Settings' class defaults ignored PRISM_*_DEADLINE_MINUTES."""
     assert (arguments([], {}).soft_minutes, arguments([], {}).hard_minutes) == (30, 50)
-    env = {"AUTOREVIEWER_SOFT_DEADLINE_MINUTES": "20", "AUTOREVIEWER_HARD_DEADLINE_MINUTES": "40"}
+    env = {"PRISM_SOFT_DEADLINE_MINUTES": "20", "PRISM_HARD_DEADLINE_MINUTES": "40"}
     args = arguments([], env)
     assert (args.soft_minutes, args.hard_minutes) == (20, 40)
 
@@ -37,9 +37,9 @@ def test_the_plan_reads_the_bots_settings(monkeypatch: pytest.MonkeyPatch) -> No
     for name, value in {
         "BOODLETON_API_KEY": "k",
         "BOODLETON_BASE_URL": "http://boodleton.test/v1",
-        "AUTOREVIEWER_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}",
-        "AUTOREVIEWER_MODEL_LANES": f"{QWEN}=2,{DEEPSEEK}=3",
-        "AUTOREVIEWER_REASONING": "docs=high",
+        "PRISM_MODELS": f"security={DEEPSEEK},security.verifier={QWEN}",
+        "PRISM_MODEL_LANES": f"{QWEN}=2,{DEEPSEEK}=3",
+        "PRISM_REASONING": "docs=high",
     }.items():
         monkeypatch.setenv(name, value)
     plan = plan_from_env()

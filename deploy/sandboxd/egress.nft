@@ -6,10 +6,10 @@
 # backstop if that ever fails: public HTTPS and DNS via systemd-resolved, nothing on the LAN or host.
 
 # Idempotent reload: create-then-delete so the first load doesn't fail, then define from scratch.
-table inet autoreviewer_sandbox
-delete table inet autoreviewer_sandbox
+table inet prism_sandbox
+delete table inet prism_sandbox
 
-table inet autoreviewer_sandbox {
+table inet prism_sandbox {
 	set private4 {
 		type ipv4_addr
 		flags interval

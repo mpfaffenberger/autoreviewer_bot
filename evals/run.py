@@ -1,6 +1,6 @@
 """Run the reviewer over the seeded-bug corpus and report recall and false alarms.
 
-    set -a; . ~/.config/homelab/autoreviewer.env; set +a
+    set -a; . ~/.config/prism/prism.env; set +a
     BOODLETON_BASE_URL=http://127.0.0.1:8484/v1 uv run python -m evals.run [--only NAME ...] [--label NAME]
 
 Uses the real models through Boodleton and the reviewer code in this working tree; nothing touches
@@ -87,7 +87,7 @@ def build_repo(case: Case, parent: Path) -> tuple[GitRepo, list[int]]:
 
 
 def plan_from_env() -> ModelPlan:
-    """The bot's models, pins (AUTOREVIEWER_MODELS), lanes, and reasoning (AUTOREVIEWER_REASONING), read from the
+    """The bot's models, pins (PRISM_MODELS), lanes, and reasoning (PRISM_REASONING), read from the
     same environment, on Boodleton."""
     return ModelPlan(
         models_from(os.environ),

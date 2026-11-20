@@ -1,4 +1,4 @@
-"""`@chaos-emerald-reviewer review`: queue the push path's review of the current head, and acknowledge."""
+"""`@example-reviewer review`: queue the push path's review of the current head, and acknowledge."""
 
 from __future__ import annotations
 
