@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
+from autoreviewer.model_config import PrismConfig
 from autoreviewer.servers import COMPACT_AT, ReasoningEffort
 from autoreviewer.web.config import CONVERSATION, AgentKind, Settings, verifier_role
 
@@ -114,8 +115,7 @@ def create_app(
 
 @dataclass(frozen=True)
 class ModelPlan:
-    """Which model each agent runs on (config.models_from), built on Boodleton, each model limited to its lanes. The
-    bot and the evals both build their agents from one, so they can't drift apart."""
+    """The models, compaction targets and request limits used to build the review agents."""
 
     models: Mapping[str, str]
     base_url: str
@@ -123,6 +123,8 @@ class ModelPlan:
     lanes: Mapping[str, int]
     reasoning: Mapping[str, ReasoningEffort] = field(default_factory=dict[str, "ReasoningEffort"])
     """Role -> reasoning effort (config.reasoning_from)."""
+
+    prism: PrismConfig | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ModelPlan:
@@ -132,6 +134,7 @@ class ModelPlan:
             settings.boodleton_api_key,
             settings.model_lanes,
             settings.reasoning,
+            settings.prism,
         )
 
     def finder(self, kind: AgentKind) -> tuple[Model, int]:
@@ -147,11 +150,12 @@ class ModelPlan:
         return self._build(CONVERSATION)
 
     def _build(self, role: str) -> tuple[Model, int]:
-        """The role's model on Boodleton, with its lanes and the role's reasoning, and the history size its agent
-        compacts at (servers.COMPACT_AT)."""
+        """Resolve the role through the configured provider or the legacy Boodleton plan."""
         from autoreviewer.review.agents import boodleton_model
 
         name = self.models[role]
+        if self.prism is not None:
+            return self.prism.resolve(name)
         return boodleton_model(
             name,
             base_url=self.base_url,

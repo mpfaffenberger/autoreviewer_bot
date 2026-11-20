@@ -5,12 +5,12 @@
 <p align="center">
   <a href="pyproject.toml"><img alt="Python 3.13+" src="https://img.shields.io/badge/Python-3.13%2B-76E6BD?labelColor=112D32"></a>
   <a href="src/autoreviewer/review/agents.py"><img alt="Built on pydantic-ai-harness" src="https://img.shields.io/badge/built_on-pydantic--ai--harness-76E6BD?labelColor=112D32"></a>
-  <a href="src/autoreviewer/servers.py"><img alt="Models: Qwen and DeepSeek" src="https://img.shields.io/badge/models-Qwen_%2B_DeepSeek-DDEA76?labelColor=112D32"></a>
+  <a href="docs/providers.md"><img alt="Bring your own models" src="https://img.shields.io/badge/models-bring_your_own-DDEA76?labelColor=112D32"></a>
 </p>
 
 ## On a pull request
 
-Prism reads the diff **and the code around it**. When Qwen flags a correctness bug, DeepSeek checks whether the claim holds up in the repository before it becomes an inline finding. The models don't hold GitHub credentials; application code posts the review and sets the verdict.
+Prism reads the diff **and the code around it**. When the finder flags a correctness bug, a separate checker checks whether the claim holds up in the repository before it becomes an inline finding. The models don't hold GitHub credentials; application code posts the review and sets the verdict.
 
 | What it looks for | The question behind the comment |
 | --- | --- |
@@ -23,7 +23,7 @@ Prism reads the diff **and the code around it**. When Qwen flags a correctness b
 
 ## Talk back, in the thread
 
-Already have the App installed? Open a PR, push a commit, or comment `@chaos-emerald-reviewer review` on an existing PR. Then reply **on the finding**. A PR-opening bot can do this just like a person can.
+Already have the App installed? Open a PR, push a commit, or comment `@YOUR-APP-SLUG review` on an existing PR. Then reply **on the finding**. A PR-opening bot can do this just like a person can.
 
 > **Example author reply:** “This helper only gets normalized paths. Can you check the caller in `resolve_path`?”
 
@@ -31,7 +31,17 @@ Prism keeps the conversation with the finding. It can explain why the issue stil
 
 ## Under the hood
 
-[Review agents](src/autoreviewer/review/agents.py) run on **Qwen and DeepSeek** through Boodleton on `chaos-emerald.com`. [Durable workflows](src/autoreviewer/review/durable.py) coordinate review work across webhook deliveries. The hosted receiver lives at `review.chaos-emerald.com`.
+The [review agents](src/autoreviewer/review/agents.py) use Pydantic AI models. [Durable workflows](src/autoreviewer/review/durable.py) track review work across webhook deliveries.
+
+## Make your own reviewer
+
+From a checkout with [uv](https://docs.astral.sh/uv/) installed, run `uv run prism-config`. Enter two tool-capable models you have access to: a finder and an independent checker. Or script it:
+
+```sh
+uv run prism-config --finder openai:gpt-4o --checker openai:gpt-4o-mini --output prism.json
+```
+
+Point the receiver's `PRISM_CONFIG` at that file. Keep provider credentials in the receiver environment, not in Git or the JSON. See the [provider guide](docs/providers.md) for Codex, Copilot, Claude and custom models. Then [register and install your GitHub App](docs/github-app.md): choose your own name and hostname, connect the webhook, and try a review. No shared inference server is required.
 
 To work on Prism locally, install [uv](https://docs.astral.sh/uv/) and run these from the checkout:
 
@@ -42,4 +52,4 @@ uv run pytest
 
 The default test suite skips tests that boot real microVMs. For model-backed quality measurements, see the [eval runner and case suites](evals/).
 
-[Architecture & design notes](DESIGN.md) · [GitHub App setup](deploy/github-app/) · [Web service deployment](deploy/web/)
+[Architecture & design notes](DESIGN.md) · [GitHub App setup](docs/github-app.md) · [Web service deployment](deploy/web/)

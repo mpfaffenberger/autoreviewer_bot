@@ -3,7 +3,7 @@
 #
 #   deploy/github-app/convert.sh CODE
 #
-# Writes the secrets straight to ~/.config/homelab/ (mode 0600) and prints only non-secret fields.
+# Writes the secrets to $AUTOREVIEWER_CREDENTIAL_DIR (default ~/.config/homelab/) (mode 0600) and prints only non-secret fields.
 # The code is single-use and expires one hour after you clicked "Create GitHub App".
 set -eu
 
@@ -16,7 +16,7 @@ case $CODE in
     *[!A-Za-z0-9]*|'') echo "that doesn't look like a manifest code (expected letters and digits)" >&2; exit 2 ;;
 esac
 
-DIR="$HOME/.config/homelab"
+DIR=${AUTOREVIEWER_CREDENTIAL_DIR:-"$HOME/.config/homelab"}
 PEM="$DIR/autoreviewer-app.pem"
 ENV="$DIR/autoreviewer-app.env"
 for existing in "$PEM" "$ENV"; do

@@ -1,7 +1,7 @@
 [project]
 name = "autoreviewer"
 version = "0.1.0"
-description = "Macroscope-style GitHub PR reviewer on chaos-emerald models, built on pydantic-ai-harness."
+description = "Prism: a conversational GitHub PR reviewer built on pydantic-ai-harness."
 requires-python = ">=3.13"
 dependencies = [
     # Exact pins: the harness is 0.x and pins pydantic-ai-slim to the same release.
@@ -26,6 +26,7 @@ dependencies = [
 sandboxd = ["pydantic-ai-harness[smol]==0.68.0"]
 
 [project.scripts]
+prism-config = "autoreviewer.config_cli:main"
 autoreviewer-sandboxd = "autoreviewer.sandbox.daemon:main"
 autoreviewer-web = "autoreviewer.web.app:main"
 autoreviewer-review-pr = "autoreviewer.ondemand:main"
