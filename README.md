@@ -17,9 +17,9 @@ Prism reads the diff **and the code around it**. When the finder flags a correct
 | Correctness | Which input makes the new behavior wrong? |
 | Security | Can data or an action cross a boundary it shouldn't? |
 | DRY | Is there already a helper here that handles this exact case? |
-| Docs & tests | Which documented promise changed? Would a test notice? |
+| Docs & tests (opt-in) | Which documented promise changed? Would a test notice? |
 
-**A suggestion isn't a veto.** A verified high-priority correctness or security issue can request changes; a reuse suggestion stays advisory. An incomplete blocking review doesn't earn an approval. To enforce the verdict at merge time, make the `autoreviewer` check required in your repository rules.
+**A suggestion isn't a veto.** High-priority correctness and security findings can request changes, as can blocking typing-lint findings. Reuse suggestions stay advisory. An incomplete blocking review doesn't earn an approval. To enforce the verdict at merge time, make the `autoreviewer` check required in your repository rules.
 
 ## Talk back, in the thread
 
