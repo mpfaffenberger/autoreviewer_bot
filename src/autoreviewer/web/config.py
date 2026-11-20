@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, get_args
 
+from autoreviewer.model_config import PrismConfig
 from autoreviewer.servers import (
     CONTEXT_WINDOWS,
     DEEPSEEK,
@@ -93,6 +94,8 @@ class Settings:
     steps_dir: Path = Path("/var/lib/autoreviewer/steps")
     """Per-PR lens conversations, so a new commit continues the last review (see review/memory.py)."""
 
+    prism: PrismConfig | None = None
+
     @property
     def bot_login(self) -> str:
         return f"{self.app_slug}[bot]"
@@ -100,13 +103,20 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
         key_path = Path(env.get("AUTOREVIEWER_PRIVATE_KEY_PATH", DEFAULT_PRIVATE_KEY_PATH))
+        prism_path = env.get("PRISM_CONFIG", "").strip()
+        prism = PrismConfig.from_file(prism_path) if prism_path else None
         return cls(
+            prism=prism,
             app_id=int(env["GITHUB_APP_ID"]),
             app_slug=env["GITHUB_APP_SLUG"],
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
             private_key=key_path.read_text(),
             max_concurrent_jobs=int(env.get("AUTOREVIEWER_MAX_CONCURRENT_JOBS", cls.max_concurrent_jobs)),
-            model_lanes=model_lanes_from(env),
+            model_lanes=(
+                {spec: prism.lane_count(spec) for spec in (prism.finder, prism.checker)}
+                if prism
+                else model_lanes_from(env)
+            ),
             soft_deadline_minutes=(deadlines := deadlines_from(env))[0],
             hard_deadline_minutes=deadlines[1],
             block_at_priority=int(env.get("AUTOREVIEWER_BLOCK_AT_PRIORITY", "1")),
@@ -118,9 +128,13 @@ class Settings:
             conversations=parse_bool(env, "AUTOREVIEWER_CONVERSATIONS", default=False),
             logfire_include_content=parse_bool(env, "AUTOREVIEWER_LOGFIRE_INCLUDE_CONTENT", default=True),
             boodleton_base_url=env.get("BOODLETON_BASE_URL", cls.boodleton_base_url),
-            boodleton_api_key=env["BOODLETON_API_KEY"],
-            models=models_from(env),
-            reasoning=reasoning_from(env),
+            boodleton_api_key="" if prism else env["BOODLETON_API_KEY"],
+            models=(
+                {role: prism.finder if role in AGENT_KINDS else prism.checker for role in AGENT_ROLES}
+                if prism
+                else models_from(env)
+            ),
+            reasoning=dict(DEFAULT_REASONING) if prism else reasoning_from(env),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
             steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
