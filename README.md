@@ -1,5 +1,5 @@
-<p align="center"><img src="docs/brand/splitlight.webp" width="192" alt="Splitlight: a single beam splits through an emerald prism"></p>
-<h1 align="center">Splitlight</h1>
+<p align="center"><img src="docs/brand/prism.webp" width="192" alt="Prism: a single beam splits through an emerald prism"></p>
+<h1 align="center">Prism</h1>
 <p align="center"><strong>One model finds the bug. Another checks the claim.</strong><br>A GitHub pull request reviewer you can talk back to.</p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 
 ## On a pull request
 
-Splitlight reads the diff **and the code around it**. When Qwen flags a correctness bug, DeepSeek checks whether the claim holds up in the repository before it becomes an inline finding. The models don't hold GitHub credentials; application code posts the review and sets the verdict.
+Prism reads the diff **and the code around it**. When Qwen flags a correctness bug, DeepSeek checks whether the claim holds up in the repository before it becomes an inline finding. The models don't hold GitHub credentials; application code posts the review and sets the verdict.
 
 | What it looks for | The question behind the comment |
 | --- | --- |
@@ -27,13 +27,13 @@ Already have the App installed? Open a PR, push a commit, or comment `@chaos-eme
 
 > **Example author reply:** “This helper only gets normalized paths. Can you check the caller in `resolve_path`?”
 
-Splitlight keeps the conversation with the finding. It can explain why the issue still holds or withdraw it when the code supports the objection. A withdrawn comment can be collapsed without marking the GitHub thread resolved.
+Prism keeps the conversation with the finding. It can explain why the issue still holds or withdraw it when the code supports the objection. A withdrawn comment can be collapsed without marking the GitHub thread resolved.
 
 ## Under the hood
 
 [Review agents](src/autoreviewer/review/agents.py) run on **Qwen and DeepSeek** through Boodleton on `chaos-emerald.com`. [Durable workflows](src/autoreviewer/review/durable.py) coordinate review work across webhook deliveries. The hosted receiver lives at `review.chaos-emerald.com`.
 
-To work on Splitlight locally, install [uv](https://docs.astral.sh/uv/) and run these from the checkout:
+To work on Prism locally, install [uv](https://docs.astral.sh/uv/) and run these from the checkout:
 
 ```sh
 uv sync --locked
