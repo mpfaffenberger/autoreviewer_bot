@@ -441,12 +441,12 @@ Every request asks for at most `REPLY_TOKENS` (16,384): Qwen's server reserves `
 accepts a prompt, and 32,768 when a request doesn't say, which would cap prompts at 139k on a 168k window. Of 18,632
 Qwen replies to the bot, the longest was 13,090 tokens. `COMPACT_AT + REPLY_TOKENS <= window` is tested.
 
-The Qwen server pre-budgets each stream's full window (fp8 KV, 4.32 GiB at 224k) but only touches pages as contexts
-grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the
+The Qwen server pre-budgets each stream's full window (fp8 KV, about 3.24 GiB at 168k; 4.32 GiB at 224k until
+Nov 20) but only touches pages as contexts grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the
 engine's minimum 0.5 GiB reserve (`PARALLEL=4 CONTEXT=229376` until Nov 20); five 168k windows fit the same
 17.6 GiB (`PARALLEL=5 CONTEXT=172032` in the recipe's `.env` since). In the day before the change,
 the longest prompt was 216k (p99 136k, median 31k), so the cut rejected nothing. The thin reserve is the risk: if
-all four streams fill at once the server could run out of memory. Rollback: delete the `.env` and restart
+all five streams fill at once the server could run out of memory. Rollback: delete the `.env` and restart
 `qwen38-flash-next-tf`. Excess requests wait in
 the bot rather than in the model server's queue, where everyone else waits too. One review runs at a time
 (`AUTOREVIEWER_MAX_CONCURRENT_JOBS=1`): a review already runs three Qwen finders in parallel, and two at once left

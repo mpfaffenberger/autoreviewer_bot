@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import TieredCompaction
 
 from autoreviewer.review.workspace import Workspace
 from autoreviewer.servers import COMPACT_AT, DEEPSEEK, QWEN
@@ -72,3 +76,29 @@ def test_the_footer_names_each_pair_of_models() -> None:
     assert note == (
         f"correctness and DRY by `{QWEN}`, verified by `{DEEPSEEK}`; security by `{DEEPSEEK}`, verified by `{QWEN}`"
     )
+
+
+def compacts_at(agent: Agent[None, Any]) -> int | None:
+    """Where `agent` compacts its history: its TieredCompaction's target."""
+    capabilities = agent._root_capability.capabilities  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+    [compaction] = [c for c in capabilities if isinstance(c, TieredCompaction)]  # pyright: ignore[reportUnknownVariableType]
+    return compaction.target_tokens  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+
+@pytest.mark.anyio
+async def test_each_built_agent_compacts_where_its_model_does(workspace: Workspace) -> None:
+    """From the bot's review of #52: the agents the bot builds, not just what the plan returns. A Qwen agent
+    compacting at DeepSeek's 629k would grow past its 168k window."""
+    pinned = settings(models=models_from(PINNED), dry=True)
+    lenses = {spec.kind: spec.agents(workspace) for spec in build_lenses(pinned)}
+    lens, verifier = build_agent_factory(pinned)(workspace)
+    simplifier = build_simplifier_factory(pinned)
+    assert simplifier is not None
+    proposer = simplifier(workspace)
+    built = {
+        "security": lenses["security"], "dry": lenses["dry"], "correctness": (lens, verifier),
+        "simplify": (proposer.propose, proposer.check),
+    }  # fmt: skip
+    for kind, (finder, checker) in built.items():
+        expected = (COMPACT_AT[pinned.models[kind]], COMPACT_AT[pinned.models[f"{kind}.verifier"]])
+        assert (compacts_at(finder), compacts_at(checker)) == expected, kind

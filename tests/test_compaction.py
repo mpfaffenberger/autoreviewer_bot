@@ -8,11 +8,13 @@ from typing import Any
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai_harness.compaction import ClampOversizedMessages
 from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME
 
 from autoreviewer.review.agents import LENS_LIMITS, correctness_agent
-from autoreviewer.review.compaction import compaction_stats, max_result_tokens, same_call
+from autoreviewer.review.compaction import compaction_stats, max_result_tokens, review_compaction, same_call
 from autoreviewer.review.workspace import Workspace
+from autoreviewer.servers import COMPACT_AT, QWEN
 
 pytestmark = pytest.mark.anyio
 
@@ -112,3 +114,11 @@ async def test_a_big_tool_result_is_spilled_and_read_back_in_full(
     assert len(returns["read_file"]) < max_result_tokens(compact_at)  # in characters, so certainly in tokens
     assert "# line 700: abc" not in returns["read_file"]  # past the preview...
     assert "# line 700: abc" in returns[READ_TOOL_NAME]  # ...and still readable
+
+
+def test_qwens_bounds_are_the_ones_documented() -> None:
+    """From the bot's review of #52: the numbers DESIGN.md promises. A tool result spills over 17.5k (the 6 kept
+    results plus 2 new ones fill the 140k history), and one message part is clamped over 35k."""
+    assert max_result_tokens(COMPACT_AT[QWEN]) == 17_500
+    clamp = review_compaction(COMPACT_AT[QWEN]).tiers[0]
+    assert isinstance(clamp, ClampOversizedMessages) and clamp.max_part_tokens == 35_000
