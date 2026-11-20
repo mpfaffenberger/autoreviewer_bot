@@ -44,9 +44,26 @@ By default Prism uses `ClaudeCodeModel` from the published `pydantic-claude-code
 
 **Already using a gateway?** Set `PRISM_CLAUDE_CODE_BASE_URL` (including the API prefix, e.g. `https://gateway.example.org/v1`) and `PRISM_CLAUDE_CODE_API_KEY` to your gateway's own credentials. The gateway must accept Chat Completions with structured tool calls and must not execute tools itself. Prism does not launch `claude`, read its credentials, or start a CLAI2 session. Without either gateway variable Prism uses the subscription adapter; `anthropic:` is the separate API-billed option.
 
-### Other providers and local servers
+### Local inference
 
-For a provider outside the image's installed SDKs, install the matching Pydantic AI extra in the receiver environment (e.g. `uv add 'pydantic-ai-slim[anthropic]==2.68.0'` in your deployment checkout and rebuild the image). For an OpenAI-compatible server, use `openai-chat:<model-id>` with `OPENAI_BASE_URL` and `OPENAI_API_KEY`. For two different compatible endpoints, use separate factories with explicit URLs and credentials. Providers must support the tool calls and structured results the review agents use; resolving a model name alone cannot verify that.
+Prism talks to the OpenAI-compatible **Chat Completions** API. It doesn't start or install a model server. With vLLM, llama.cpp, SGLang, TensorFold, or another compatible engine already running:
+
+1. From the receiver's network, run `curl -fsS http://localhost:8000/v1/models` (adjust host and port). Use the returned `data[].id` strings exactly, including slashes or quantization tags. Enable the engine's tool-call parser/chat template if the model requires it: listing a model does not prove it can return tool calls or structured results.
+2. For two distinct models behind one server, use `--local-url` as in the [README](../README.md#make-your-own-reviewer). If each server loads one model, use separate URLs instead:
+
+   ```sh
+   uv run prism-config \
+     --finder local:FINDER_MODEL_ID --finder-url http://finder:8000/v1 \
+     --checker local:CHECKER_MODEL_ID --checker-url http://checker:8080/v1
+   ```
+
+3. Set `PRISM_CONFIG` to the generated JSON file **inside the receiver** and restart it. Inside a container, `localhost` is the receiver itself. Use the inference container's service name on a shared private network, or an accessible host address (e.g. `host.containers.internal` on Podman). Don't publish unauthenticated inference ports to the internet.
+
+No cloud key or Python factory is needed. If the server requires authentication, set `PRISM_LOCAL_API_KEY` in the receiver's environment, and include the bearer header when listing models. This key goes to **all** configured `local:` endpoints; only use it with servers you trust with the same credential. Use separate trusted factories for endpoints needing different keys. You can also mix a `local:` finder with a hosted checker; the hosted checker then receives repository context.
+
+### Other providers
+
+For a provider outside the image's installed SDKs, install the matching Pydantic AI extra in the receiver environment and rebuild the image. A trusted model factory can supply custom transports or credential stores.
 
 ### Set model concurrency
 
