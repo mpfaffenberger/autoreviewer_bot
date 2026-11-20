@@ -49,3 +49,21 @@ def test_prism_shares_models_but_not_conversation_effort(tmp_path: Path, monkeyp
     checker.assert_called_once_with()
     assert ModelPlan.from_settings(settings).conversation()[0] is not answer.model
     assert checker.call_count == 2
+
+
+def test_receiver_reads_migrated_paths(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            **APP_ENV,
+            "BOODLETON_API_KEY": "test",
+            "PRISM_WORK_DIR": str(tmp_path / "checkout"),
+            "PRISM_DATABASE": str(tmp_path / "jobs.sqlite"),
+            "PRISM_STEPS_DIR": str(tmp_path / "history"),
+            "PRISM_MAX_CONCURRENT_JOBS": "3",
+        }
+    )
+    assert settings.private_key == Path(__file__).read_text()
+    assert settings.work_dir == tmp_path / "checkout"
+    assert settings.database == tmp_path / "jobs.sqlite"
+    assert settings.steps_dir == tmp_path / "history"
+    assert settings.max_concurrent_jobs == 3
