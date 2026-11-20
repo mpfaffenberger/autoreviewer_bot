@@ -22,7 +22,7 @@ Set `GITHUB_COPILOT_API_KEY` in the model worker's secret environment. The nativ
 Keep endpoint overrides under operator control: `GITHUB_COPILOT_BASE_URL`, `COPILOT_API_URL` and `GITHUB_COPILOT_API_BASE` can redirect authenticated requests. For example, a deployment that wants to pin the public endpoint can install this module **in the worker image**, not the evaluated repository:
 
 ```python
-# review_site/providers.py — configure factory:review_site.providers:copilot
+# Save as review_site/providers.py. Set finder or checker to factory:review_site.providers:copilot.
 import os
 
 from pydantic_ai.models import Model
@@ -47,6 +47,15 @@ By default Prism uses `ClaudeCodeModel` from the published `pydantic-claude-code
 ### Other providers and local servers
 
 For a provider outside the image's installed SDKs, install the matching Pydantic AI extra in the receiver environment (e.g. `uv add 'pydantic-ai-slim[anthropic]==2.68.0'` in your deployment checkout and rebuild the image). For an OpenAI-compatible server, use `openai-chat:<model-id>` with `OPENAI_BASE_URL` and `OPENAI_API_KEY`. For two different compatible endpoints, use separate factories with explicit URLs and credentials. Providers must support the tool calls and structured results the review agents use; resolving a model name alone cannot verify that.
+
+### Set model concurrency
+
+Each model defaults to one concurrent request. If your providers support parallel requests, set a positive lane count for either or both models when creating the config. For example:
+
+```sh
+uv run prism-config --finder openai-codex:gpt-6.2-sol --finder-lanes 3 \
+  --checker claude-code:claude-opus-5-5 --checker-lanes 2
+```
 
 `prism.json` also accepts `lanes` (concurrent requests) and `compact_at` (history tokens), both maps keyed by the full model specification. The portable config takes precedence over the historical Boodleton model settings. Omit `PRISM_CONFIG` only to keep that existing deployment mode.
 

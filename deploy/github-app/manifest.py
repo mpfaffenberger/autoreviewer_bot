@@ -32,11 +32,10 @@ def main() -> None:
     parser.add_argument("--org", help="GitHub organization login (default: your personal account)")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of a ready-to-submit HTML form")
     args = parser.parse_args()
-    action = "https://github.com/settings/apps/new"
-    if args.org is not None:
-        if not re.fullmatch(r"[A-Za-z0-9-]+", args.org):
-            parser.error("--org must be an organization login, not a URL")
-        action = f"https://github.com/organizations/{args.org}/settings/apps/new"
+    if args.org is not None and not re.fullmatch(r"[A-Za-z0-9-]+", args.org):
+        parser.error("--org must be an organization login, not a URL")
+    owner = f"organizations/{args.org}/" if args.org is not None else ""
+    action = f"https://github.com/{owner}settings/apps/new"
     manifest = json.dumps(
         {
             "name": args.name,

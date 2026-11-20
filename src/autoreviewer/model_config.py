@@ -13,6 +13,28 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
 
+def _claude_code_model(name: str) -> Model:
+    url = os.environ.get("PRISM_CLAUDE_CODE_BASE_URL", "").strip()
+    key = os.environ.get("PRISM_CLAUDE_CODE_API_KEY", "").strip()
+    if url or key:
+        # Never send a gateway key to a default URL or inherit an unrelated OpenAI credential.
+        if not url or not key:
+            raise ValueError("claude-code requires PRISM_CLAUDE_CODE_BASE_URL and PRISM_CLAUDE_CODE_API_KEY")
+        from autoreviewer.review.agents import boodleton_model
+
+        return boodleton_model(name, base_url=url, api_key=key)
+
+    try:
+        from pydantic_ai_claude_code import ClaudeCodeModel
+    except ModuleNotFoundError as exc:
+        if exc.name != "pydantic_ai_claude_code":
+            raise
+        raise ValueError(
+            "Claude Code needs the claude-code extra: uv sync --extra claude-code (Python 3.13-3.14)"
+        ) from exc
+    return ClaudeCodeModel(name)
+
+
 class PrismConfig(BaseModel):
     """Per-model options are keyed by the full finder/checker spec, not the role."""
 
@@ -60,29 +82,8 @@ class PrismConfig(BaseModel):
             model = getattr(import_module(module), function)()
             if not isinstance(model, Model):
                 raise TypeError(f"{spec} must return a pydantic_ai Model")
-        elif spec.startswith("claude-code:") and not (
-            "PRISM_CLAUDE_CODE_BASE_URL" in os.environ or "PRISM_CLAUDE_CODE_API_KEY" in os.environ
-        ):
-            try:
-                from pydantic_ai_claude_code import ClaudeCodeModel
-            except ModuleNotFoundError as exc:
-                if exc.name != "pydantic_ai_claude_code":
-                    raise
-                raise ValueError(
-                    "Claude Code needs the claude-code extra: uv sync --extra claude-code (Python 3.13-3.14)"
-                ) from exc
-            model = ClaudeCodeModel(spec.split(":", 1)[1])
         elif spec.startswith("claude-code:"):
-            # Explicit opt-in to a model-only, operator-provisioned Chat Completions endpoint.
-            # Never launch a coding CLI or inherit an unrelated OpenAI credential.
-            from pydantic_ai.models.openai import OpenAIChatModel
-            from pydantic_ai.providers.openai import OpenAIProvider
-
-            url = os.environ.get("PRISM_CLAUDE_CODE_BASE_URL")
-            key = os.environ.get("PRISM_CLAUDE_CODE_API_KEY")
-            if not url or not key:
-                raise ValueError("claude-code requires PRISM_CLAUDE_CODE_BASE_URL and PRISM_CLAUDE_CODE_API_KEY")
-            model = OpenAIChatModel(spec.split(":", 1)[1], provider=OpenAIProvider(base_url=url, api_key=key))
+            model = _claude_code_model(spec.split(":", 1)[1])
         else:
             model = infer_model(spec)
 

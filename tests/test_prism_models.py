@@ -12,7 +12,9 @@ from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.models.test import TestModel as LocalModel
 
 from autoreviewer.model_config import PrismConfig
+from autoreviewer.review.agents import _lanes
 from autoreviewer.review.job import review_and_post
+from autoreviewer.servers import REPLY_TOKENS
 from autoreviewer.web.app import ModelPlan, build_agent_factory, models_note
 from autoreviewer.web.config import AGENT_KINDS, Settings
 from autoreviewer.web.routing import PullRequestUpdated
@@ -53,10 +55,12 @@ def test_roles_and_lane_pools(settings: Settings) -> None:
     plan = ModelPlan.from_settings(settings)
     assert plan.lanes == {FINDER: 2, CHECKER: 1}
     shared, _ = plan.conversation()
-    assert isinstance(shared, ConcurrencyLimitedModel)
+    assert isinstance(shared, ConcurrencyLimitedModel) and shared._limiter is _lanes(CHECKER, 1)
     for kind in AGENT_KINDS:
         assert settings.models[kind] == FINDER and settings.models[f"{kind}.verifier"] == CHECKER
-        assert plan.finder(kind)[1] == 8192
+        model, target = plan.finder(kind)
+        assert isinstance(model, ConcurrencyLimitedModel) and model._limiter is _lanes(FINDER, 2)
+        assert target == 8192
         model, target = plan.verifier(kind)
         assert isinstance(model, ConcurrencyLimitedModel) and model._limiter is shared._limiter
         assert target == 4096
@@ -79,7 +83,11 @@ def test_installed_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     model, target = config.resolve(config.finder)
     assert model.model_name == "gpt-4o" and model.system == "openai"
     window = model.profile.get("context_window")
-    assert window and 0 < target < window
+    assert window and target == window // 2
+    with pytest.raises(ValueError, match="insufficient room"):
+        PrismConfig(finder=config.finder, checker=CHECKER, compact_at={config.finder: target + 1}).resolve(
+            config.finder
+        )
 
 
 def small_window() -> Model:
@@ -128,21 +136,37 @@ def test_subscription_provider_resolves_offline(prefix: str, tmp_path: Path, mon
     assert model.system == prefix and model.model_name == "example-model"
 
 
+@pytest.mark.parametrize("missing", ["PRISM_CLAUDE_CODE_BASE_URL", "PRISM_CLAUDE_CODE_API_KEY"])
+@pytest.mark.parametrize("blank", [None, "  "])
+def test_partial_gateway_rejected(missing: str, blank: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRISM_CLAUDE_CODE_BASE_URL", "https://gateway.example.org/v1")
+    monkeypatch.setenv("PRISM_CLAUDE_CODE_API_KEY", "fake")
+    if blank is None:
+        monkeypatch.delenv(missing)
+    else:
+        monkeypatch.setenv(missing, blank)
+    config = PrismConfig(finder="claude-code:my-model", checker=CHECKER)
+    with pytest.raises(ValueError, match=missing):
+        config.resolve(config.finder)
+
+
 def test_claude_code_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PRISM_CLAUDE_CODE_API_KEY", raising=False)
     config = PrismConfig(finder="claude-code:my-model", checker=CHECKER)
     monkeypatch.setenv("PRISM_CLAUDE_CODE_BASE_URL", "https://gateway.example.org/v1")
-    with pytest.raises(ValueError, match="PRISM_CLAUDE_CODE_API_KEY"):
-        config.resolve(config.finder)
     monkeypatch.setenv("PRISM_CLAUDE_CODE_API_KEY", "fake")
     model, _ = config.resolve(config.finder)
     assert model.model_name == "my-model" and model.base_url == "https://gateway.example.org/v1/"
+    assert model.settings and model.settings.get("max_tokens") == REPLY_TOKENS
 
 
-def test_native_claude_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("blank", [None, "", "  "])
+def test_native_claude_model(blank: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = pytest.importorskip("pydantic_ai_claude_code")
     for key in ("PRISM_CLAUDE_CODE_BASE_URL", "PRISM_CLAUDE_CODE_API_KEY"):
-        monkeypatch.delenv(key, raising=False)
+        if blank is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, blank)
     monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS", "file")
     auth = tmp_path / "auth.json"
     auth.write_text(json.dumps({"access_token": "fake", "refresh_token": "fake"}))

@@ -129,7 +129,7 @@ async def review_pr(
 
 def run(argv: list[str] | None = None) -> int:
     from autoreviewer import logs, telemetry
-    from autoreviewer.web.app import build_agent_factory, build_lenses, build_simplifier_factory
+    from autoreviewer.web.app import ModelPlan, build_lenses, correctness_agents, simplifier_agents
     from autoreviewer.web.config import Settings
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -147,15 +147,16 @@ def run(argv: list[str] | None = None) -> int:
         logs.configure(to_logfire=True)
         settings.work_dir.mkdir(parents=True, exist_ok=True)
         token = os.environ.get("GITHUB_TOKEN") or None  # optional: private repos, higher API rate limit
+        plan = ModelPlan.from_settings(settings)
         review = review_pr(
             ref,
             reader=PublicGitHub(token),
             source=PublicSource(token),
-            agents=build_agent_factory(settings),
+            agents=correctness_agents(plan),
             work_dir=settings.work_dir,
             block_at=settings.block_at_priority,
-            simplifier=build_simplifier_factory(settings),
-            lenses=build_lenses(settings),
+            simplifier=simplifier_agents(plan) if settings.simplify else None,
+            lenses=build_lenses(settings, plan),
             deadline=Deadline(settings.soft_deadline_minutes * 60),
         )
         report = asyncio.run(asyncio.wait_for(review, settings.hard_deadline_minutes * 60))

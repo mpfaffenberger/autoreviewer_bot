@@ -125,6 +125,7 @@ class ModelPlan:
     """Role -> reasoning effort (config.reasoning_from)."""
 
     prism: PrismConfig | None = None
+    _resolved: dict[str, tuple[Model, int]] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ModelPlan:
@@ -155,7 +156,9 @@ class ModelPlan:
 
         name = self.models[role]
         if self.prism is not None:
-            return self.prism.resolve(name)
+            if name not in self._resolved:
+                self._resolved[name] = self.prism.resolve(name)
+            return self._resolved[name]
         return boodleton_model(
             name,
             base_url=self.base_url,
@@ -196,9 +199,9 @@ def enabled_lenses(settings: Settings) -> list[LensKind]:
     return [kind for kind in LENS_NAMES if getattr(settings, kind)]
 
 
-def build_lenses(settings: Settings) -> tuple[Lens, ...]:
+def build_lenses(settings: Settings, plan: ModelPlan | None = None) -> tuple[Lens, ...]:
     """The enabled lenses beside correctness, each on its own models (Settings.models)."""
-    plan = ModelPlan.from_settings(settings)
+    plan = plan or ModelPlan.from_settings(settings)
     return tuple(lens(kind, lens_agents(plan, kind)) for kind in enabled_lenses(settings))
 
 
@@ -273,13 +276,13 @@ def thread_reply_handler(settings: Settings) -> ReplyHandler | None:
     return durable.enqueue_answer if settings.conversations else None
 
 
-def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps:
+def conversation_deps(settings: Settings, github: GitHubApp, plan: ModelPlan | None = None) -> ConversationDeps:
     """Answers on the conversation role's model, over a fresh checkout of the PR's head."""
     from autoreviewer.review.agents import checker_agent, conversation_agent
     from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.workspace import GitHubSource
 
-    plan = ModelPlan.from_settings(settings)
+    plan = plan or ModelPlan.from_settings(settings)
     model, compact_at = plan.conversation()
 
     def checker(workspace: Workspace, kind: str) -> Agent[None, Verification]:
@@ -291,7 +294,9 @@ def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps
     return ConversationDeps(
         github=github,
         source=GitHubSource(github),
-        agents=lambda workspace: conversation_agent(model, workspace, compact_at=compact_at),
+        agents=lambda workspace: conversation_agent(
+            model, workspace, compact_at=compact_at, thinking=plan.reasoning.get(CONVERSATION) if plan.prism else None
+        ),
         checkers=checker,
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
@@ -322,18 +327,19 @@ def main() -> None:
 
     github = GitHubApp.from_key(settings.app_id, settings.private_key)
     memory = ReviewMemory(settings.steps_dir)
+    plan = ModelPlan.from_settings(settings)
     deps = ReviewDeps(
         github=github,
         source=GitHubSource(github),
-        agents=build_agent_factory(settings),
+        agents=correctness_agents(plan),
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
         lens_version=lens_version(settings.models["correctness"], settings.reasoning.get("correctness")),
         block_at=settings.block_at_priority,
-        simplifier=build_simplifier_factory(settings),
-        lenses=build_lenses(settings),
+        simplifier=simplifier_agents(plan) if settings.simplify else None,
+        lenses=build_lenses(settings, plan),
         soft_deadline_s=settings.soft_deadline_minutes * 60,
         hard_deadline_s=settings.hard_deadline_minutes * 60,
     )
@@ -342,7 +348,7 @@ def main() -> None:
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # Also recovers interrupted reviews and answers.
-        await durable.launch(deps, conversation_deps(settings, github), concurrency=settings.max_concurrent_jobs)
+        await durable.launch(deps, conversation_deps(settings, github, plan), concurrency=settings.max_concurrent_jobs)
         try:
             yield
         finally:

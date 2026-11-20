@@ -15,6 +15,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness import DetectLoops, FileSystem
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
@@ -91,13 +92,20 @@ def _read_only_repo(root: Path) -> list[LocalWorkspace[None] | FileSystem[None]]
 
 
 def _agent[OutputT](
-    model: Model, workspace: Workspace, output_type: type[OutputT], instructions: str, compact_at: int
+    model: Model,
+    workspace: Workspace,
+    output_type: type[OutputT],
+    instructions: str,
+    compact_at: int,
+    *,
+    model_settings: ModelSettings | None = None,
 ) -> Agent[None, OutputT]:
     return Agent(
         model,
         deps_type=type(None),
         output_type=output_type,
         instructions=instructions,
+        model_settings=model_settings,
         # DetectLoops nudges a model repeating identical calls, alternating between two, or repeating itself.
         capabilities=[
             *_read_only_repo(workspace.root),
@@ -237,10 +245,21 @@ CONVERSATION_LIMITS = UsageLimits(request_limit=60)
 
 
 def conversation_agent(
-    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[DEEPSEEK]
+    model: Model,
+    workspace: Workspace,
+    *,
+    compact_at: int = COMPACT_AT[DEEPSEEK],
+    thinking: ReasoningEffort | None = None,
 ) -> Agent[None, ThreadAnswer]:
     """Answers a reply under one of the bot's findings, re-checking the code it's about (see conversation.py)."""
-    return _agent(model, workspace, ThreadAnswer, _prompt("conversation.md"), compact_at)
+    return _agent(
+        model,
+        workspace,
+        ThreadAnswer,
+        _prompt("conversation.md"),
+        compact_at,
+        model_settings=ModelSettings(thinking=thinking) if thinking else None,
+    )
 
 
 def _prompt(name: str) -> str:

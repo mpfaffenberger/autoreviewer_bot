@@ -103,7 +103,8 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
         key_path = Path(env.get("AUTOREVIEWER_PRIVATE_KEY_PATH", DEFAULT_PRIVATE_KEY_PATH))
-        prism = PrismConfig.from_file(env["PRISM_CONFIG"]) if "PRISM_CONFIG" in env else None
+        prism_path = env.get("PRISM_CONFIG", "").strip()
+        prism = PrismConfig.from_file(prism_path) if prism_path else None
         return cls(
             prism=prism,
             app_id=int(env["GITHUB_APP_ID"]),
@@ -133,7 +134,7 @@ class Settings:
                 if prism
                 else models_from(env)
             ),
-            reasoning={} if prism else reasoning_from(env),
+            reasoning=dict(DEFAULT_REASONING) if prism else reasoning_from(env),
             work_dir=Path(env.get("AUTOREVIEWER_WORK_DIR", str(cls.work_dir))),
             database=Path(env.get("AUTOREVIEWER_DATABASE", str(cls.database))),
             steps_dir=Path(env.get("AUTOREVIEWER_STEPS_DIR", str(cls.steps_dir))),
