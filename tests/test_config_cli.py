@@ -47,3 +47,70 @@ def test_invalid_config_not_created(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="2"):
         main(["--output", str(config), "--finder", "invalid", "--checker", "openai:other"])
     assert not config.exists()
+
+
+SHARED = "http://localhost:8000/v1"
+OTHER = "http://localhost:9000/v1"
+
+
+@pytest.mark.parametrize(
+    ("finder", "checker", "flags", "expected"),
+    [
+        ("local:a", "openai:b", ["--local-url", SHARED], {"local:a": SHARED}),
+        ("openai:a", "local:b", ["--local-url", SHARED], {"local:b": SHARED}),
+        ("local:a", "local:b", ["--local-url", SHARED], {"local:a": SHARED, "local:b": SHARED}),
+        ("local:a", "local:b", ["--finder-url", OTHER, "--local-url", SHARED], {"local:a": OTHER, "local:b": SHARED}),
+        ("local:a", "local:b", ["--local-url", SHARED, "--checker-url", OTHER], {"local:a": SHARED, "local:b": OTHER}),
+        ("local:a", "local:b", ["--finder-url", OTHER, "--checker-url", SHARED], {"local:a": OTHER, "local:b": SHARED}),
+    ],
+)
+def test_endpoint_flags(tmp_path: Path, finder: str, checker: str, flags: list[str], expected: dict[str, str]) -> None:
+    config = tmp_path / "config.json"
+    main(["--output", str(config), "--finder", finder, "--checker", checker, *flags])
+    assert PrismConfig.from_file(config).endpoints == expected
+
+
+@pytest.mark.parametrize(
+    ("finder", "checker", "flags", "unused"),
+    [
+        ("openai:a", "openai:b", ["--local-url", SHARED], "--local-url"),
+        ("openai:local:a", "local:b", ["--finder-url", OTHER, "--local-url", SHARED], "--finder-url"),
+        ("local:a", "openai:b", ["--checker-url", OTHER, "--local-url", SHARED], "--checker-url"),
+        ("local:a", "openai:b", ["--finder-url", OTHER, "--local-url", SHARED], "--local-url"),
+    ],
+)
+def test_unused_url_not_written(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], finder: str, checker: str, flags: list[str], unused: str
+) -> None:
+    config = tmp_path / "config.json"
+    with pytest.raises(SystemExit, match="2"):
+        main(["--output", str(config), "--finder", finder, "--checker", checker, *flags])
+    assert f"error: {unused}" in capsys.readouterr().err
+    assert not config.exists()
+
+
+@pytest.mark.parametrize("flags", [[], ["--finder-url", SHARED], ["--checker-url", OTHER]])
+def test_missing_endpoint_not_written(tmp_path: Path, flags: list[str]) -> None:
+    config = tmp_path / "config.json"
+    with pytest.raises(SystemExit, match="2"):
+        main(["--output", str(config), "--finder", "local:a", "--checker", "local:b", *flags])
+    assert not config.exists()
+
+
+def test_cli_local_context(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    main(
+        [
+            "--output",
+            str(path),
+            "--finder",
+            "local:one",
+            "--checker",
+            "openai:two",
+            "--local-url",
+            SHARED,
+            "--local-context",
+            "32768",
+        ]
+    )
+    assert PrismConfig.from_file(path).local_context == {"local:one": 32768}

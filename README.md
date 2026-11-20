@@ -37,11 +37,22 @@ The [review agents](src/autoreviewer/review/agents.py) use Pydantic AI models. [
 
 ## Make your own reviewer
 
+**Bring your own models.** Any [Pydantic AI model](https://ai.pydantic.dev/models/) that supports tool calls and structured output can be a Prism reviewer. Codex and Claude are examples, not a whitelist.
+
 From a checkout with [uv](https://docs.astral.sh/uv/) installed, run `uv run prism-config`. Enter two tool-capable models you have access to: a finder and an independent checker. Or script it:
 
 ```sh
 uv run prism-config --finder openai-codex:gpt-6.2-sol --checker claude-code:claude-opus-5-5 --output prism.json
 ```
+
+**Already serving models locally?** vLLM, llama.cpp (`llama-server`), SGLang, TensorFold, and other OpenAI-compatible Chat Completions servers use the same setup. Replace the two IDs with distinct models from your server's `/v1/models` list:
+
+```sh
+uv run prism-config --local-url http://localhost:8000/v1 \
+  --finder local:FINDER_MODEL_ID --checker local:CHECKER_MODEL_ID
+```
+
+Pass `--local-context N` to use your server’s configured token window instead of the conservative 4096-token compaction trigger. Use an address reachable **from the receiver**. For separate servers, container networking, or an authenticated endpoint, see [Local inference](docs/providers.md#local-inference).
 
 Point the receiver's `PRISM_CONFIG` at that file. Keep provider credentials in the receiver environment, not in Git or the JSON. See the [provider guide](docs/providers.md) for Codex, Copilot, Claude and custom models. Then [register and install your GitHub App](docs/github-app.md): choose your own name and hostname, connect the webhook, and try a review. No shared inference server is required.
 
