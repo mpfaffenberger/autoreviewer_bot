@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
-from autoreviewer.servers import CONTEXT_WINDOWS, ReasoningEffort
+from autoreviewer.servers import COMPACT_AT, ReasoningEffort
 from autoreviewer.web.config import CONVERSATION, AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
@@ -135,19 +135,20 @@ class ModelPlan:
         )
 
     def finder(self, kind: AgentKind) -> tuple[Model, int]:
-        """The model and its context window for `kind`'s finder (a lens, or the simplifier's proposer)."""
+        """The model for `kind`'s finder (a lens, or the simplifier's proposer), and where it compacts."""
         return self._build(kind)
 
     def verifier(self, kind: AgentKind) -> tuple[Model, int]:
-        """The model and its context window for the agent that checks `kind`'s findings."""
+        """The model for the agent that checks `kind`'s findings, and where it compacts."""
         return self._build(verifier_role(kind))
 
     def conversation(self) -> tuple[Model, int]:
-        """The model and its context window for answering replies under the bot's findings."""
+        """The model for answering replies under the bot's findings, and where it compacts."""
         return self._build(CONVERSATION)
 
     def _build(self, role: str) -> tuple[Model, int]:
-        """The role's model on Boodleton, with its lanes and the role's reasoning, and its context window."""
+        """The role's model on Boodleton, with its lanes and the role's reasoning, and the history size its agent
+        compacts at (servers.COMPACT_AT)."""
         from autoreviewer.review.agents import boodleton_model
 
         name = self.models[role]
@@ -157,7 +158,7 @@ class ModelPlan:
             api_key=self.api_key,
             lanes=self.lanes.get(name),
             reasoning=self.reasoning.get(role),
-        ), CONTEXT_WINDOWS[name]
+        ), COMPACT_AT[name]
 
 
 def build_agent_factory(settings: Settings) -> AgentFactory:
@@ -168,11 +169,11 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
 def correctness_agents(plan: ModelPlan) -> AgentFactory:
     from autoreviewer.review.agents import correctness_agent, verifier_agent
 
-    lens_model, lens_window = plan.finder("correctness")
-    verifier_model, verifier_window = plan.verifier("correctness")
+    lens_model, lens_compact_at = plan.finder("correctness")
+    verifier_model, verifier_compact_at = plan.verifier("correctness")
     return lambda workspace: (
-        correctness_agent(lens_model, workspace, context_window=lens_window),
-        verifier_agent(verifier_model, workspace, context_window=verifier_window),
+        correctness_agent(lens_model, workspace, compact_at=lens_compact_at),
+        verifier_agent(verifier_model, workspace, compact_at=verifier_compact_at),
     )
 
 
@@ -201,10 +202,15 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
     """(lens, verifier) for `kind` over a checkout, on the plan's models for it: shared by the bot and the evals."""
     from autoreviewer.review.agents import lens_pair
 
-    lens_model, lens_window = plan.finder(kind)
-    verifier_model, verifier_window = plan.verifier(kind)
+    lens_model, lens_compact_at = plan.finder(kind)
+    verifier_model, verifier_compact_at = plan.verifier(kind)
     return lambda workspace: lens_pair(
-        kind, lens_model, verifier_model, workspace, lens_window=lens_window, verifier_window=verifier_window
+        kind,
+        lens_model,
+        verifier_model,
+        workspace,
+        lens_compact_at=lens_compact_at,
+        verifier_compact_at=verifier_compact_at,
     )
 
 
@@ -230,11 +236,11 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
     from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
     from autoreviewer.review.simplify import Simplifier
 
-    propose_model, propose_window = plan.finder("simplify")
-    check_model, check_window = plan.verifier("simplify")
+    propose_model, propose_compact_at = plan.finder("simplify")
+    check_model, check_compact_at = plan.verifier("simplify")
     return lambda workspace: Simplifier(
-        simplify_agent(propose_model, workspace, context_window=propose_window),
-        simplify_checker_agent(check_model, workspace, context_window=check_window),
+        simplify_agent(propose_model, workspace, compact_at=propose_compact_at),
+        simplify_checker_agent(check_model, workspace, compact_at=check_compact_at),
     )
 
 
@@ -270,18 +276,18 @@ def conversation_deps(settings: Settings, github: GitHubApp) -> ConversationDeps
     from autoreviewer.review.workspace import GitHubSource
 
     plan = ModelPlan.from_settings(settings)
-    model, window = plan.conversation()
+    model, compact_at = plan.conversation()
 
     def checker(workspace: Workspace, kind: str) -> Agent[None, Verification]:
         """The finding's own kind of checker; only kinds that can block are re-checked (security, correctness)."""
         checked: Literal["correctness", "security"] = "security" if kind == "security" else "correctness"
-        checker_model, checker_window = plan.verifier(checked)
-        return checker_agent(checked, checker_model, workspace, context_window=checker_window)
+        checker_model, checker_compact_at = plan.verifier(checked)
+        return checker_agent(checked, checker_model, workspace, compact_at=checker_compact_at)
 
     return ConversationDeps(
         github=github,
         source=GitHubSource(github),
-        agents=lambda workspace: conversation_agent(model, workspace, context_window=window),
+        agents=lambda workspace: conversation_agent(model, workspace, compact_at=compact_at),
         checkers=checker,
         work_dir=settings.work_dir,
         bot_login=settings.bot_login,

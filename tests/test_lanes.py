@@ -9,8 +9,8 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from autoreviewer.review.agents import _lanes, with_lanes  # pyright: ignore[reportPrivateUsage]
-from autoreviewer.servers import DEEPSEEK, QWEN
+from autoreviewer.review.agents import _lanes, boodleton_model, with_lanes  # pyright: ignore[reportPrivateUsage]
+from autoreviewer.servers import COMPACT_AT, CONTEXT_WINDOWS, DEEPSEEK, QWEN, REPLY_TOKENS, ReasoningEffort
 from autoreviewer.web.app import ModelPlan
 from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
 
@@ -41,7 +41,7 @@ def test_lanes_parse_strictly() -> None:
 
 
 def test_the_defaults_match_the_model_servers() -> None:
-    assert DEFAULT_MODEL_LANES == {QWEN: 4, DEEPSEEK: 4}
+    assert DEFAULT_MODEL_LANES == {QWEN: 5, DEEPSEEK: 4}
 
 
 @pytest.mark.parametrize("value", [None, "", "  "])
@@ -61,3 +61,20 @@ def test_every_planned_agent_waits_in_its_models_lanes() -> None:
         for role, (model, _) in ((kind, plan.finder(kind)), (f"{kind}.verifier", plan.verifier(kind))):
             name = plan.models[role]
             assert model._limiter is _lanes(name, DEFAULT_MODEL_LANES[name]), role  # type: ignore[attr-defined]
+
+
+def test_every_prompt_leaves_room_for_the_longest_reply() -> None:
+    """Qwen's server refuses a prompt plus max_tokens over its window (Nov 19: a 262,755-token prompt lost #41's
+    review). Compacting at COMPACT_AT and asking for REPLY_TOKENS always fits, for every model."""
+    for model, window in CONTEXT_WINDOWS.items():
+        assert COMPACT_AT[model] + REPLY_TOKENS <= window, model
+
+
+@pytest.mark.parametrize("reasoning", [None, "high"])
+def test_every_request_says_how_long_its_reply_may_be(reasoning: ReasoningEffort | None) -> None:
+    """Otherwise Qwen's server reserves its default, 32,768, and refuses prompts past window minus that."""
+    model = boodleton_model(QWEN, base_url="http://boodleton.invalid/v1", api_key="k", reasoning=reasoning)
+    assert model.settings == {
+        "max_tokens": REPLY_TOKENS,
+        **({"openai_reasoning_effort": reasoning} if reasoning else {}),
+    }

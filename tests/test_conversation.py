@@ -114,7 +114,7 @@ def deps(
         github=github,
         source=LocalSource(repo),
         agents=lambda ws: conversation_agent(model, ws),
-        checkers=lambda ws, kind: checker_agent("correctness", check, ws, context_window=100_000),
+        checkers=lambda ws, kind: checker_agent("correctness", check, ws, compact_at=100_000),
         work_dir=tmp_path,
         bot_login=BOT,
         block_at=1,

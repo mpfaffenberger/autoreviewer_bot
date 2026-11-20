@@ -274,7 +274,7 @@ failure is logged, the lens counts as having found nothing, and the others finis
 its advice. A failed blocking lens makes the review partial (above), and the review says which one failed.
 
 **Tool results are bounded where they're produced** (`compaction.tool_output_limits`). The compaction tiers
-never shrink the newest results, so one over `window × 0.6 / 8` is spilled: the history keeps a preview and a
+never shrink the newest results, so one over `COMPACT_AT / 8` (17.5k on Qwen) is spilled: the history keeps a preview and a
 handle, and the reviewer pages through the rest with `read_tool_result`.
 
 ### Measuring it
@@ -431,15 +431,22 @@ the model names in reviewer config. Prefer the allowlist.
 ---
 
 
-**Lanes (measured 2026-11-18).** Qwen's server runs 4 streams of 224k tokens (`max_batch_size` 4); DeepSeek's has
+**Lanes (measured 2026-11-18, widened Nov 20).** Qwen's server runs 5 streams of 168k tokens; DeepSeek's has
 more but is shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
-`ConcurrencyLimitedModel`): `AUTOREVIEWER_MODEL_LANES`, default Qwen 4 and DeepSeek 4 (`servers.py`).
+`ConcurrencyLimitedModel`): `AUTOREVIEWER_MODEL_LANES`, default Qwen 5 and DeepSeek 4 (`servers.py`).
 
-The Qwen server pre-budgets each stream's full window (fp8 KV, 4.32 GiB at 224k) but only touches pages as contexts
-grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the
-engine's minimum 0.5 GiB reserve (`PARALLEL=4 CONTEXT=229376` in the recipe's `.env`). In the day before the change,
+**Compaction points and reply room (Nov 20).** An agent compacts its history above `servers.COMPACT_AT`: 140k on
+Qwen (Mike's call, higher than the old 60% of the window, so reviewers compact less), 60% of DeepSeek's 1M window.
+Every request asks for at most `REPLY_TOKENS` (16,384): Qwen's server reserves `max_tokens` in the window before it
+accepts a prompt, and 32,768 when a request doesn't say, which would cap prompts at 139k on a 168k window. Of 18,632
+Qwen replies to the bot, the longest was 13,090 tokens. `COMPACT_AT + REPLY_TOKENS <= window` is tested.
+
+The Qwen server pre-budgets each stream's full window (fp8 KV, about 3.24 GiB at 168k; 4.32 GiB at 224k until
+Nov 20) but only touches pages as contexts grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the
+engine's minimum 0.5 GiB reserve (`PARALLEL=4 CONTEXT=229376` until Nov 20); five 168k windows fit the same
+17.6 GiB (`PARALLEL=5 CONTEXT=172032` in the recipe's `.env` since). In the day before the change,
 the longest prompt was 216k (p99 136k, median 31k), so the cut rejected nothing. The thin reserve is the risk: if
-all four streams fill at once the server could run out of memory. Rollback: delete the `.env` and restart
+all five streams fill at once the server could run out of memory. Rollback: delete the `.env` and restart
 `qwen38-flash-next-tf`. Excess requests wait in
 the bot rather than in the model server's queue, where everyone else waits too. One review runs at a time
 (`AUTOREVIEWER_MAX_CONCURRENT_JOBS=1`): a review already runs three Qwen finders in parallel, and two at once left

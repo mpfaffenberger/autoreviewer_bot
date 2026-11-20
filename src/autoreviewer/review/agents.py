@@ -31,7 +31,7 @@ from autoreviewer.review.schemas import (
     Verification,
 )
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import DEEPSEEK_CONTEXT_WINDOW, QWEN_CONTEXT_WINDOW, ReasoningEffort
+from autoreviewer.servers import COMPACT_AT, DEEPSEEK, QWEN, REPLY_TOKENS, ReasoningEffort
 
 PROMPTS = Path(__file__).parent / "prompts"
 PSTACK = PROMPTS / "vendor" / "pstack"
@@ -65,8 +65,11 @@ def boodleton_model(
     name: str, *, base_url: str, api_key: str, lanes: int | None = None, reasoning: ReasoningEffort | None = None
 ) -> Model:
     """A model on Boodleton; with `lanes`, at most that many requests to it at once across this process (shared by
-    every model object for `name`); with `reasoning`, every request asks for that reasoning effort."""
-    settings = OpenAIChatModelSettings(openai_reasoning_effort=reasoning) if reasoning else None
+    every model object for `name`); with `reasoning`, every request asks for that reasoning effort. Every reply is
+    capped at REPLY_TOKENS, which the server keeps room for."""
+    settings = OpenAIChatModelSettings(max_tokens=REPLY_TOKENS)
+    if reasoning:
+        settings["openai_reasoning_effort"] = reasoning
     model = OpenAIChatModel(name, provider=OpenAIProvider(base_url=base_url, api_key=api_key), settings=settings)
     return model if lanes is None else with_lanes(model, name, lanes)
 
@@ -88,7 +91,7 @@ def _read_only_repo(root: Path) -> list[LocalWorkspace[None] | FileSystem[None]]
 
 
 def _agent[OutputT](
-    model: Model, workspace: Workspace, output_type: type[OutputT], instructions: str, context_window: int
+    model: Model, workspace: Workspace, output_type: type[OutputT], instructions: str, compact_at: int
 ) -> Agent[None, OutputT]:
     return Agent(
         model,
@@ -98,8 +101,8 @@ def _agent[OutputT](
         # DetectLoops nudges a model repeating identical calls, alternating between two, or repeating itself.
         capabilities=[
             *_read_only_repo(workspace.root),
-            tool_output_limits(context_window),
-            review_compaction(context_window),
+            tool_output_limits(compact_at),
+            review_compaction(compact_at),
             DetectLoops(),
         ],
         toolsets=[git_tools(workspace)],
@@ -143,15 +146,15 @@ def lens_version(model_name: str, reasoning: ReasoningEffort | None = None) -> s
 
 
 def correctness_agent(
-    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
+    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[QWEN]
 ) -> Agent[None, LensReport]:
-    return _agent(model, workspace, LensReport, _prompt("correctness.md"), context_window)
+    return _agent(model, workspace, LensReport, _prompt("correctness.md"), compact_at)
 
 
 def verifier_agent(
-    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[DEEPSEEK]
 ) -> Agent[None, Verification]:
-    return checker_agent("correctness", model, workspace, context_window=context_window)
+    return checker_agent("correctness", model, workspace, compact_at=compact_at)
 
 
 LENS_PROMPTS: dict[LensKind, tuple[str, str]] = {
@@ -173,22 +176,24 @@ def lens_pair(
     verifier_model: Model,
     workspace: Workspace,
     *,
-    lens_window: int = QWEN_CONTEXT_WINDOW,
-    verifier_window: int = DEEPSEEK_CONTEXT_WINDOW,
+    lens_compact_at: int = COMPACT_AT[QWEN],
+    verifier_compact_at: int = COMPACT_AT[DEEPSEEK],
 ) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
     """(lens, verifier) for one extra lens. The security lens also wants `security_references` as run
     instructions."""
-    lens = _agent(lens_model, workspace, LensReport, _prompt(LENS_PROMPTS[kind][0]) + _references(kind), lens_window)
-    return lens, checker_agent(kind, verifier_model, workspace, context_window=verifier_window)
+    lens = _agent(
+        lens_model, workspace, LensReport, _prompt(LENS_PROMPTS[kind][0]) + _references(kind), lens_compact_at
+    )
+    return lens, checker_agent(kind, verifier_model, workspace, compact_at=verifier_compact_at)
 
 
 def checker_agent(
-    kind: Literal["correctness"] | LensKind, model: Model, workspace: Workspace, *, context_window: int
+    kind: Literal["correctness"] | LensKind, model: Model, workspace: Workspace, *, compact_at: int
 ) -> Agent[None, Verification]:
     """The agent that checks one reported finding of `kind` against the code: the verifier a lens's findings go
     through, and the blind re-check a withdrawal needs (conversation.py)."""
     prompt = "verifier.md" if kind == "correctness" else LENS_PROMPTS[kind][1]
-    return _agent(model, workspace, Verification, _prompt(prompt) + _references(kind), context_window)
+    return _agent(model, workspace, Verification, _prompt(prompt) + _references(kind), compact_at)
 
 
 def _references(kind: str) -> str:
@@ -215,16 +220,16 @@ def security_references(paths: Iterable[str]) -> str:
 
 
 def simplify_agent(
-    model: Model, workspace: Workspace, *, context_window: int = QWEN_CONTEXT_WINDOW
+    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[QWEN]
 ) -> Agent[None, SimplifyReport]:
     principles = "\n\n".join(_body(path.read_text()) for path in sorted(PSTACK.glob("principle-*.md")))
-    return _agent(model, workspace, SimplifyReport, f"{_prompt('simplify.md')}\n{principles}", context_window)
+    return _agent(model, workspace, SimplifyReport, f"{_prompt('simplify.md')}\n{principles}", compact_at)
 
 
 def simplify_checker_agent(
-    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[DEEPSEEK]
 ) -> Agent[None, SimplifyVerdict]:
-    return _agent(model, workspace, SimplifyVerdict, _prompt("simplify_checker.md"), context_window)
+    return _agent(model, workspace, SimplifyVerdict, _prompt("simplify_checker.md"), compact_at)
 
 
 CONVERSATION_LIMITS = UsageLimits(request_limit=60)
@@ -232,10 +237,10 @@ CONVERSATION_LIMITS = UsageLimits(request_limit=60)
 
 
 def conversation_agent(
-    model: Model, workspace: Workspace, *, context_window: int = DEEPSEEK_CONTEXT_WINDOW
+    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[DEEPSEEK]
 ) -> Agent[None, ThreadAnswer]:
     """Answers a reply under one of the bot's findings, re-checking the code it's about (see conversation.py)."""
-    return _agent(model, workspace, ThreadAnswer, _prompt("conversation.md"), context_window)
+    return _agent(model, workspace, ThreadAnswer, _prompt("conversation.md"), compact_at)
 
 
 def _prompt(name: str) -> str:
