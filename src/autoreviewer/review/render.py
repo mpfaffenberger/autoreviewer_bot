@@ -75,15 +75,19 @@ def review_body(outcome: Outcome, *, footer: str) -> str:
         if outcome.cut_short
         else ""
     )
+    standing = (
+        "**Still blocked:** a blocking finding from an earlier review of this commit stands. The code hasn't "
+        "changed, so this review can't approve over it. Reply in its thread to contest it, or push a fix.\n\n"
+        if outcome.standing
+        else ""
+    )
     if not posted:
-        return (
-            f"{cut_short}No issues found in the part reviewed.\n\n{footer}"
-            if cut_short
-            else f"No issues found.\n\n{footer}"
-        )
+        found = "No new issues found" if standing else "No issues found"
+        where = " in the part reviewed" if cut_short else ""
+        return f"{cut_short}{standing}{found}{where}.\n\n{footer}"
     blocking = [f for f in posted if outcome.is_blocking(f)]
     advisory = [f for f in posted if not outcome.is_blocking(f)]
-    lines = [cut_short.rstrip()] if cut_short else []
+    lines = [note.rstrip() for note in (cut_short, standing) if note]
     if blocking:
         lines.append(f"Found {_count(blocking)} to fix before merging.")
     simplify = [f for f in advisory if f.kind == "simplify"]

@@ -28,7 +28,7 @@ from autoreviewer.github import (
     Repo,
     ReviewEvent,
 )
-from autoreviewer.review.deadline import Deadline
+from autoreviewer.review.deadline import DEFAULT_SOFT_S, MAX_REVIEW_S, Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LINT_KINDS, MAX_LINT_FINDINGS, LintError, lint_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
@@ -52,7 +52,6 @@ from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 logger = logging.getLogger("autoreviewer.job")
 
-MAX_REVIEW_S = 600.0
 SUPERSEDED_CHECK_S = 60.0
 """How often a running review checks whether its PR moved on (a newer push, or closed)."""
 PROGRESS_INTERVAL_S = 30.0
@@ -143,7 +142,7 @@ class ReviewDeps:
     """Optional one-click simplifications (see simplify.py); None skips them."""
     lenses: tuple[Lens, ...] = ()
     """Extra lenses (security, DRY) beside correctness."""
-    soft_deadline_s: float = 9 * 60
+    soft_deadline_s: float = DEFAULT_SOFT_S
     """After this, every lens wraps up with what it has (see deadline.py)."""
     hard_deadline_s: float = MAX_REVIEW_S
     """After this, the review is cancelled: no verdict (findings already posted stay)."""
@@ -182,8 +181,7 @@ async def _published_result(deps: ReviewDeps, pull: PullRequestUpdated, check_id
     bodies = await deps.github.review_bodies(
         repo_of(pull), pull.number, commit_sha=pull.head_sha, author=deps.bot_login
     )
-    event = published_event(bodies, check_id)
-    return _recovered_result(event) if event else None
+    return _recovered_result(event) if (event := published_event(bodies, check_id)) else None
 
 
 def _recovered_result(event: ReviewEvent) -> CheckResult:
@@ -566,6 +564,8 @@ async def _review(
     # A finding withdrawn in conversation and found again on unchanged code doesn't block (the verdict and the
     # check below both count with it).
     result.outcome.withdrawn = await publisher.withdrawn()
+    # Asking again without pushing gets a fresh attempt, but never a way around a finding that still stands.
+    result.outcome.standing = await publisher.standing()
     # A lens that failed after posting: its comments are on the PR, so the verdict counts them (#43's review).
     result.outcome.absorb(Outcome(inline=[f for f in publisher.findings if f not in result.outcome.posted]))
     previous = await post_review(
@@ -650,6 +650,12 @@ def _summary(outcome: Outcome) -> CheckResult:
     if blocking:
         return CheckResult(
             f"{len(blocking)} blocking issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
+        )
+    if outcome.standing:
+        return CheckResult(
+            "Earlier blocking finding stands",
+            f"Changes requested: a blocking finding from an earlier review of this commit still stands.{notes}",
+            "failure",
         )
     if outcome.cut_short:
         return CheckResult(

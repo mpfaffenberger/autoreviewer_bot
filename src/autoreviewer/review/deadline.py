@@ -2,7 +2,7 @@
 
 On its next step, a lens with five minutes left is asked to focus. With one minute left it loses
 its function tools and must return its final report. Both windows shrink proportionally for soft
-budgets under nine minutes. After soft expiry the instruction says time is up.
+budgets under the default (`DEFAULT_SOFT_S`). After soft expiry the instruction says time is up.
 
 The hard deadline (`asyncio.timeout` in the job) cancels work still running. A review cut short
 by either limit may request changes for what it found, but incomplete blocking work never approves.
@@ -19,9 +19,12 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
+MAX_REVIEW_S = 600.0
+"""No review attempt runs longer than this, whatever a deployment configures: the one definition of the cap."""
+DEFAULT_SOFT_S = 540.0
+"""The default soft budget, which leaves a minute to verify and post. The countdown below is sized for it."""
 FOCUS_S = 300
 REPORT_ONLY_S = 60
-FULL_COUNTDOWN_BUDGET_S = 540
 
 FIVE_MINUTES = (
     "Five minutes or less remain before review wrap-up. Prioritize unresolved high-impact evidence; "
@@ -63,7 +66,7 @@ class _WrapUp(AbstractCapability[None]):
 
     def _notice(self) -> str | None:
         remaining = self.deadline.remaining
-        scale = min(1.0, max(0.0, self.deadline.soft_s) / FULL_COUNTDOWN_BUDGET_S)
+        scale = min(1.0, max(0.0, self.deadline.soft_s) / DEFAULT_SOFT_S)
         if remaining <= REPORT_ONLY_S * scale:
             self.deadline.wrapped_up.add(self.label)
             return WRAP_UP if remaining <= 0 else ONE_MINUTE

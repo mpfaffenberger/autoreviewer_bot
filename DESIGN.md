@@ -306,6 +306,10 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
 - The command targets the current head, including drafts. If an attempt is queued or running, the
   request joins it. After it finishes, a new command requests a fresh review of that head; redelivery
   of the same comment does not. A reaction acknowledges the command; reaction failures are cosmetic.
+- A fresh attempt never approves over a blocking finding that still stands on the same commit
+  (`posting.Publisher.standing`): one whose thread hasn't withdrawn it, or one the latest verdict listed
+  with no thread. The code is unchanged, so a pass that misses the finding hasn't cleared it; otherwise
+  asking until one pass misses it would turn a blocked commit green. A withdrawal or a new commit clears it.
 
 **Built: answers in the bot's threads** (`review/conversation.py`, `PRISM_CONVERSATIONS`).
 

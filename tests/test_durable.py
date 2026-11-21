@@ -11,12 +11,13 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from dbos import DBOS
 
 from autoreviewer.github import Repo
-from autoreviewer.review import durable
+from autoreviewer.review import durable, job
 from autoreviewer.review.posting import Publisher
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
@@ -213,6 +214,66 @@ async def test_concurrent_comments_and_pushes_share_attempts_and_remember_delive
     moved = PullRequestUpdated(pull.installation_id, pull.owner, pull.repo, pull.number, "b" * 40)
     assert await durable.enqueue_review(moved, comment_id=10)
     assert await DBOS.get_workflow_status_async(durable.workflow_id(moved)) is None
+
+
+@pytest.mark.parametrize(
+    "read",
+    [AsyncMock(side_effect=sqlite3.OperationalError("database is locked")), AsyncMock(return_value=[])],
+    ids=["read-fails", "no-row"],
+)
+async def test_an_unreadable_start_time_does_not_strand_the_check(
+    launch: Launch, monkeypatch: pytest.MonkeyPatch, read: AsyncMock
+) -> None:
+    """From the bot's review of #61: raising here skipped `_finish_check`, leaving the check in progress for good."""
+    github = await launch([])
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", read)
+    result = await (await durable.enqueue(pull_for(github.repo))).get_result()
+    assert result.conclusion == "success"
+    assert [c["status"] for c in github.checks] == ["completed"]
+    assert [r["event"] for r in github.reviews] == ["APPROVE"]
+
+
+async def test_a_retry_forked_by_the_previous_version_is_joined(
+    launch: Launch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From the bot's review of #61: at deploy time a fork from the old retry path may still be reviewing this
+    head. A push or a request must join it, not start a second review beside it."""
+    github = await launch([])
+    pull = pull_for(github.repo)
+    base = durable.workflow_id(pull)
+    await (await durable.enqueue(pull)).get_result()
+    entered, gate, review = asyncio.Event(), asyncio.Event(), job.review_and_post
+
+    async def gated(
+        deps: job.ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None, *, remaining_s: float | None = None
+    ) -> job.CheckResult:
+        entered.set()
+        await gate.wait()
+        return await review(deps, pull, check_id, remaining_s=remaining_s)
+
+    monkeypatch.setattr(job, "review_and_post", gated)
+    # Step 2 is the review itself: the old retry path forked there, keeping step 1's check run.
+    fork = await DBOS.fork_workflow_async(base, 2, queue_name=durable.QUEUE)
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        assert await durable.enqueue_review(pull) is False  # running: joined
+        assert await durable.enqueue_review(pull, comment_id=5) is False
+        assert await DBOS.get_workflow_status_async(f"{base}:attempt:2") is None
+    finally:
+        gate.set()
+    await fork.get_result()
+    assert len(github.checks) == 1  # the fork kept the original check run
+
+
+async def test_a_push_after_a_second_attempt_starts_no_third(launch: Launch) -> None:
+    github = await launch([])
+    pull = pull_for(github.repo)
+    base = durable.workflow_id(pull)
+    await (await durable.enqueue(pull)).get_result()
+    assert await durable.enqueue_review(pull, comment_id=5) is False
+    await (await DBOS.retrieve_workflow_async(f"{base}:attempt:2")).get_result()
+    assert await durable.enqueue_review(pull) is True  # the latest attempt finished: nothing new runs
+    assert await DBOS.get_workflow_status_async(f"{base}:attempt:3") is None and len(github.checks) == 2
 
 
 def test_workflow_ids_are_per_head_and_case_insensitive() -> None:

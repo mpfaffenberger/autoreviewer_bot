@@ -13,6 +13,7 @@ minute of GPU time and nothing else.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
@@ -24,6 +25,8 @@ from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync, WorkflowStatusString
 
 from autoreviewer.review import conversation, job
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
+
+logger = logging.getLogger("autoreviewer.durable")
 
 QUEUE = "reviews"
 LOCAL_QUEUE = "reviews-local"
@@ -105,20 +108,31 @@ async def _start_check(pull: PullRequestUpdated) -> int:
     return await job.start_check(_require_deps(), pull)
 
 
+async def _attempt_started() -> float:
+    """When this attempt's check started, in epoch seconds: DBOS timestamped step 1 after dequeue, and reading
+    that checkpoint here adds no operation to replay and keeps existing integer check IDs. If it can't be read,
+    the attempt's clock starts now: an unreadable timestamp must cost a little budget accuracy, never the review
+    (raising here would skip `_finish_check` and leave the check run in progress for good)."""
+    run_id = DBOS.workflow_id
+    try:
+        steps = await DBOS.list_workflow_steps_async(run_id, limit=1, load_output=False) if run_id else []
+    except Exception:
+        logger.warning("could not read when %s started; its review budget starts now", run_id, exc_info=True)
+        return time()
+    if steps and steps[0]["function_id"] == 1 and (started_ms := steps[0]["started_at_epoch_ms"]) is not None:
+        return started_ms / 1000
+    logger.warning("no recorded start for %s; its review budget starts now", run_id)
+    return time()
+
+
 @DBOS.step()  # no retries: review_and_post never raises, and model time isn't free
 async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.CheckResult:
-    # DBOS already timestamped step 1, after dequeue. Reading its checkpoint inside step 2
-    # avoids a new operation on replay and preserves existing integer check IDs.
-    run_id = DBOS.workflow_id
-    assert run_id is not None
-    steps = await DBOS.list_workflow_steps_async(run_id, limit=1, load_output=False)
-    if not steps or steps[0]["function_id"] != 1 or (started_ms := steps[0]["started_at_epoch_ms"]) is None:
-        raise RuntimeError(f"Missing durable check start for {run_id}")
+    started = await _attempt_started()
     if _slots is None:
         raise RuntimeError("durable.launch() must run before reviews are executed")
     async with _slots.claim(pull) as deps:
         # Waiting for a worker slot after the check starts spends this attempt's budget.
-        elapsed_s = max(0.0, time() - started_ms / 1000)
+        elapsed_s = max(0.0, time() - started)
         budget_s = min(deps.hard_deadline_s, job.MAX_REVIEW_S)
         return await job.review_and_post(deps, pull, check_id, remaining_s=max(0.0, budget_s - elapsed_s))
 
@@ -228,7 +242,16 @@ async def _enqueue[Arg, Result](
         return await queue.enqueue_async(workflow, arg)
 
 
-_RUNNING = {"ENQUEUED", "PENDING", "DELAYED", "SUSPENDED"}
+_RUNNING = frozenset(
+    status.value
+    for status in (
+        WorkflowStatusString.ENQUEUED,
+        WorkflowStatusString.PENDING,
+        WorkflowStatusString.DELAYED,
+        WorkflowStatusString.SUSPENDED,
+    )
+)
+"""An attempt in one of these states will still reach a verdict by itself: join it instead of starting another."""
 
 
 async def _select_attempt(pull: PullRequestUpdated, *, explicit: bool) -> str:

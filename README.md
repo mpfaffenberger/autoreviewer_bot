@@ -25,7 +25,7 @@ Prism reads the diff **and the code around it**. When the finder flags a correct
 
 ## Talk back, in the thread
 
-Already have the App installed? Open a PR, push a commit, or comment `@YOUR-APP-SLUG review` on an existing PR. If a review of the current commit is queued or running, the command joins it. Once it finishes, a new command starts a fresh check with its own time budget, even on the same commit. Redelivering the original request does not start another attempt.
+Already have the App installed? Open a PR, push a commit, or comment `@YOUR-APP-SLUG review` on an existing PR. If a review of the current commit is queued or running, the command joins it. Once it finishes, a new command starts a fresh check with its own time budget, even on the same commit. A fresh attempt cannot approve over a blocking finding that still stands on that commit: contest it in its thread, or push a fix. Redelivering the original request does not start another attempt.
 
 Reply **on the finding**. A PR-opening bot can do this just like a person can.
 
