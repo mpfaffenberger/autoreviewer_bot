@@ -52,7 +52,6 @@ class _ReviewSlots:
         self.primary_free = concurrency
         self.overflow = overflow
         self.repos = repos
-        self.overflow_free = True
         self.changed = asyncio.Condition()
 
     def eligible(self, pull: PullRequestUpdated) -> bool:
@@ -62,7 +61,7 @@ class _ReviewSlots:
     async def claim(self, pull: PullRequestUpdated) -> AsyncIterator[job.ReviewDeps]:
         eligible = self.eligible(pull)
         async with self.changed:
-            await self.changed.wait_for(lambda: self.primary_free > 0 or (eligible and self.overflow_free))
+            await self.changed.wait_for(lambda: self.primary_free > 0 or eligible)
             primary = self.primary_free > 0
             if primary:
                 deps = _require_deps()
@@ -70,16 +69,13 @@ class _ReviewSlots:
             else:
                 assert self.overflow is not None
                 deps = self.overflow
-                self.overflow_free = False
         try:
             yield deps
         finally:
-            async with self.changed:
-                if primary:
+            if primary:
+                async with self.changed:
                     self.primary_free += 1
-                else:
-                    self.overflow_free = True
-                self.changed.notify_all()
+                    self.changed.notify_all()
 
 
 _slots: _ReviewSlots | None = None
@@ -198,7 +194,7 @@ async def launch(
     _deps, _conversation_deps = deps, conversation_deps
     DBOS.launch()
     enabled = overflow_deps is not None and bool(overflow_repos)
-    await DBOS.register_queue_async(QUEUE, worker_concurrency=concurrency + int(enabled))
+    await DBOS.register_queue_async(QUEUE, worker_concurrency=None if enabled else concurrency)
     # Register even when disabled so any previously queued local work can drain.
     await DBOS.register_queue_async(LOCAL_QUEUE, worker_concurrency=concurrency)
     await DBOS.register_queue_async(ANSWER_QUEUE, worker_concurrency=ANSWER_CONCURRENCY)

@@ -128,6 +128,7 @@ class ModelPlan:
     """Role -> reasoning effort (config.reasoning_from)."""
 
     prism: PrismConfig | None = None
+    overflow_finders: bool = False
     _resolved: dict[str, tuple[Model, int]] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -158,6 +159,14 @@ class ModelPlan:
         from autoreviewer.review.agents import boodleton_model
 
         name = self.models[role]
+        if self.overflow_finders and role in AGENT_KINDS:
+            from pydantic_ai.models import infer_model
+
+            key = "overflow:" + name  # Do not reuse a primary client with a request semaphore.
+            if key not in self._resolved:
+                model = infer_model(name)
+                self._resolved[key] = model, (model.profile.get("context_window") or 8192) // 2
+            return self._resolved[key]
         if self.prism is not None:
             if name not in self._resolved:
                 self._resolved[name] = self.prism.resolve(name)
@@ -335,7 +344,7 @@ def sol_overflow_deps(settings: Settings, normal: ReviewDeps, plan: ModelPlan) -
         if plan.verifier(kind)[0].model_name == SOL.split(":", 1)[1]:
             raise ValueError(f"PRISM_SOL_OVERFLOW_REPOS: {kind} checker resolves to the Sol finder")
     models = {**plan.models, **dict.fromkeys(AGENT_KINDS, SOL)}
-    overflow = replace(plan, models=models)  # Shares the normal plan's resolved checker clients.
+    overflow = replace(plan, models=models, overflow_finders=True)  # Shares the normal plan's resolved checker clients.
     return replace(
         normal,
         agents=correctness_agents(overflow),

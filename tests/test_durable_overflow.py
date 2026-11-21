@@ -35,7 +35,8 @@ async def test_overflow_with_local_backlog(tmp_path: Path, monkeypatch: pytest.M
         lane = "primary" if deps is primary else "overflow"
         phases[pull.number].append(lane)
         active[lane] += 1
-        assert active[lane] == 1
+        if lane == "primary":
+            assert active[lane] == 1
         entered[pull.number].set()
         await release[pull.number].wait()
         active[lane] -= 1
@@ -59,8 +60,8 @@ async def test_overflow_with_local_backlog(tmp_path: Path, monkeypatch: pytest.M
                 rest.append(await durable.enqueue(replace(allowed, number=4)))
             await entered[4].wait()  # the two local-only heads did not monopolize admission
             rest.append(await durable.enqueue(replace(allowed, number=5)))
-            release[4].set()
-            await entered[5].wait()  # overflow slot is reusable while primary is still busy
+            await entered[5].wait()
+            assert active == {"primary": 1, "overflow": 2}
             for event in release.values():
                 event.set()
             for handle in (first, *rest):
