@@ -33,6 +33,7 @@ from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_i
 from autoreviewer.review.pipeline import (
     BLOCK_AT_PRIORITY,
     MAX_FINDINGS,
+    CheckAgent,
     Continuation,
     Outcome,
     Publish,
@@ -55,7 +56,7 @@ SUPERSEDED_CHECK_S = 60.0
 PROGRESS_INTERVAL_S = 30.0
 """How often a running review updates its check run, at most (GitHub rate-limits App writes)."""
 
-AgentFactory = Callable[[Workspace], tuple[Agent[None, LensReport], Agent[None, Verification]]]
+AgentFactory = Callable[[Workspace], tuple[Agent[None, LensReport], CheckAgent[Verification]]]
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class ReviewDeps:
     """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
     memory: ReviewMemory | None = None
     """Where each PR's lens conversation is kept, so a new commit continues the last review."""
+    select_correctness: Callable[[], tuple[AgentFactory, str]] | None = None
     lens_version: str = ""
     """Fingerprint of the lens prompt and model (see agents.lens_version)."""
     block_at: int = BLOCK_AT_PRIORITY
@@ -457,6 +459,7 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
 
 async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
     state = await _current(deps, repo, pull)
+    agents, version = deps.select_correctness() if deps.select_correctness else (deps.agents, deps.lens_version)
     conversation = conversation_id(repo, pull.number)
     publisher = Publisher(
         deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, block_at=deps.block_at
@@ -470,14 +473,14 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
                 review_change(
                     reader=deps.github,
                     source=deps.source,
-                    agents=deps.agents,
+                    agents=agents,
                     work_dir=deps.work_dir,
                     repo=repo,
                     number=pull.number,
                     state=state,
                     head_sha=pull.head_sha,
                     memory=deps.memory,
-                    lens_version=deps.lens_version,
+                    lens_version=version,
                     block_at=deps.block_at,
                     progress=progress,
                     simplifier=deps.simplifier,

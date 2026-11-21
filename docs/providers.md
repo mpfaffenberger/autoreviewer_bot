@@ -89,3 +89,27 @@ uv run prism-config --finder openai-codex:gpt-6.2-sol --finder-lanes 3 \
 - Factories are arbitrary Python at import and call time. Select them only from trusted deployment configuration. Never import from a checkout, add it to `PYTHONPATH`, or start the worker in it. PR text, repository config and comments must not select imports, endpoints, environment or credentials.
 - The review agent, not the model provider, dispatches the bot's registered tools. Do not start coding agents, load repository hooks/MCP config, or grant a provider shell, filesystem, network tools or sandbox-management access. A read-only checkout does not make a host shell safe.
 - Keep provider secrets out of the checkout, job sandbox, subprocess environments, prompts and logs. Keep inference and GitHub publishing credentials separate. Enable an external provider only for repositories whose source may be sent there under your organization's policy.
+
+## One capacity pool for finding and checking
+
+Instead of dedicating a provider to overflow, list resources in preference order:
+
+```sh
+uv run prism-config --output prism.json --local-url https://inference.example.com/v1 \
+  --pool-model local:qwen=5 --pool-model local:deepseek=10 \
+  --pool-model openai-codex:gpt-6.2-sol=20
+```
+
+Use the actual model IDs served by your endpoints, configure provider credentials, and point
+`PRISM_CONFIG` at the file. Each number is **concurrent model requests per Prism worker**, shared
+between finding and verification—not whole PRs, or reserved threads on the inference server.
+The worker prefers the first eligible model with capacity. If all are busy it chooses the least
+loaded relative to capacity and queues behind its limiter. Each finding gets a placement decision
+when verification begins; the checker cannot have the finder's resolved model name. Each agent
+run stays on its selected model. This is load balancing, not health probing or retry-on-outage.
+
+Pool mode replaces `PRISM_SOL_OVERFLOW_REPOS`: listing a hosted model authorizes review data
+from **every repository this worker reviews**, including private repos, to go there. Omit hosted
+models for a local-only worker. `PRISM_MAX_CONCURRENT_JOBS` still limits active PRs; raise it if
+one PR alone cannot keep the pool busy. Conversation replies keep their configured model.
+Saved correctness history resumes only with a compatible finder; switching starts fresh.

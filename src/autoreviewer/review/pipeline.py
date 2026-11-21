@@ -270,6 +270,13 @@ Publish = Callable[[Finding], Awaitable[None]]
 """Post one confirmed inline finding right away (see posting.Publisher). Must not raise."""
 
 
+type CheckAgent[T] = Agent[None, T] | Callable[[], Agent[None, T]]
+
+
+def select_checker[T](checker: CheckAgent[T]) -> Agent[None, T]:
+    return checker if isinstance(checker, Agent) else checker()
+
+
 class Judge:
     """Verifies a lens's findings as they arrive (from `report_finding` mid-run, then the final report) and
     sorts each into `outcome`. Each confirmed inline finding is handed to `publish` at once."""
@@ -277,7 +284,7 @@ class Judge:
     def __init__(
         self,
         pr: PullRequestText,
-        verifier: Agent[None, Verification],
+        verifier: CheckAgent[Verification],
         progress: Progress,
         outcome: Outcome,
         *,
@@ -351,7 +358,9 @@ class Judge:
             try:
                 watch = self._progress.watch(f"{self._label} ({finding.path}:{finding.line})")
                 prompt = verifier_prompt(self._pr, finding)
-                verdict = (await self._verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])).output
+                verdict = (
+                    await select_checker(self._verifier).run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])
+                ).output
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
                 if self._latest.get((finding.path, finding.line)) is reported:  # not superseded meanwhile
@@ -393,7 +402,7 @@ async def _run_judged(judge: Judge, run: LensRun, *, report_as_you_go: bool = Tr
 async def review_lens(
     pr: PullRequestText,
     lens: Agent[None, LensReport],
-    verifier: Agent[None, Verification],
+    verifier: CheckAgent[Verification],
     *,
     kind: LensKind,
     instructions: str | None,
@@ -431,7 +440,7 @@ async def review_lens(
 async def review(
     pr: PullRequestText,
     lens: Agent[None, LensReport],
-    verifier: Agent[None, Verification],
+    verifier: CheckAgent[Verification],
     *,
     continuation: Continuation | None = None,
     lens_capabilities: Sequence[AbstractCapability[None]] = (),

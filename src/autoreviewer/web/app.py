@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.model_config import PrismConfig
+from autoreviewer.model_pool import Choice, ModelPool
 from autoreviewer.servers import COMPACT_AT, ReasoningEffort
 from autoreviewer.web.config import AGENT_KINDS, CONVERSATION, AgentKind, Settings, verifier_role
 
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
     from autoreviewer.github import GitHubApp
     from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.job import AgentFactory, Lens, ReviewDeps
-    from autoreviewer.review.schemas import LensKind, Verification
+    from autoreviewer.review.schemas import LensKind, LensReport, SimplifyVerdict, Verification
     from autoreviewer.review.simplify import SimplifierFactory
     from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import (
@@ -128,6 +129,7 @@ class ModelPlan:
     """Role -> reasoning effort (config.reasoning_from)."""
 
     prism: PrismConfig | None = None
+    pool: ModelPool | None = None
     overflow_finders: bool = False
     _resolved: dict[str, tuple[Model, int]] = field(default_factory=dict, repr=False, compare=False)
 
@@ -140,6 +142,7 @@ class ModelPlan:
             settings.model_lanes,
             settings.reasoning,
             settings.prism,
+            ModelPool(settings.prism) if settings.prism and settings.prism.pool else None,
         )
 
     def finder(self, kind: AgentKind) -> tuple[Model, int]:
@@ -200,6 +203,8 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
 def correctness_agents(plan: ModelPlan) -> AgentFactory:
     from autoreviewer.review.agents import correctness_agent, verifier_agent
 
+    if plan.pool:
+        return pooled_lens(plan.pool, "correctness")
     lens_model, lens_compact_at = plan.finder("correctness")
     verifier_model, verifier_compact_at = plan.verifier("correctness")
     return lambda workspace: (
@@ -233,6 +238,8 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
     """(lens, verifier) for `kind` over a checkout, on the plan's models for it: shared by the bot and the evals."""
     from autoreviewer.review.agents import lens_pair
 
+    if plan.pool:
+        return pooled_lens(plan.pool, kind)
     lens_model, lens_compact_at = plan.finder(kind)
     verifier_model, verifier_compact_at = plan.verifier(kind)
     return lambda workspace: lens_pair(
@@ -243,6 +250,33 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
         lens_compact_at=lens_compact_at,
         verifier_compact_at=verifier_compact_at,
     )
+
+
+def pooled_lens(pool: ModelPool, kind: Literal["correctness"] | LensKind, pinned: Choice | None = None) -> AgentFactory:
+    from autoreviewer.review.agents import checker_agent, correctness_agent, extra_finder
+
+    def agents(workspace: Workspace) -> tuple[Agent[None, LensReport], Callable[[], Agent[None, Verification]]]:
+        model, target = pinned or pool.choose()
+        finder = (
+            correctness_agent(model, workspace, compact_at=target)
+            if kind == "correctness"
+            else extra_finder(kind, model, workspace, compact_at=target)
+        )
+
+        def check() -> Agent[None, Verification]:
+            verifier, compact = pool.choose(excluding=model.model_name)
+            return checker_agent(kind, verifier, workspace, compact_at=compact)
+
+        return finder, check
+
+    return agents
+
+
+def select_correctness(pool: ModelPool) -> tuple[AgentFactory, str]:
+    from autoreviewer.review.agents import lens_version
+
+    choice = pool.choose()
+    return pooled_lens(pool, "correctness", choice), lens_version("pool:" + pool.key(choice[0]))
 
 
 def lens(kind: LensKind, agents: AgentFactory) -> Lens:
@@ -267,6 +301,18 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
     from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
     from autoreviewer.review.simplify import Simplifier
 
+    if (pool := plan.pool) is not None:
+
+        def pooled(workspace: Workspace) -> Simplifier:
+            model, target = pool.choose()
+
+            def check() -> Agent[None, SimplifyVerdict]:
+                verifier, compact = pool.choose(excluding=model.model_name)
+                return simplify_checker_agent(verifier, workspace, compact_at=compact)
+
+            return Simplifier(simplify_agent(model, workspace, compact_at=target), check)
+
+        return pooled
     propose_model, propose_compact_at = plan.finder("simplify")
     check_model, check_compact_at = plan.verifier("simplify")
     return lambda workspace: Simplifier(
@@ -277,6 +323,8 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
 
 def models_note(settings: Settings) -> str:
     """The review footer's "correctness and security by `a`, verified by `b`", one clause per pair of models."""
+    if settings.prism and settings.prism.pool:
+        return "scheduled from model pool: " + ", ".join(settings.prism.pool)
     enabled: list[tuple[AgentKind, str]] = [
         ("correctness", "correctness"),
         *((kind, LENS_NAMES[kind]) for kind in enabled_lenses(settings)),
@@ -388,6 +436,7 @@ def main() -> None:
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
+        select_correctness=(lambda: select_correctness(pool)) if (pool := plan.pool) else None,
         lens_version=lens_version(settings.models["correctness"], settings.reasoning.get("correctness")),
         block_at=settings.block_at_priority,
         simplifier=simplifier_agents(plan) if settings.simplify else None,
@@ -395,7 +444,8 @@ def main() -> None:
         soft_deadline_s=settings.soft_deadline_minutes * 60,
         hard_deadline_s=settings.hard_deadline_minutes * 60,
     )
-    overflow = sol_overflow_deps(settings, deps, plan)
+    # A pool is a complete operator-selected model policy, not an extra Sol-only path.
+    overflow = None if plan.pool else sol_overflow_deps(settings, deps, plan)
     durable.configure(settings.database)
 
     @contextlib.asynccontextmanager

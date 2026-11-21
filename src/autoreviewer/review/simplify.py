@@ -20,7 +20,7 @@ from pydantic_ai.capabilities import AbstractCapability
 
 from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
 from autoreviewer.review.diff import added_lines
-from autoreviewer.review.pipeline import Publish, PullRequestText, lens_prompt
+from autoreviewer.review.pipeline import CheckAgent, Publish, PullRequestText, lens_prompt, select_checker
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import has_secret
 from autoreviewer.review.schemas import Finding, SimplifyReport, SimplifyVerdict, Suggestion
@@ -35,7 +35,7 @@ CHECK_CONCURRENCY = 3
 @dataclass(frozen=True)
 class Simplifier:
     propose: Agent[None, SimplifyReport]
-    check: Agent[None, SimplifyVerdict]
+    check: CheckAgent[SimplifyVerdict]
 
 
 SimplifierFactory = Callable[[Workspace], Simplifier]
@@ -111,7 +111,7 @@ async def simplify(
             try:
                 watch = progress.watch(f"simplify checker ({suggestion.path}:{suggestion.start_line})")
                 verdict = (
-                    await simplifier.check.run(
+                    await select_checker(simplifier.check).run(
                         _check_prompt(suggestion), usage_limits=VERIFIER_LIMITS, capabilities=[watch]
                     )
                 ).output
