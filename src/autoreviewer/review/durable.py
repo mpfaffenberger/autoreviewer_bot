@@ -12,9 +12,11 @@ minute of GPU time and nothing else.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from autoreviewer.review import conversation, job
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 QUEUE = "reviews"
+LOCAL_QUEUE = "reviews-local"
 ANSWER_QUEUE = "answers"
 """Answers to replies run beside reviews, never behind one: a reply shouldn't wait for a 15-minute review."""
 ANSWER_CONCURRENCY = 2
@@ -39,6 +42,47 @@ failing with an obscure NOT NULL error at launch (hit on Debian bookworm's 3.40)
 MAX_RECOVERY_ATTEMPTS = 3
 """A review that keeps crashing the process is parked after this many recoveries instead of looping on the GPU."""
 
+
+class _ReviewSlots:
+    """Per worker, not per queue: either queue may contain work admitted under an older allowlist."""
+
+    def __init__(self, concurrency: int, overflow: job.ReviewDeps | None, repos: frozenset[str]) -> None:
+        if concurrency < 1:
+            raise ValueError("review concurrency must be positive")
+        self.primary_free = concurrency
+        self.overflow = overflow
+        self.repos = repos
+        self.overflow_free = True
+        self.changed = asyncio.Condition()
+
+    def eligible(self, pull: PullRequestUpdated) -> bool:
+        return self.overflow is not None and f"{pull.owner}/{pull.repo}".lower() in self.repos
+
+    @asynccontextmanager
+    async def claim(self, pull: PullRequestUpdated) -> AsyncIterator[job.ReviewDeps]:
+        eligible = self.eligible(pull)
+        async with self.changed:
+            await self.changed.wait_for(lambda: self.primary_free > 0 or (eligible and self.overflow_free))
+            primary = self.primary_free > 0
+            if primary:
+                deps = _require_deps()
+                self.primary_free -= 1
+            else:
+                assert self.overflow is not None
+                deps = self.overflow
+                self.overflow_free = False
+        try:
+            yield deps
+        finally:
+            async with self.changed:
+                if primary:
+                    self.primary_free += 1
+                else:
+                    self.overflow_free = True
+                self.changed.notify_all()
+
+
+_slots: _ReviewSlots | None = None
 _deps: job.ReviewDeps | None = None
 _conversation_deps: conversation.ConversationDeps | None = None
 
@@ -70,7 +114,10 @@ async def _start_check(pull: PullRequestUpdated) -> int:
 
 @DBOS.step()  # no retries: review_and_post never raises, and model time isn't free
 async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.CheckResult:
-    return await job.review_and_post(_require_deps(), pull, check_id)
+    if _slots is None:
+        raise RuntimeError("durable.launch() must run before reviews are executed")
+    async with _slots.claim(pull) as deps:
+        return await job.review_and_post(deps, pull, check_id)
 
 
 @DBOS.step(retries_allowed=True, max_attempts=3)
@@ -138,18 +185,35 @@ def configure(database: Path) -> None:
 
 
 async def launch(
-    deps: job.ReviewDeps, conversation_deps: conversation.ConversationDeps | None = None, *, concurrency: int
+    deps: job.ReviewDeps,
+    conversation_deps: conversation.ConversationDeps | None = None,
+    *,
+    concurrency: int,
+    overflow_deps: job.ReviewDeps | None = None,
+    overflow_repos: frozenset[str] = frozenset(),
 ) -> None:
     """Start DBOS (recovering interrupted reviews and answers) and register the queues."""
-    global _deps, _conversation_deps
+    global _deps, _conversation_deps, _slots
+    _slots = _ReviewSlots(concurrency, overflow_deps, overflow_repos)
     _deps, _conversation_deps = deps, conversation_deps
     DBOS.launch()
-    await DBOS.register_queue_async(QUEUE, worker_concurrency=concurrency)
+    enabled = overflow_deps is not None and bool(overflow_repos)
+    await DBOS.register_queue_async(QUEUE, worker_concurrency=concurrency + int(enabled))
+    # Register even when disabled so any previously queued local work can drain.
+    await DBOS.register_queue_async(LOCAL_QUEUE, worker_concurrency=concurrency)
     await DBOS.register_queue_async(ANSWER_QUEUE, worker_concurrency=ANSWER_CONCURRENCY)
 
 
+def _review_queue(pull: PullRequestUpdated) -> str:
+    # Separate new local-only waiters so they cannot fill the eligible queue's admission window.
+    # Old mixed backlogs can still head-of-line block; we never migrate or duplicate durable jobs.
+    if _slots and _slots.overflow is not None and _slots.repos and not _slots.eligible(pull):
+        return LOCAL_QUEUE
+    return QUEUE
+
+
 async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResult]:
-    return await _enqueue(QUEUE, workflow_id(pull), review_workflow, pull)
+    return await _enqueue(_review_queue(pull), workflow_id(pull), review_workflow, pull)
 
 
 async def _enqueue[Arg, Result](
@@ -191,12 +255,12 @@ async def enqueue_review(pull: PullRequestUpdated, *, retry_failed: bool = False
     if any(fork.status == WorkflowStatusString.SUCCESS.value and _has_verdict(fork.output) for fork in forks):
         return True
     if status in _ENDED_WITHOUT_RESULT:
-        await _retry(handle.workflow_id, status)
+        await _retry(handle.workflow_id, status, _review_queue(pull))
         return False
     if status == WorkflowStatusString.SUCCESS.value and not _has_verdict(await handle.get_result()):
         # Finished without a verdict (partially reviewed, timed out, failed): what "push again or ask again" promises.
         logger.info("re-running %s, which ended without a verdict", handle.workflow_id)
-        await DBOS.fork_workflow_async(handle.workflow_id, REVIEW_STEP, queue_name=QUEUE)
+        await DBOS.fork_workflow_async(handle.workflow_id, REVIEW_STEP, queue_name=_review_queue(pull))
         return False
     return status == WorkflowStatusString.SUCCESS.value
 
@@ -206,7 +270,7 @@ def _has_verdict(result: object) -> bool:
     return getattr(result, "conclusion", "neutral") != "neutral"
 
 
-async def _retry(workflow_id: str, status: str) -> None:
+async def _retry(workflow_id: str, status: str, queue: str) -> None:
     """Run an ended review again from its first failed step. Resuming would replay a recorded failure, so a
     failed step means a fork (a new workflow keeping the steps before it, e.g. the check run); with no
     failure recorded (cancelled, or crashed mid-step) it resumes where it stopped."""
@@ -214,11 +278,11 @@ async def _retry(workflow_id: str, status: str) -> None:
     failed = [step["function_id"] for step in steps if step["error"] is not None]
     if failed:
         logger.info("retrying the %s review %s from step %d", status.lower(), workflow_id, min(failed))
-        await DBOS.fork_workflow_async(workflow_id, min(failed), queue_name=QUEUE)
+        await DBOS.fork_workflow_async(workflow_id, min(failed), queue_name=queue)
     else:
         logger.info("resuming the %s review %s", status.lower(), workflow_id)
         # On the review queue: by default DBOS resumes on its internal queue, which ignores our concurrency.
-        await DBOS.resume_workflow_async(workflow_id, queue_name=QUEUE)
+        await DBOS.resume_workflow_async(workflow_id, queue_name=queue)
 
 
 def shutdown() -> None:
