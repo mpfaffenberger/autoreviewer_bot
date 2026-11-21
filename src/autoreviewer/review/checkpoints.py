@@ -14,8 +14,8 @@ the harness's token estimate is anchored on the last response's reported usage, 
 Keyed by the attempt (the DBOS workflow id: one try at one head), the role, the subject (a checker's candidate),
 the session namespace, the merge base and the agent's identity (`sessions._key`: provider and model, prompts,
 output schema). So a recovered attempt whose run lands on another model, in the overflow namespace, or on a moved
-merge base starts that run fresh instead of reusing a transcript that no longer applies. Kept with the PR's review memory, which closing the PR deletes; `discard`
-drops an attempt's checkpoints once it has its verdict.
+merge base starts that run fresh instead of reusing a transcript that no longer applies. Kept with the PR's review
+memory, which closing the PR deletes; `discard` drops an attempt's checkpoints once it has its verdict.
 """
 
 from __future__ import annotations
