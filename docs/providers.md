@@ -29,7 +29,7 @@ Prism prefers its normal review workers. When they are busy, a queued review fro
    Any model specification on this page works, including `local:` (add `--overflow-url` if it has its own server) and `factory:`. The overflow model needs its provider's credentials in the receiver, and it cannot be the checker.
 2. **The repositories.** Set `PRISM_OVERFLOW_REPOS` in the receiver environment to a comma-separated list of exact repositories approved to send code to that provider (for example `your-org/public-project,your-org/another-project`). `PRISM_OVERFLOW_REPOS=*` authorizes overflow for **all repositories this receiver reviews**, including private and future installations. Blank or unset keeps overflow off; a GitHub App installation alone does not opt a repository in. `PRISM_SOL_OVERFLOW_REPOS`, the setting's former name, is still read.
 
-Restart the receiver to apply either change. Overflow replaces every finder, including the simplifier. The usual independent checkers still verify findings; thread replies stay on the normal plan. Overflow reviews start without saved lens history. No active review is moved or duplicated. Previously queued eligible work can overflow, but older local-only jobs ahead of it may delay pickup.
+Restart the receiver to apply either change. Overflow replaces every finder, including the simplifier. The usual independent checkers still verify findings; thread replies stay on the normal plan. Overflow reviews resume their own compatible sessions, never the primary reviewers’ transcripts. No active review is moved or duplicated. Previously queued eligible work can overflow, but older local-only jobs ahead of it may delay pickup.
 
 Prism does not cap concurrent overflow requests unless you set lanes for that model (`--overflow-lanes`). Requests consume the provider identity's quota. Receiver memory, disk, checker capacity and review deadlines still apply.
 
@@ -116,3 +116,30 @@ To change a model or its tuning without rebuilding the image, copy that file, ed
 - Factories are arbitrary Python at import and call time. Select them only from trusted deployment configuration. Never import from a checkout, add it to `PYTHONPATH`, or start the worker in it. PR text, repository config and comments must not select imports, endpoints, environment or credentials.
 - The review agent, not the model provider, dispatches the bot's registered tools. Do not start coding agents, load repository hooks/MCP config, or grant a provider shell, filesystem, network tools or sandbox-management access. A read-only checkout does not make a host shell safe.
 - Keep provider secrets out of the checkout, job sandbox, subprocess environments, prompts and logs. Keep inference and GitHub publishing credentials separate. Enable an external provider only for repositories whose source may be sent there under your organization's policy.
+
+## One capacity pool for finding and checking
+
+To spread finding and checking across several models, list resources in preference order:
+
+```sh
+uv run prism-config --output prism.json --local-url https://inference.example.com/v1 \
+  --pool-model local:qwen=5 --pool-model local:deepseek=10 \
+  --pool-model openai-codex:gpt-6.2-sol=20
+```
+
+Use the actual model IDs served by your endpoints, configure provider credentials, and point
+`PRISM_CONFIG` at the file. Each number is **concurrent model requests per Prism worker**, shared
+between finding and verification—not whole PRs, or reserved threads on the inference server.
+The worker prefers the first eligible model with capacity. If all are busy it chooses the least
+loaded relative to capacity and queues behind its limiter. Each finding gets a placement decision
+when verification begins; the checker cannot have the finder's resolved model name. Each agent
+run stays on its selected model. This is load balancing, not health probing or retry-on-outage.
+
+Unlike overflow, a pool has no per-repository opt-in: listing a hosted model authorizes review data
+from **every repository this worker reviews**, including private repos, to go there. Omit hosted
+models for a local-only worker. [Overflow](#burst-queued-reviews-to-an-overflow-model) still works
+beside a pool (`--overflow` with `--pool-model`): opted-in overflow reviews run every finder on the
+overflow model while the pool keeps placing their checks, never on the finder's resolved model. An
+overflow model that is also a pool member keeps its pool capacity, shared with the pool. `PRISM_MAX_CONCURRENT_JOBS` still limits active PRs; raise it if
+one PR alone cannot keep the pool busy. Conversation replies keep their configured model.
+Each finder, simplifier and checker resumes its own compatible history on the same PR and merge base, on the same head or a descendant. Checkers only see their own history for the same candidate and must verify against the current checkout. These bounded transcripts are context, not cached approvals or crash checkpoints. Closing a PR removes them.

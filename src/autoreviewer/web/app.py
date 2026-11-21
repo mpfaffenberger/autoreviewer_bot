@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
 from autoreviewer.model_config import PrismConfig, resolve_model
+from autoreviewer.model_pool import Choice, ModelPool
 from autoreviewer.servers import COMPACT_AT, ReasoningEffort
 from autoreviewer.web.config import AGENT_KINDS, CONVERSATION, OVERFLOW_REPOS, AgentKind, Settings, verifier_role
 
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
     from autoreviewer.github import GitHubApp
     from autoreviewer.review.conversation import ConversationDeps
     from autoreviewer.review.job import AgentFactory, Lens, ReviewDeps
-    from autoreviewer.review.schemas import LensKind, Verification
+    from autoreviewer.review.schemas import LensKind, LensReport, SimplifyVerdict, Verification
     from autoreviewer.review.simplify import SimplifierFactory
     from autoreviewer.review.workspace import Workspace
 from autoreviewer.web.routing import (
@@ -125,7 +126,9 @@ class ModelPlan:
     """Role -> reasoning effort (config.reasoning_from)."""
 
     prism: PrismConfig | None = None
+    pool: ModelPool | None = None
     overflow_finder: tuple[Model, int] | None = None
+    """Pins every finder (with a pool, too); checkers stay the plan's own."""
     _resolved: dict[str, tuple[Model, int]] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -137,6 +140,7 @@ class ModelPlan:
             settings.model_lanes,
             settings.reasoning,
             settings.prism,
+            ModelPool(settings.prism) if settings.prism and settings.prism.pool else None,
         )
 
     def finder(self, kind: AgentKind) -> tuple[Model, int]:
@@ -184,6 +188,8 @@ def build_agent_factory(settings: Settings) -> AgentFactory:
 def correctness_agents(plan: ModelPlan) -> AgentFactory:
     from autoreviewer.review.agents import correctness_agent, verifier_agent
 
+    if plan.pool:
+        return pooled_lens(plan.pool, "correctness", plan.overflow_finder)
     lens_model, lens_compact_at = plan.finder("correctness")
     verifier_model, verifier_compact_at = plan.verifier("correctness")
     return lambda workspace: (
@@ -217,6 +223,8 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
     """(lens, verifier) for `kind` over a checkout, on the plan's models for it: shared by the bot and the evals."""
     from autoreviewer.review.agents import lens_pair
 
+    if plan.pool:
+        return pooled_lens(plan.pool, kind, plan.overflow_finder)
     lens_model, lens_compact_at = plan.finder(kind)
     verifier_model, verifier_compact_at = plan.verifier(kind)
     return lambda workspace: lens_pair(
@@ -227,6 +235,33 @@ def lens_agents(plan: ModelPlan, kind: LensKind) -> AgentFactory:
         lens_compact_at=lens_compact_at,
         verifier_compact_at=verifier_compact_at,
     )
+
+
+def pooled_lens(pool: ModelPool, kind: Literal["correctness"] | LensKind, pinned: Choice | None = None) -> AgentFactory:
+    from autoreviewer.review.agents import checker_agent, correctness_agent, extra_finder
+
+    def agents(workspace: Workspace) -> tuple[Agent[None, LensReport], Callable[[], Agent[None, Verification]]]:
+        model, target = pinned or pool.choose()
+        finder = (
+            correctness_agent(model, workspace, compact_at=target)
+            if kind == "correctness"
+            else extra_finder(kind, model, workspace, compact_at=target)
+        )
+
+        def check() -> Agent[None, Verification]:
+            verifier, compact = pool.choose(excluding=model.model_name)
+            return checker_agent(kind, verifier, workspace, compact_at=compact)
+
+        return finder, check
+
+    return agents
+
+
+def select_correctness(pool: ModelPool) -> tuple[AgentFactory, str]:
+    from autoreviewer.review.agents import lens_version
+
+    choice = pool.choose()
+    return pooled_lens(pool, "correctness", choice), lens_version("pool:" + pool.key(choice[0]))
 
 
 def lens(kind: LensKind, agents: AgentFactory) -> Lens:
@@ -251,6 +286,18 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
     from autoreviewer.review.agents import simplify_agent, simplify_checker_agent
     from autoreviewer.review.simplify import Simplifier
 
+    if (pool := plan.pool) is not None:
+
+        def pooled(workspace: Workspace) -> Simplifier:
+            model, target = plan.overflow_finder or pool.choose()
+
+            def check() -> Agent[None, SimplifyVerdict]:
+                verifier, compact = pool.choose(excluding=model.model_name)
+                return simplify_checker_agent(verifier, workspace, compact_at=compact)
+
+            return Simplifier(simplify_agent(model, workspace, compact_at=target), check)
+
+        return pooled
     propose_model, propose_compact_at = plan.finder("simplify")
     check_model, check_compact_at = plan.verifier("simplify")
     return lambda workspace: Simplifier(
@@ -261,6 +308,8 @@ def simplifier_agents(plan: ModelPlan) -> SimplifierFactory:
 
 def models_note(settings: Settings) -> str:
     """The review footer's "correctness and security by `a`, verified by `b`", one clause per pair of models."""
+    if settings.prism and settings.prism.pool:
+        return _pool_note(settings.prism.pool)
     enabled: list[tuple[AgentKind, str]] = [
         ("correctness", "correctness"),
         *((kind, LENS_NAMES[kind]) for kind in enabled_lenses(settings)),
@@ -271,6 +320,10 @@ def models_note(settings: Settings) -> str:
     return "; ".join(
         f"{_and(names)} by `{finder}`, verified by `{checker}`" for (finder, checker), names in groups.items()
     )
+
+
+def _pool_note(pool: Mapping[str, int]) -> str:
+    return "scheduled from model pool: " + ", ".join(pool)
 
 
 def _and(names: list[str]) -> str:
@@ -331,19 +384,24 @@ def overflow_deps(settings: Settings, normal: ReviewDeps, plan: ModelPlan) -> Re
     if settings.simplify:
         active.append("simplify")
     finder = plan.prism.resolve(spec) if plan.prism is not None else resolve_model(spec)
-    for kind in active:
+    # A pool already places every check on a model other than its finder's (ModelPool.choose(excluding=...)).
+    for kind in active if plan.pool is None else ():
         if plan.verifier(kind)[0].model_name == finder[0].model_name:
             raise ValueError(f"{OVERFLOW_REPOS}: {kind} checker resolves to the overflow finder")
     models = {**plan.models, **dict.fromkeys(AGENT_KINDS, spec)}
-    # Shares the normal plan's resolved checker clients.
+    # Shares the normal plan's resolved checker clients (or its pool, which then places only checks).
     overflow = replace(plan, models=models, overflow_finder=finder)
+    pool = settings.prism.pool if settings.prism else None
     return replace(
         normal,
         agents=correctness_agents(overflow),
+        select_correctness=None,  # The overflow finder is pinned; the pool must not pick another.
         simplifier=simplifier_agents(overflow) if settings.simplify else None,
         lenses=build_lenses(settings, overflow),
-        models_note=models_note(replace(settings, models=models)),
-        memory=None,  # Always start fresh; never send local lens history to overflow or persist its replies.
+        models_note=(
+            f"found by `{spec}`, checks {_pool_note(pool)}" if pool else models_note(replace(settings, models=models))
+        ),
+        session_namespace="overflow",  # Its own sessions: no local transcript is sent to an overflow finder.
         lens_version=lens_version(spec),
     )
 
@@ -378,6 +436,7 @@ def main() -> None:
         bot_login=settings.bot_login,
         models_note=models_note(settings),
         memory=memory,
+        select_correctness=(lambda: select_correctness(pool)) if (pool := plan.pool) else None,
         lens_version=lens_version(settings.models["correctness"], settings.reasoning.get("correctness")),
         block_at=settings.block_at_priority,
         simplifier=simplifier_agents(plan) if settings.simplify else None,

@@ -5,7 +5,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from autoreviewer.model_config import PrismConfig
+from autoreviewer.model_config import PrismConfig, preferred_roles
+
+
+def _pool_model(value: str) -> tuple[str, int]:
+    spec, sep, count = value.rpartition("=")
+    if not sep or not spec or not count.isascii() or not count.isdecimal():
+        raise argparse.ArgumentTypeError("expected SPEC=CAPACITY with a positive integer capacity")
+    return spec, int(count)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -15,6 +22,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--overflow", help="optional overflow finder spec, independent of the checker")
     parser.add_argument("--overflow-url", metavar="URL", help="override the endpoint for a local:<id> overflow finder")
     parser.add_argument("--overflow-lanes", type=int, help="maximum concurrent overflow requests (default: uncapped)")
+    parser.add_argument(
+        "--pool-model",
+        type=_pool_model,
+        action="append",
+        metavar="SPEC=CAPACITY",
+        help="add a pool model, most preferred first (repeat for each model)",
+    )
     parser.add_argument("--local-context", type=int, metavar="TOKENS", help="served window per local model")
     parser.add_argument("--local-url", metavar="URL", help="default endpoint for local:<id> models")
     parser.add_argument("--finder-url", metavar="URL", help="override the endpoint for a local:<id> finder")
@@ -24,8 +38,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output", type=Path, default=Path("prism.json"), help="new file (default: prism.json)")
     args = parser.parse_args(argv)
     try:
-        finder = args.finder or input("Finder model (provider:model): ").strip()
-        checker = args.checker or input("Checker model (provider:model): ").strip()
+        pool: dict[str, int] = dict(args.pool_model or [])
+        if args.pool_model:
+            if len(pool) != len(args.pool_model):
+                parser.error("duplicate --pool-model spec")
+            if len(pool) < 2:
+                parser.error("--pool-model requires at least two distinct specs")
+            finder, checker = preferred_roles(pool, args.finder, args.checker)
+            assert finder is not None and checker is not None  # at least two distinct pool members
+        else:
+            finder = args.finder or input("Finder model (provider:model): ").strip()
+            checker = args.checker or input("Checker model (provider:model): ").strip()
         roles = [
             ("finder", finder, args.finder_url, args.finder_lanes),
             ("checker", checker, args.checker_url, args.checker_lanes),
@@ -33,7 +56,6 @@ def main(argv: list[str] | None = None) -> None:
         ]
         lanes = {}
         endpoints = {}
-        used_default = False
         for role, spec, url, count in roles:
             if spec is None:
                 if url is not None or count is not None:
@@ -45,14 +67,17 @@ def main(argv: list[str] | None = None) -> None:
                 if url is not None:
                     parser.error(f"--{role}-url requires --{role} to use local:<id>")
                 continue
-            if url is None and args.local_url is not None:
-                url = args.local_url
-                used_default = True
             if url is not None and endpoints.setdefault(spec, url) != url:
                 parser.error(f"conflicting endpoints for {spec}")
-        if args.local_url is not None and not used_default:
-            parser.error("--local-url needs a local:<id> role without a role-specific URL")
+        if args.local_url is not None:
+            # The shared default fills every local model (role or pool member) that has no URL of its own.
+            local = {spec for spec in (finder, checker, args.overflow, *pool) if spec and spec.startswith("local:")}
+            if not (remaining := local - endpoints.keys()):
+                parser.error("--local-url needs a local:<id> model without a role-specific URL")
+            endpoints.update(dict.fromkeys(remaining, args.local_url))
         options: dict[str, object] = {"finder": finder, "checker": checker, "overflow": args.overflow, "lanes": lanes}
+        if pool:
+            options["pool"] = pool
         if args.local_context is not None:
             if not endpoints:
                 parser.error("--local-context requires a local model endpoint")

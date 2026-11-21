@@ -10,21 +10,35 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 
-from autoreviewer.review.agents import LENS_LIMITS, VERIFIER_LIMITS
+from autoreviewer.review.agents import LENS_LIMITS
 from autoreviewer.review.diff import added_lines
-from autoreviewer.review.pipeline import Publish, PullRequestText, lens_prompt
+from autoreviewer.review.pipeline import (
+    CheckAgent,
+    Publish,
+    PullRequestText,
+    check_candidate,
+    current_workspace,
+    finder_prompt,
+    lens_prompt,
+    normal_title,
+)
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import has_secret
 from autoreviewer.review.schemas import Finding, SimplifyReport, SimplifyVerdict, Suggestion
 from autoreviewer.review.workspace import Workspace
+
+if TYPE_CHECKING:
+    from autoreviewer.review.sessions import RoleSessions
 
 logger = logging.getLogger("autoreviewer.simplify")
 
@@ -35,7 +49,7 @@ CHECK_CONCURRENCY = 3
 @dataclass(frozen=True)
 class Simplifier:
     propose: Agent[None, SimplifyReport]
-    check: Agent[None, SimplifyVerdict]
+    check: CheckAgent[SimplifyVerdict]
 
 
 SimplifierFactory = Callable[[Workspace], Simplifier]
@@ -56,6 +70,7 @@ async def suggest(
     root: Path,
     progress: Progress,
     *,
+    sessions: RoleSessions | None = None,
     paths: Collection[str] | None = None,
     publish: Publish | None = None,
     capabilities: Sequence[AbstractCapability[None]] = (),
@@ -64,7 +79,9 @@ async def suggest(
     the last review, so each push doesn't repeat the same suggestions). Never raises: suggestions are
     optional, so any failure here costs only them, never the review."""
     try:
-        run = await simplify(pr, simplifier, root, progress, paths=paths, publish=publish, capabilities=capabilities)
+        run = await simplify(
+            pr, simplifier, root, progress, paths=paths, publish=publish, capabilities=capabilities, sessions=sessions
+        )
         return run.posted
     except Exception:
         logger.warning("simplifications failed; posting none", exc_info=True)
@@ -77,6 +94,7 @@ async def simplify(
     root: Path,
     progress: Progress,
     *,
+    sessions: RoleSessions | None = None,
     paths: Collection[str] | None = None,
     publish: Publish | None = None,
     capabilities: Sequence[AbstractCapability[None]] = (),
@@ -86,11 +104,17 @@ async def simplify(
     scoped = [change for change in pr.reviewable if paths is None or change.path in paths]
     if not scoped:
         return result
+    history = await sessions.history("simplify", simplifier.propose) if sessions else None
     run = await simplifier.propose.run(
-        lens_prompt(replace(pr, reviewable=scoped)),
+        finder_prompt(lens_prompt(replace(pr, reviewable=scoped)), history),
+        message_history=history,
+        workspace=current_workspace(history),
         usage_limits=LENS_LIMITS,
         capabilities=[*capabilities, progress.watch("simplifier")],
     )
+
+    if sessions:
+        sessions.record("simplify", simplifier.propose, run.all_messages())
 
     allowed = {change.path for change in scoped}
     accepted: list[Suggestion] = []
@@ -110,11 +134,18 @@ async def simplify(
         async with slots:
             try:
                 watch = progress.watch(f"simplify checker ({suggestion.path}:{suggestion.start_line})")
-                verdict = (
-                    await simplifier.check.run(
-                        _check_prompt(suggestion), usage_limits=VERIFIER_LIMITS, capabilities=[watch]
-                    )
-                ).output
+                subject = json.dumps(
+                    [
+                        suggestion.path,
+                        suggestion.start_line,
+                        suggestion.end_line,
+                        normal_title(suggestion.title),
+                        suggestion.replacement,
+                    ]
+                )
+                verdict = await check_candidate(
+                    simplifier.check, "simplify", subject, _check_prompt(suggestion), watch, sessions
+                )
             except Exception:  # unchecked means unposted
                 logger.warning("checking a suggestion failed", exc_info=True)
                 return False

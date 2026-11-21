@@ -189,10 +189,12 @@ def lens_pair(
 ) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
     """(lens, verifier) for one extra lens. The security lens also wants `security_references` as run
     instructions."""
-    lens = _agent(
-        lens_model, workspace, LensReport, _prompt(LENS_PROMPTS[kind][0]) + _references(kind), lens_compact_at
-    )
+    lens = extra_finder(kind, lens_model, workspace, compact_at=lens_compact_at)
     return lens, checker_agent(kind, verifier_model, workspace, compact_at=verifier_compact_at)
+
+
+def extra_finder(kind: LensKind, model: Model, workspace: Workspace, *, compact_at: int) -> Agent[None, LensReport]:
+    return _agent(model, workspace, LensReport, _prompt(LENS_PROMPTS[kind][0]) + _references(kind), compact_at)
 
 
 def checker_agent(

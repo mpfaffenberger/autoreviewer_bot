@@ -57,6 +57,14 @@ def check_model_spec(spec: str) -> str:
     return spec
 
 
+def preferred_roles(pool: dict[str, int], finder: str | None, checker: str | None) -> tuple[str | None, str | None]:
+    if finder is None:
+        finder = next((spec for spec in pool if spec != checker), None)
+    if checker is None:
+        checker = next((spec for spec in pool if spec != finder), None)
+    return finder, checker
+
+
 class PrismConfig(BaseModel):
     """Per-model options are keyed by the full model spec, not the role."""
 
@@ -64,10 +72,19 @@ class PrismConfig(BaseModel):
     finder: str
     checker: str
     overflow: str | None = None
+    pool: Annotated[dict[str, Annotated[int, Field(gt=0)]], Field(min_length=2)] | None = None
     local_context: dict[str, Annotated[int, Field(ge=16)]] = Field(default_factory=dict)
     endpoints: dict[str, str] = Field(default_factory=dict)
     lanes: dict[str, Annotated[int, Field(ge=1)]] = Field(default_factory=dict)
     compact_at: dict[str, Annotated[int, Field(ge=8)]] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_roles(cls, data: object) -> object:
+        if isinstance(data, dict) and isinstance(pool := data.get("pool"), dict):
+            finder, checker = preferred_roles(pool, data.get("finder"), data.get("checker"))
+            return {"finder": finder, "checker": checker, **data}
+        return data
 
     @field_validator("finder", "checker", "overflow")
     @classmethod
@@ -98,7 +115,12 @@ class PrismConfig(BaseModel):
     def check_models(self) -> Self:
         if self.finder == self.checker:
             raise ValueError("finder and checker must use different models")
-        specs = {self.finder, self.checker}
+        pool = self.pool or {}
+        for spec, capacity in pool.items():
+            check_model_spec(spec)
+            if spec in self.lanes and self.lanes[spec] != capacity:
+                raise ValueError(f"lanes for {spec} conflict with pool capacity {capacity}")
+        specs = {self.finder, self.checker, *pool}
         if self.overflow is not None:
             if self.overflow == self.checker:
                 raise ValueError("overflow finder and checker must use different models")
@@ -120,12 +142,14 @@ class PrismConfig(BaseModel):
         return cls.model_validate_json(Path(path).read_bytes())
 
     def lane_count(self, spec: str) -> int:
+        if self.pool is not None and spec in self.pool:
+            return self.pool[spec]
         return self.lanes.get(spec, 1)
 
     def resolve(self, spec: str) -> tuple[Model, int]:
         # A model that only takes overflow exists to absorb a queue, so it is uncapped unless lanes are set.
-        # One that is also the finder keeps the finder's cap: lanes belong to the model, not the role.
-        overflow_only = spec == self.overflow != self.finder
+        # One that is also the finder or a pool member keeps that cap: lanes belong to the model, not the role.
+        overflow_only = spec == self.overflow != self.finder and spec not in (self.pool or {})
         return resolve_model(
             spec,
             endpoint=self.endpoints.get(spec),

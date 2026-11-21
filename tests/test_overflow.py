@@ -67,7 +67,7 @@ def test_overrides_only_finders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert overflow_deps(settings, normal, plan) is None
     settings = replace(settings, overflow_repos=frozenset({"org/repo"}))
     overflow = overflow_deps(settings, normal, plan)
-    assert overflow and overflow.memory is None and normal.memory is not None
+    assert overflow and overflow.memory is normal.memory and overflow.session_namespace != normal.session_namespace
     assert overflow.source is normal.source and overflow.github is normal.github
     assert overflow.lens_version == lens_version(spec) and spec in overflow.models_note
     workspace = Workspace(tmp_path, "base", "head")

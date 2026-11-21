@@ -11,11 +11,11 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic_ai import Agent, AgentRunResult, Tool
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.toolsets import FunctionToolset
 
 from autoreviewer.review.agents import FOCUS, LENS_LIMITS, LENS_RULES, REPORT_TOOL, VERIFIER_LIMITS
@@ -25,6 +25,10 @@ from autoreviewer.review.memory import PriorReview
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.render import sanitize
 from autoreviewer.review.schemas import ADVISORY_KINDS, Finding, LensKind, LensReport, Verification
+from autoreviewer.web.config import AgentKind, verifier_role
+
+if TYPE_CHECKING:
+    from autoreviewer.review.sessions import RoleSessions
 
 logger = logging.getLogger("autoreviewer.review")
 
@@ -273,6 +277,55 @@ Publish = Callable[[Finding], Awaitable[None]]
 """Post one confirmed inline finding right away (see posting.Publisher). Must not raise."""
 
 
+type CheckAgent[T] = Agent[None, T] | Callable[[], Agent[None, T]]
+
+
+def select_checker[T](checker: CheckAgent[T]) -> Agent[None, T]:
+    return checker if isinstance(checker, Agent) else checker()
+
+
+def current_workspace(history: list[ModelMessage] | None) -> Literal["new"] | None:
+    """Never restore a previous checkout; agents without a workspace don't need a new one."""
+    if history:
+        last = next((msg for msg in reversed(history) if isinstance(msg, ModelResponse)), None)
+        if last and last.workspace_ref is not None:
+            return "new"
+    return None
+
+
+def finder_prompt(prompt: str, history: list[ModelMessage] | None) -> str:
+    if not history:
+        return prompt
+    return (
+        prompt + "\nEarlier tool results are stale. Re-read the current code and complete the whole "
+        "review in scope for the current HEAD, not just a delta from the previous review."
+    )
+
+
+async def check_candidate[T](
+    checker: CheckAgent[T],
+    kind: AgentKind,
+    subject: str,
+    prompt: str,
+    watch: AbstractCapability[None],
+    sessions: RoleSessions | None,
+) -> T:
+    agent = select_checker(checker)
+    role = verifier_role(kind)
+    history = await sessions.history(role, agent, subject=subject) if sessions else None
+    result = await agent.run(
+        prompt + "\nIndependently verify this candidate: you MUST re-read the current HEAD code. "
+        "Earlier tool results are stale and a previous verdict is not evidence.",
+        message_history=history,
+        workspace=current_workspace(history),
+        usage_limits=VERIFIER_LIMITS,
+        capabilities=[watch],
+    )
+    if sessions:
+        sessions.record(role, agent, result.all_messages(), subject=subject)
+    return result.output
+
+
 class Judge:
     """Verifies a lens's findings as they arrive (from `report_finding` mid-run, then the final report) and
     sorts each into `outcome`. Each confirmed inline finding is handed to `publish` at once."""
@@ -280,7 +333,7 @@ class Judge:
     def __init__(
         self,
         pr: PullRequestText,
-        verifier: Agent[None, Verification],
+        verifier: CheckAgent[Verification],
         progress: Progress,
         outcome: Outcome,
         *,
@@ -288,10 +341,13 @@ class Judge:
         label: str,
         publish: Publish | None = None,
         limit: int = MAX_FINDINGS,
+        sessions: RoleSessions | None = None,
     ) -> None:
         """`limit`: how many findings are verified at most, counting only those past the free filters."""
         self._pr, self._verifier, self._progress, self._outcome = pr, verifier, progress, outcome
-        self._kind, self._label, self._publish, self._limit = kind, label, publish, limit
+        self._kind: Literal["correctness"] | LensKind = kind
+        self._label, self._publish, self._limit = label, publish, limit
+        self._sessions = sessions
         self._reviewable = {change.path for change in pr.reviewable}
         self._slots = asyncio.Semaphore(VERIFY_CONCURRENCY)
         self._tasks: list[asyncio.Task[None]] = []
@@ -354,7 +410,8 @@ class Judge:
             try:
                 watch = self._progress.watch(f"{self._label} ({finding.path}:{finding.line})")
                 prompt = verifier_prompt(self._pr, finding)
-                verdict = (await self._verifier.run(prompt, usage_limits=VERIFIER_LIMITS, capabilities=[watch])).output
+                subject = json.dumps([finding.path, finding.line, normal_title(finding.title)])
+                verdict = await check_candidate(self._verifier, self._kind, subject, prompt, watch, self._sessions)
             except Exception as error:  # precision first: an unverifiable finding is not posted
                 logger.warning("verifying %s:%s failed: %r", finding.path, finding.line, error)
                 if self._latest.get((finding.path, finding.line)) is reported:  # not superseded meanwhile
@@ -396,7 +453,7 @@ async def _run_judged(judge: Judge, run: LensRun, *, report_as_you_go: bool = Tr
 async def review_lens(
     pr: PullRequestText,
     lens: Agent[None, LensReport],
-    verifier: Agent[None, Verification],
+    verifier: CheckAgent[Verification],
     *,
     kind: LensKind,
     instructions: str | None,
@@ -405,21 +462,33 @@ async def review_lens(
     publish: Publish | None = None,
     capabilities: Sequence[AbstractCapability[None]] = (),
     max_posted: int = MAX_FINDINGS,
+    sessions: RoleSessions | None = None,
 ) -> Outcome:
-    """An extra lens (security, DRY) over `pr`, always fresh, checked by its own verifier.
+    """An extra lens (security, DRY) over the current `pr`, checked by its own verifier.
 
     With a `max_posted` cap, only its best findings are verified (and so posted): it doesn't report as it goes,
     so the cut is made on its ranked final report rather than on whatever it found first."""
     outcome = Outcome(block_at=block_at)
     judge = Judge(
-        pr, verifier, progress, outcome, kind=kind, label=f"{kind} verifier", publish=publish, limit=max_posted
+        pr,
+        verifier,
+        progress,
+        outcome,
+        kind=kind,
+        label=f"{kind} verifier",
+        publish=publish,
+        limit=max_posted,
+        sessions=sessions,
     )
     report_as_you_go = max_posted >= MAX_FINDINGS
     combined = "\n\n".join(part for part in (instructions, LENS_RULES if report_as_you_go else FOCUS) if part)
+    history = await sessions.history(kind, lens) if sessions else None
     run = await _run_judged(
         judge,
         lambda toolsets: lens.run(
-            lens_prompt(pr),
+            finder_prompt(lens_prompt(pr), history),
+            message_history=history,
+            workspace=current_workspace(history),
             instructions=combined,
             toolsets=toolsets,
             capabilities=[*capabilities, progress.watch(kind)],
@@ -427,6 +496,8 @@ async def review_lens(
         ),
         report_as_you_go=report_as_you_go,
     )
+    if sessions:
+        sessions.record(kind, lens, run.all_messages())
     logger.info("%s: %d requests, %d posted", kind, run.usage.requests, len(outcome.posted))
     return outcome
 
@@ -434,9 +505,10 @@ async def review_lens(
 async def review(
     pr: PullRequestText,
     lens: Agent[None, LensReport],
-    verifier: Agent[None, Verification],
+    verifier: CheckAgent[Verification],
     *,
     continuation: Continuation | None = None,
+    sessions: RoleSessions | None = None,
     lens_capabilities: Sequence[AbstractCapability[None]] = (),
     conversation: str | None = None,
     block_at: int = BLOCK_AT_PRIORITY,
@@ -449,24 +521,31 @@ async def review(
     for finding in checked:  # proven by a tool, not a model: nothing to verify, so post at once
         if place(outcome, finding, pr.patches.get(finding.path, "")) and publish is not None:
             await publish(finding)
-    prompt = continuation_prompt(pr, continuation) if continuation else lens_prompt(pr)
-    progress.set_phase("Continuing the last review" if continuation else "Reviewing the change")
-    judge = Judge(pr, verifier, progress, outcome, label="verifier", publish=publish)
+    prompt = lens_prompt(pr)
+    if continuation:
+        history = continuation.history
+        prompt = continuation_prompt(pr, continuation) + "\n\n" + prompt
+    else:
+        history = await sessions.history("correctness", lens) if sessions else None
+    progress.set_phase("Continuing the last review" if continuation or history else "Reviewing the change")
+    judge = Judge(pr, verifier, progress, outcome, label="verifier", publish=publish, sessions=sessions)
     lens_run = await _run_judged(
         judge,
         lambda toolsets: lens.run(
-            prompt,
+            finder_prompt(prompt, history),
             instructions=LENS_RULES,
             toolsets=toolsets,
-            message_history=continuation.history if continuation else None,
+            message_history=history,
             capabilities=[*lens_capabilities, progress.watch("reviewer")],
             conversation_id=conversation,
             # The history names the last review's checkout; this review has a new one (the new head).
-            workspace="new" if continuation else None,
+            workspace="new" if continuation else current_workspace(history),
             usage_limits=LENS_LIMITS,
         ),
     )
 
+    if sessions:
+        sessions.record("correctness", lens, lens_run.all_messages())
     report, usage = lens_run.output, lens_run.usage
     outcome.overall_correct, outcome.reviewed = report.overall_correct, report.reviewed
     compacted = compaction_stats(lens_run.all_messages())
