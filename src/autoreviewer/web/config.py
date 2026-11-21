@@ -193,8 +193,10 @@ DEFAULT_REASONING: dict[str, ReasoningEffort] = {CONVERSATION: "high"}
 
 
 def deadlines_from(env: Mapping[str, str]) -> tuple[float, float]:
-    """(soft, hard) review time limits in minutes: PRISM_SOFT_DEADLINE_MINUTES and
-    PRISM_HARD_DEADLINE_MINUTES over Settings' defaults. Shared by the bot and the evals."""
+    """Return (soft, hard) minutes for the receiver and evals. Both settings must be positive and finite.
+
+    Cap the hard limit at ten minutes and the soft limit at 90% of the effective hard limit.
+    """
     soft = float(env.get("PRISM_SOFT_DEADLINE_MINUTES", Settings.soft_deadline_minutes))
     hard = float(env.get("PRISM_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
     if not all(math.isfinite(value) and value > 0 for value in (soft, hard)):
