@@ -287,6 +287,18 @@ async def test_expired_recovery_finishes_check_from_published_verdict(repo: GitR
     assert len(github.reviews) == 1
 
 
+async def test_timeout_finishes_even_if_review_lookup_fails(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    deps = job_deps(github, tmp_path)
+    check = await start_check(deps, event)
+    monkeypatch.setattr(github, "review_bodies", AsyncMock(side_effect=OSError("unavailable")))
+    await finish_check(deps, event, check, await review_and_post(deps, event, check, remaining_s=0))
+    assert github.checks[-1]["status"] == "completed" and github.checks[-1]["conclusion"] == "neutral"
+
+
 async def test_early_comments_do_not_count_as_the_verdict(repo: GitRepo, tmp_path: Path) -> None:
     """GitHub wraps each early comment in an empty COMMENTED review; the verdict must still be posted (live on #21)."""
     github = FakeGitHub(repo)

@@ -199,7 +199,10 @@ async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int
     if timed_out or result.title == "Review failed":
         # No review budget left, or the POST response was lost. Reconcile the external write in the
         # retriable completion step, without running models or granting the review extra time.
-        result = await _published_result(deps, pull, check_id) or result
+        try:
+            result = await _published_result(deps, pull, check_id) or result
+        except Exception:
+            logger.exception("Could not reconcile check %s; keeping its neutral result", check_id)
     await deps.github.finish_check(
         repo_of(pull),
         check_id,

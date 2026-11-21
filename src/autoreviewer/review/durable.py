@@ -107,8 +107,8 @@ async def _start_check(pull: PullRequestUpdated) -> int:
 
 @DBOS.step()  # no retries: review_and_post never raises, and model time isn't free
 async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.CheckResult:
-    # DBOS already timestamped step 1, after dequeue. Read its checkpoint *inside* step 2:
-    # no extra workflow operation on replay, and even old integer check IDs need no migration.
+    # DBOS already timestamped step 1, after dequeue. Reading its checkpoint inside step 2
+    # avoids a new operation on replay and preserves existing integer check IDs.
     run_id = DBOS.workflow_id
     assert run_id is not None
     steps = await DBOS.list_workflow_steps_async(run_id, limit=1, load_output=False)
