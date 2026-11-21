@@ -79,7 +79,7 @@ async def test_cancelled_overflow_releases_only_its_slot(tmp_path: Path, monkeyp
     primary = job_deps(FakeGitHub(make_repo(tmp_path / "origin")), tmp_path, [])
     overflow = replace(primary)
     monkeypatch.setattr(durable, "_deps", primary)
-    slots = durable._ReviewSlots(2, overflow, frozenset({"owner/allowed"}))
+    slots = durable._ReviewSlots(2, overflow, frozenset({"*"}))
     pull = PullRequestUpdated(1, "Owner", "Allowed", 1, "a" * 40)
     claimed = asyncio.Event()
 

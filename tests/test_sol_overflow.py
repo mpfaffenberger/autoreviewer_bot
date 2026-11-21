@@ -17,12 +17,15 @@ from tests.test_prism_model_plan import APP_ENV
 
 def test_allowlist_from_env() -> None:
     env = {**APP_ENV, "BOODLETON_API_KEY": "fake"}
+    assert sol_overflow_repos_from({"PRISM_SOL_OVERFLOW_REPOS": " * "}) == {"*"}
     assert not Settings.from_env(env).sol_overflow_repos
     settings = Settings.from_env({**env, "PRISM_SOL_OVERFLOW_REPOS": " Org/A, org/a, Other-Owner/.github "})
     assert settings.sol_overflow_repos == {"org/a", "other-owner/.github"}
 
 
-@pytest.mark.parametrize("bad", ["*", "org/*", "org/re?o", "org", "org/", "/repo", "a/b/c", "org/..", "a/b,,c/d"])
+@pytest.mark.parametrize(
+    "bad", ["*,org/repo", "org/*", "org/re?o", "org", "org/", "/repo", "a/b/c", "org/..", "a/b,,c/d"]
+)
 def test_reject_invalid_allowlist(bad: str) -> None:
     with pytest.raises(ValueError, match="PRISM_SOL_OVERFLOW_REPOS"):
         sol_overflow_repos_from({"PRISM_SOL_OVERFLOW_REPOS": bad})

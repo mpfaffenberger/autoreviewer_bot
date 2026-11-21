@@ -55,7 +55,7 @@ class _ReviewSlots:
         self.changed = asyncio.Condition()
 
     def eligible(self, pull: PullRequestUpdated) -> bool:
-        return self.overflow is not None and f"{pull.owner}/{pull.repo}".lower() in self.repos
+        return self.overflow is not None and ("*" in self.repos or f"{pull.owner}/{pull.repo}".lower() in self.repos)
 
     @asynccontextmanager
     async def claim(self, pull: PullRequestUpdated) -> AsyncIterator[job.ReviewDeps]:
@@ -196,7 +196,9 @@ async def launch(
     enabled = overflow_deps is not None and bool(overflow_repos)
     await DBOS.register_queue_async(QUEUE, worker_concurrency=None if enabled else concurrency)
     # Register even when disabled so any previously queued local work can drain.
-    await DBOS.register_queue_async(LOCAL_QUEUE, worker_concurrency=concurrency)
+    await DBOS.register_queue_async(
+        LOCAL_QUEUE, worker_concurrency=None if enabled and "*" in overflow_repos else concurrency
+    )
     await DBOS.register_queue_async(ANSWER_QUEUE, worker_concurrency=ANSWER_CONCURRENCY)
 
 

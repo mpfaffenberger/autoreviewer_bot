@@ -149,6 +149,8 @@ def sol_overflow_repos_from(env: Mapping[str, str]) -> frozenset[str]:
     if not value:
         return frozenset()
     repos = set[str]()
+    if value == "*":
+        return frozenset({"*"})
     for entry in value.split(","):
         repo = entry.strip()
         if not re.fullmatch(r"[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*/[a-zA-Z0-9._-]+", repo) or repo.endswith(("/.", "/..")):

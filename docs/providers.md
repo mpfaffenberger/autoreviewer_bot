@@ -17,7 +17,7 @@ A read-only snapshot is not durable token rotation: refreshed credentials live o
 
 ### Burst queued reviews to Sol
 
-Provision the dedicated Codex identity above, then set `PRISM_SOL_OVERFLOW_REPOS` in the receiver environment to a comma-separated list of exact repositories approved to send code to OpenAI (for example `your-org/public-project,your-org/another-project`). Restart the receiver to apply it. Blank or unset keeps overflow off; a GitHub App installation alone does not opt a repository in.
+Provision the dedicated Codex identity above, then set `PRISM_SOL_OVERFLOW_REPOS` in the receiver environment to a comma-separated list of exact repositories approved to send code to OpenAI (for example `your-org/public-project,your-org/another-project`). Set `PRISM_SOL_OVERFLOW_REPOS=*` to authorize Sol overflow for **all repositories this receiver reviews**, including private and future installations. Local review capacity is still used first. Restart the receiver to apply it. Blank or unset keeps overflow off; a GitHub App installation alone does not opt a repository in.
 
 Prism prefers its normal review workers. When they are busy, all eligible queued reviews can concurrently use `openai-codex:gpt-6.2-sol` for its finders, including the simplifier. The usual independent checkers still verify findings; thread replies stay on the normal plan. Overflow reviews start without saved lens history. No active review is moved or duplicated. Previously queued eligible work can use the extra slot, but older local-only jobs ahead of it may delay pickup. Sol requests consume the service identity’s quota; there is no Prism concurrency cap on overflow finders. Receiver memory, disk, provider quotas, checker capacity and review deadlines still apply.
 
