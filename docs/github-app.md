@@ -59,6 +59,8 @@ For a persistent systemd service, adapt [the example Quadlet](../deploy/web/pris
 
 Open the **install** URL printed by `convert.sh` and select just the repositories to review. Open a non-draft PR there, or as its author comment `@YOUR-APP-SLUG review` on an existing open PR. Use the actual slug GitHub returned, not the display name or the hosted bot's handle. Look for the `autoreviewer` check on the head commit; that's also the name to require in branch protection. If nothing appears, inspect the App's **Advanced → Recent deliveries** first: verify the delivery URL and response status before troubleshooting review or model logs.
 
+To verify a second attempt on unchanged code, wait for the check to finish and post a **new** review command. It should start a new check; another command while that attempt is queued or running joins it instead. See [review timing](../README.md#on-a-pull-request) for the per-attempt limit.
+
 ### Migrate an existing receiver without losing reviews
 
 Use a receiver build that supports the `PRISM_` settings before switching units. Keep the existing GitHub App, installation, webhook URL, and `autoreviewer` branch-protection check. **Do not run `convert.sh` again.**

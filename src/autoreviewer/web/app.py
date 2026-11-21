@@ -305,8 +305,6 @@ def conversation_deps(settings: Settings, github: GitHubApp, plan: ModelPlan | N
 
 
 def main() -> None:
-    import functools
-
     import logfire
     import uvicorn
 
@@ -356,7 +354,7 @@ def main() -> None:
 
     async def review_requested(request: ReviewRequested) -> None:
         # An explicit request retries a review of this commit that was cancelled or crashed.
-        await request_review(github, request, functools.partial(durable.enqueue_review, retry_failed=True))
+        await request_review(github, request, durable.enqueue_review)
 
     async def forget(closed: PullRequestClosed) -> None:
         repo = Repo(closed.installation_id, closed.owner, closed.repo)

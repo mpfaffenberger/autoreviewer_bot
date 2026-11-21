@@ -58,10 +58,10 @@ _ANSWER_END = re.compile(
 led to write can claim an answer or withdraw a finding."""
 _VERDICT_STATE = re.compile(
     r"<!-- autoreviewer:state (APPROVE|REQUEST_CHANGES|COMMENT) outside=(\d+) complete=([01]) -->\n"
-    + re.escape(VERDICT_MARKER)
-    + r"\Z"
+    + r"(?:<!-- autoreviewer:check \d+ -->\n)?"
+    + rf"(?:{re.escape(VERDICT_MARKER)}|{re.escape(PARTIAL_MARKER)})\Z"
 )
-"""The line before a verdict's own marker, at the very end of its body (anchored there for the same reason): its
+"""The state in a verdict's footer, at the very end of its body (anchored there for the same reason): its
 event, how many blocking findings it listed with no thread to withdraw them in, and whether the review covered
 the whole change. A withdrawal only ever overturns a complete verdict that requested changes with outside=0."""
 
@@ -218,18 +218,25 @@ async def post_review(
     models_note: str,
     outcome: Outcome,
     posted: Mapping[str, int] | None = None,
+    check_id: int | None = None,
 ) -> None:
     """The verdict, computed and never generated: a confirmed finding at the blocking priority blocks the
     merge. Inline findings already posted (`posted` fingerprints) aren't repeated."""
     # A review cut short by the time limit never approves: it hasn't seen the whole change. Its verdict is
     # partial: a later full review of the same commit (a retry) must still post its own.
     partial = outcome.cut_short and not outcome.blocking
-    marker = PARTIAL_MARKER if partial else VERDICT_MARKER
+    # GitHub's check run ID is checkpointed: stable across recovery, new for a fresh attempt.
+    prefix = f"<!-- autoreviewer:check {check_id} -->\n" if check_id is not None else ""
+    marker = prefix + (PARTIAL_MARKER if partial else VERDICT_MARKER)
     bodies = await github.review_bodies(repo, number, commit_sha=head_sha, author=author)
-    if any(body.endswith(VERDICT_MARKER) or (partial and body.endswith(PARTIAL_MARKER)) for body in bodies):
+    # Without a check ID, retain the legacy head-scoped rule: a full verdict can follow a partial.
+    prior = (prefix + VERDICT_MARKER,)
+    if check_id is not None or partial:
+        prior += (prefix + PARTIAL_MARKER,)
+    if any(body.endswith(prior) for body in bodies):
         # A replay after a crash between posting and checkpointing: this verdict is already there. (GitHub
         # also wraps each early inline comment in an empty review of its own; those never count.)
-        logger.info("%s/%s#%d at %s already reviewed; not posting again", repo.owner, repo.name, number, head_sha[:7])
+        logger.info("%s/%s#%d at %s verdict already published", repo.owner, repo.name, number, head_sha[:7])
         return
     event: ReviewEvent = "REQUEST_CHANGES" if outcome.blocking else "COMMENT" if partial else "APPROVE"
     unposted = [f for f in outcome.inline if not covered(posted or {}, fingerprint(head_sha, f), f)]

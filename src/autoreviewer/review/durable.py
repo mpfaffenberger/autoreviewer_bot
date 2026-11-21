@@ -1,4 +1,4 @@
-"""Durable reviews: one DBOS workflow per PR head, run from a queue, recovered after a restart.
+"""Durable reviews: one DBOS workflow per review attempt, run from a queue, recovered after a restart.
 
 Verified against DBOS 3.5 before writing this: a duplicate workflow ID returns the existing workflow,
 async workflows run on the caller's event loop, and after a hard crash a new process skips completed
@@ -12,7 +12,6 @@ minute of GPU time and nothing else.
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -56,11 +55,8 @@ def _require_conversation_deps() -> conversation.ConversationDeps:
     return _conversation_deps
 
 
-logger = logging.getLogger("autoreviewer.durable")
-
-
 def workflow_id(pull: PullRequestUpdated) -> str:
-    """One review per PR head: redeliveries and duplicate events can never start a second one."""
+    """Stable first attempt ID, shared by a push and a first explicit request."""
     return f"review:{pull.owner}/{pull.repo}#{pull.number}@{pull.head_sha}".lower()
 
 
@@ -87,10 +83,6 @@ async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.Check
 @DBOS.step(retries_allowed=True, max_attempts=3)
 async def _finish_check(pull: PullRequestUpdated, check_id: int, result: job.CheckResult) -> None:
     await job.finish_check(_require_deps(), pull, check_id, result)
-
-
-REVIEW_STEP = 2
-"""review_workflow's second step (_review_and_post): a re-run starts there, keeping the check run."""
 
 
 @DBOS.workflow(max_recovery_attempts=MAX_RECOVERY_ATTEMPTS)
@@ -174,62 +166,51 @@ async def _enqueue[Arg, Result](
         return await queue.enqueue_async(workflow, arg)
 
 
-_RUNNING = frozenset({WorkflowStatusString.PENDING.value, WorkflowStatusString.ENQUEUED.value})
-_ENDED_WITHOUT_RESULT = frozenset(
-    status.value
-    for status in (
-        WorkflowStatusString.CANCELLED,
-        WorkflowStatusString.ERROR,
-        WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED,
-    )
-)
+_RUNNING = {"ENQUEUED", "PENDING", "DELAYED", "SUSPENDED"}
 
 
-async def enqueue_review(pull: PullRequestUpdated, *, retry_failed: bool = False) -> bool:
-    """Queue a review of this head (a no-op if one exists); True if it had already finished with a verdict.
-
-    With `retry_failed` (an explicit request, never a redelivered push), a review of this head that was
-    cancelled, crashed, parked after repeated crashes, or finished without a verdict runs again.
-    """
-    handle = await enqueue(pull)
-    status = (await handle.get_status()).status
-    if not retry_failed:
-        return status == WorkflowStatusString.SUCCESS.value
-    # Retries are forks of this workflow: one at a time, and none once one has reached a verdict.
-    forks = await DBOS.list_workflows_async(forked_from=handle.workflow_id)
-    if any(fork.status in _RUNNING for fork in forks):
-        return False  # already being retried
-    if any(fork.status == WorkflowStatusString.SUCCESS.value and _has_verdict(fork.output) for fork in forks):
-        return True
-    if status in _ENDED_WITHOUT_RESULT:
-        await _retry(handle.workflow_id, status)
-        return False
-    if status == WorkflowStatusString.SUCCESS.value and not _has_verdict(await handle.get_result()):
-        # Finished without a verdict (partially reviewed, timed out, failed): what "push again or ask again" promises.
-        logger.info("re-running %s, which ended without a verdict", handle.workflow_id)
-        await DBOS.fork_workflow_async(handle.workflow_id, REVIEW_STEP, queue_name=QUEUE)
-        return False
-    return status == WorkflowStatusString.SUCCESS.value
+async def _select_attempt(pull: PullRequestUpdated, *, explicit: bool) -> str:
+    base = workflow_id(pull)
+    attempt = base
+    previous = None
+    number = 1
+    while True:
+        status = await DBOS.get_workflow_status_async(attempt)
+        if status is None:
+            if previous is not None and not explicit:
+                return previous  # pushes never allocate another attempt
+            # Concurrent selectors finding the same empty slot enqueue the same DBOS ID.
+            return (await _enqueue(QUEUE, attempt, review_workflow, pull)).workflow_id
+        if status.status in _RUNNING:
+            return attempt
+        if number == 1:
+            # A retry queued by the previous version may still be running at deploy time.
+            forks = await DBOS.list_workflows_async(
+                forked_from=base, status=sorted(_RUNNING), limit=1, load_input=False, load_output=False
+            )
+            if forks:
+                return forks[0].workflow_id
+        number += 1
+        previous, attempt = attempt, f"{base}:attempt:{number}"
 
 
-def _has_verdict(result: object) -> bool:
-    """A finished review that approved or requested changes (not partial, timed out, failed, or superseded)."""
-    return getattr(result, "conclusion", "neutral") != "neutral"
+@DBOS.workflow()
+async def _requested_attempt(pull: PullRequestUpdated) -> str:
+    # DBOS checkpoints both the selection reads and child enqueue. A redelivery returns
+    # the same attempt even when it originally joined a push, or the PR head has moved.
+    return await _select_attempt(pull, explicit=True)
 
 
-async def _retry(workflow_id: str, status: str) -> None:
-    """Run an ended review again from its first failed step. Resuming would replay a recorded failure, so a
-    failed step means a fork (a new workflow keeping the steps before it, e.g. the check run); with no
-    failure recorded (cancelled, or crashed mid-step) it resumes where it stopped."""
-    steps = await DBOS.list_workflow_steps_async(workflow_id)
-    failed = [step["function_id"] for step in steps if step["error"] is not None]
-    if failed:
-        logger.info("retrying the %s review %s from step %d", status.lower(), workflow_id, min(failed))
-        await DBOS.fork_workflow_async(workflow_id, min(failed), queue_name=QUEUE)
+async def enqueue_review(pull: PullRequestUpdated, comment_id: int | None = None) -> bool:
+    """Queue or join an attempt; True if the selected workflow is already successful."""
+    if comment_id is None:
+        attempt = await _select_attempt(pull, explicit=False)
     else:
-        logger.info("resuming the %s review %s", status.lower(), workflow_id)
-        # On the review queue: by default DBOS resumes on its internal queue, which ignores our concurrency.
-        await DBOS.resume_workflow_async(workflow_id, queue_name=QUEUE)
+        with SetWorkflowID(f"review-request:{pull.owner}/{pull.repo}#{pull.number}:{comment_id}".lower()):
+            receipt = await DBOS.start_workflow_async(_requested_attempt, pull)
+        attempt = await receipt.get_result()  # waits for dispatch, not the review
+    status = await DBOS.get_workflow_status_async(attempt)
+    return status is not None and status.status == WorkflowStatusString.SUCCESS.value
 
 
 def shutdown() -> None:

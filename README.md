@@ -10,7 +10,7 @@
 
 ## On a pull request
 
-Each PR head gets at most **10 minutes of review time** from the start of its GitHub check. Waiting in the queue does not count; restarting the receiver does not reset the clock. Slow GitHub delivery or retrying the final check update can delay when the verdict appears. If a blocking review runs out of time it never approves.
+Each review attempt gets at most **10 minutes of review time** from the start of its GitHub check. Waiting in the queue does not count; restarting the receiver does not reset the clock. Slow GitHub delivery or retrying the final check update can delay when the verdict appears. If a blocking review runs out of time it never approves.
 
 Prism reads the diff **and the code around it**. When the finder flags a correctness bug, a separate checker checks whether the claim holds up in the repository before it becomes an inline finding. The models don't hold GitHub credentials; application code posts the review and sets the verdict.
 
@@ -25,7 +25,9 @@ Prism reads the diff **and the code around it**. When the finder flags a correct
 
 ## Talk back, in the thread
 
-Already have the App installed? Open a PR, push a commit, or comment `@YOUR-APP-SLUG review` on an existing PR. Then reply **on the finding**. A PR-opening bot can do this just like a person can.
+Already have the App installed? Open a PR, push a commit, or comment `@YOUR-APP-SLUG review` on an existing PR. If a review of the current commit is queued or running, the command joins it. Once it finishes, a new command starts a fresh check with its own time budget, even on the same commit. Redelivering the original request does not start another attempt.
+
+Reply **on the finding**. A PR-opening bot can do this just like a person can.
 
 > **Example author reply:** “This helper only gets normalized paths. Can you check the caller in `resolve_path`?”
 

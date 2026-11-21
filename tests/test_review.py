@@ -258,6 +258,19 @@ async def test_a_commit_already_reviewed_is_not_reviewed_again(repo: GitRepo, tm
     assert len(github.reviews) == 1
 
 
+async def test_same_head_attempt_posts_its_own_verdict_but_replay_does_not(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    clean = job_deps(github, tmp_path)
+    blocking = job_deps(github, tmp_path, [finding(5)])
+    await review_and_post(clean, event, check_id=1)
+    for check_id in (2, 2, 3):  # fresh request, crash recovery, another fresh request
+        result = await review_and_post(blocking, event, check_id=check_id)
+        assert result.conclusion == "failure"
+    assert [r["event"] for r in github.reviews] == ["APPROVE", "REQUEST_CHANGES", "REQUEST_CHANGES"]
+    assert len(github.review_comments) == 1
+
+
 async def test_early_comments_do_not_count_as_the_verdict(repo: GitRepo, tmp_path: Path) -> None:
     """GitHub wraps each early comment in an empty COMMENTED review; the verdict must still be posted (live on #21)."""
     github = FakeGitHub(repo)

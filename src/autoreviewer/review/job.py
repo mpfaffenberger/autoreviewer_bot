@@ -3,7 +3,7 @@
     start_check  ->  review_and_post  ->  finish_check
 
 Each phase is safe to replay after a crash: the check run is created once (its step's result is
-checkpointed), and posting skips a commit the bot already reviewed.
+checkpointed), and posting recognizes a verdict from the same check run.
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ async def review_and_post(
         if budget <= 0:
             raise TimeoutError
         async with asyncio.timeout_at(started + budget), _publishing(deps, repo, check_id, progress):
-            reviewed = await _review(deps, repo, pull, progress, deadline)
+            reviewed = await _review(deps, repo, pull, progress, deadline, check_id)
             if isinstance(reviewed, CheckResult):
                 result = reviewed
             else:
@@ -233,14 +233,14 @@ async def review_and_post(
         result = CheckResult(
             "Review timed out",
             f"Stopped after {hard_s / 60:g} minutes, before a verdict. Findings confirmed until then "
-            "are posted as comments. Push again to retry.",
+            "are posted as comments. Push again or request another review to retry.",
             "neutral",
         )
     except Exception:
         logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
         result = CheckResult(
             "Review failed",
-            "The review could not be completed. Push again to retry; the bot's logs have the details.",
+            "Push again or request another review to retry. The bot's logs have the failure details.",
             "neutral",
         )
     return replace(result, details=progress.details())
@@ -486,7 +486,7 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
 
 
 async def _review(
-    deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress, deadline: Deadline
+    deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress, deadline: Deadline, check_id: int | None
 ) -> CheckResult | Outcome:
     state = await _current(deps, repo, pull)
     conversation = conversation_id(repo, pull.number)
@@ -550,6 +550,7 @@ async def _review(
         models_note=deps.models_note,
         outcome=result.outcome,
         posted=publisher.posted,
+        check_id=check_id,
     )
     return result.outcome
 
