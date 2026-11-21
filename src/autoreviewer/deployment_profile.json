@@ -1,0 +1,25 @@
+{
+  "base_url": "http://boodleton:8000/v1",
+  "models": {
+    "primary": {"id": "qwen3.8-flash-next", "context_window": 172032, "compact_at": 140000, "lanes": 5},
+    "secondary": {"id": "deepseek-v4.1-flash", "context_window": 1048576, "compact_at": 629145, "lanes": 4}
+  },
+  "roles": {
+    "correctness": "primary",
+    "security": "primary",
+    "dry": "primary",
+    "docs": "secondary",
+    "tests": "secondary",
+    "simplify": "primary",
+    "correctness.verifier": "secondary",
+    "security.verifier": "secondary",
+    "dry.verifier": "secondary",
+    "docs.verifier": "primary",
+    "tests.verifier": "primary",
+    "simplify.verifier": "secondary",
+    "conversation": "secondary"
+  },
+  "reply_tokens": 16384,
+  "reasoning": {"conversation": "high"},
+  "overflow_model": "openai-codex:gpt-6.2-sol"
+}

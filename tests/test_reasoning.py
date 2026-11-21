@@ -7,9 +7,9 @@ from pydantic_ai.models import Model
 
 from autoreviewer.review import agents
 from autoreviewer.review.agents import lens_version
-from autoreviewer.servers import QWEN
 from autoreviewer.web.app import ModelPlan
 from autoreviewer.web.config import Settings, models_from, reasoning_from
+from tests.reference_profile import QWEN
 
 
 def test_efforts_parse_strictly() -> None:

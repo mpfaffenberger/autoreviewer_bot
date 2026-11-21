@@ -15,11 +15,23 @@ The native `OpenAICodexModel` calls the Responses endpoint; it does not start `c
 
 A read-only snapshot is not durable token rotation: refreshed credentials live only in memory and a consumed refresh token can fail after restart. For a long-lived deployment, return `OpenAICodexModel(name, provider=OpenAICodexProvider(credential_source=store))` from a factory backed by an operator-managed secret store implementing `OpenAICodexCredentialSource`. Persist refreshed credentials atomically and avoid independent workers racing on one rotating grant. Do not share a provider instance across event loops.
 
-### Burst queued reviews to Sol
+### Burst queued reviews to an overflow model
 
-Provision the dedicated Codex identity above, then set `PRISM_SOL_OVERFLOW_REPOS` in the receiver environment to a comma-separated list of exact repositories approved to send code to OpenAI (for example `your-org/public-project,your-org/another-project`). Set `PRISM_SOL_OVERFLOW_REPOS=*` to authorize Sol overflow for **all repositories this receiver reviews**, including private and future installations. Local review capacity is still used first. Restart the receiver to apply it. Blank or unset keeps overflow off; a GitHub App installation alone does not opt a repository in.
+Prism prefers its normal review workers. When they are busy, a queued review from an opted-in repository can run its finders on a second model instead of waiting. Overflow stays off until you opt repositories in, and it needs a model to send them to:
 
-Prism prefers its normal review workers. When they are busy, all eligible queued reviews can concurrently use `openai-codex:gpt-6.2-sol` for its finders, including the simplifier. The usual independent checkers still verify findings; thread replies stay on the normal plan. Overflow reviews start without saved lens history. No active review is moved or duplicated. Previously queued eligible work can use the extra slot, but older local-only jobs ahead of it may delay pickup. Sol requests consume the service identity’s quota; there is no Prism concurrency cap on overflow finders. Receiver memory, disk, provider quotas, checker capacity and review deadlines still apply.
+1. **The model.** With `PRISM_CONFIG`, add `overflow` to `prism.json`. Without it, the [gateway profile](#the-gateway-deployment-profile)'s `overflow_model` applies; the packaged reference profile names one. A portable config never borrows the profile's model: if `overflow` is missing, startup stops instead of sending code to a provider you didn't name.
+
+   ```sh
+   uv run prism-config --finder local:FINDER_MODEL_ID --checker local:CHECKER_MODEL_ID \
+     --local-url http://localhost:8000/v1 --overflow openai-codex:gpt-6.2-sol
+   ```
+
+   Any model specification on this page works, including `local:` (add `--overflow-url` if it has its own server) and `factory:`. The overflow model needs its provider's credentials in the receiver, and it cannot be the checker.
+2. **The repositories.** Set `PRISM_OVERFLOW_REPOS` in the receiver environment to a comma-separated list of exact repositories approved to send code to that provider (for example `your-org/public-project,your-org/another-project`). `PRISM_OVERFLOW_REPOS=*` authorizes overflow for **all repositories this receiver reviews**, including private and future installations. Blank or unset keeps overflow off; a GitHub App installation alone does not opt a repository in. `PRISM_SOL_OVERFLOW_REPOS`, the setting's former name, is still read.
+
+Restart the receiver to apply either change. Overflow replaces every finder, including the simplifier. The usual independent checkers still verify findings; thread replies stay on the normal plan. Overflow reviews start without saved lens history. No active review is moved or duplicated. Previously queued eligible work can overflow, but older local-only jobs ahead of it may delay pickup.
+
+Prism does not cap concurrent overflow requests unless you set lanes for that model (`--overflow-lanes`). Requests consume the provider identity's quota. Receiver memory, disk, checker capacity and review deadlines still apply.
 
 ### Copilot: supply a separate inference credential
 
@@ -82,7 +94,22 @@ uv run prism-config --finder openai-codex:gpt-6.2-sol --finder-lanes 3 \
   --checker claude-code:claude-opus-5-5 --checker-lanes 2
 ```
 
-`prism.json` also accepts `lanes` (concurrent requests) and `compact_at` (history tokens), both maps keyed by the full model specification. The portable config takes precedence over the historical Boodleton model settings. Omit `PRISM_CONFIG` only to keep that existing deployment mode.
+`prism.json` also accepts `lanes` (concurrent requests) and `compact_at` (history tokens), both maps keyed by the full model specification. The portable config takes precedence over the gateway profile below. Omit `PRISM_CONFIG` only to keep that deployment mode.
+
+### The gateway deployment profile
+
+Without `PRISM_CONFIG`, Prism runs its built-in plan: one model per agent role, all served by one OpenAI-compatible gateway. Every model name, limit and endpoint in that plan comes from a JSON profile, not from code. The packaged [`deployment_profile.json`](../src/autoreviewer/deployment_profile.json) describes the reference deployment.
+
+To change a model or its tuning without rebuilding the image, copy that file, edit it, mount it in the receiver and set `PRISM_DEPLOYMENT_PROFILE` to its path there. The receiver reads it once at startup. An invalid file stops startup; it never falls back to the packaged one.
+
+| Key | Meaning |
+| --- | --- |
+| `base_url` | The gateway's base URL, API prefix included. `BOODLETON_BASE_URL` overrides it. |
+| `models` | Named slots. Each has the gateway's `id` for the model, its `context_window`, the history size where agents `compact_at`, and its concurrent `lanes`. Use the real model name, not an alias: lanes and the rule below compare names. |
+| `roles` | Every agent role mapped to a slot. A finder and its `.verifier` must use different models. `PRISM_MODELS` pins single roles over it. |
+| `reply_tokens` | The longest reply a request may ask for. `compact_at` plus this must fit each window. |
+| `reasoning` | Optional. Role to reasoning effort (`low`, `medium`, `high`). `PRISM_REASONING` overrides it. |
+| `overflow_model` | Optional. The model specification that takes [overflow](#burst-queued-reviews-to-an-overflow-model). Not a `local:` one: the profile has no endpoint for it. |
 
 ### Keep the PR on the data side of the boundary
 

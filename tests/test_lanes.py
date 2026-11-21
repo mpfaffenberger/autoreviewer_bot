@@ -10,9 +10,10 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from autoreviewer.review.agents import _lanes, boodleton_model, with_lanes  # pyright: ignore[reportPrivateUsage]
-from autoreviewer.servers import COMPACT_AT, CONTEXT_WINDOWS, DEEPSEEK, QWEN, REPLY_TOKENS, ReasoningEffort
+from autoreviewer.servers import COMPACT_AT, CONTEXT_WINDOWS, REPLY_TOKENS, ReasoningEffort
 from autoreviewer.web.app import ModelPlan
 from autoreviewer.web.config import DEFAULT_MODEL_LANES, Settings, parse_lanes
+from tests.reference_profile import DEEPSEEK, QWEN
 
 pytestmark = pytest.mark.anyio
 

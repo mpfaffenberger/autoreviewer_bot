@@ -18,10 +18,10 @@ from autoreviewer.review.conversation import MAX_ANSWERS, MAX_QUOTED, Conversati
 from autoreviewer.review.durable import answer_id
 from autoreviewer.review.posting import Publisher, answer_markers
 from autoreviewer.review.schemas import Finding
-from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.app import thread_reply_handler
 from autoreviewer.web.config import Settings, models_from
 from autoreviewer.web.routing import Ignore, ThreadReply, route
+from tests.reference_profile import DEEPSEEK, QWEN
 from tests.review_fakes import BOT, FakeGitHub, GitRepo, LocalSource, finding
 
 pytestmark = pytest.mark.anyio

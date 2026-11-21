@@ -14,7 +14,8 @@ from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME
 from autoreviewer.review.agents import LENS_LIMITS, correctness_agent
 from autoreviewer.review.compaction import compaction_stats, max_result_tokens, review_compaction, same_call
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import COMPACT_AT, QWEN
+from autoreviewer.servers import COMPACT_AT
+from tests.reference_profile import QWEN
 
 pytestmark = pytest.mark.anyio
 

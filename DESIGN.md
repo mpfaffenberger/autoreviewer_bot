@@ -431,13 +431,16 @@ the model names in reviewer config. Prefer the allowlist.
 
 **Lanes (measured 2026-11-18, widened Nov 20).** Qwen's server runs 5 streams of 168k tokens; DeepSeek's has
 more but is shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
-`ConcurrencyLimitedModel`): `PRISM_MODEL_LANES`, default Qwen 5 and DeepSeek 4 (`servers.py`).
+`ConcurrencyLimitedModel`): `PRISM_MODEL_LANES`, default Qwen 5 and DeepSeek 4. Those defaults, and every other
+model name and limit in this section, are the reference values in `deployment_profile.json`, which
+`PRISM_DEPLOYMENT_PROFILE` replaces without a code change (docs/providers.md).
 
 **Compaction points and reply room (Nov 20).** An agent compacts its history above `servers.COMPACT_AT`: 140k on
 Qwen (Mike's call, higher than the old 60% of the window, so reviewers compact less), 60% of DeepSeek's 1M window.
 Every request asks for at most `REPLY_TOKENS` (16,384): Qwen's server reserves `max_tokens` in the window before it
 accepts a prompt, and 32,768 when a request doesn't say, which would cap prompts at 139k on a 168k window. Of 18,632
-Qwen replies to the bot, the longest was 13,090 tokens. `COMPACT_AT + REPLY_TOKENS <= window` is tested.
+Qwen replies to the bot, the longest was 13,090 tokens. `COMPACT_AT + REPLY_TOKENS <= window` is checked when the
+profile loads, and startup stops if it fails.
 
 The Qwen server pre-budgets each stream's full window (fp8 KV, about 3.24 GiB at 168k; 4.32 GiB at 224k until
 Nov 20) but only touches pages as contexts grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the

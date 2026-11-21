@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from autoreviewer.servers import DEEPSEEK, QWEN
 from evals.run import arguments, plan_from_env
+from tests.reference_profile import DEEPSEEK, QWEN
 from tests.test_reasoning import effort
 
 

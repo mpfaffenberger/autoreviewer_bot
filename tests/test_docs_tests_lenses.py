@@ -10,9 +10,9 @@ from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS, lens_pair  # pyrig
 from autoreviewer.review.pipeline import blocks
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.app import MAX_ADVISORY_POSTED, build_lenses, models_note
 from autoreviewer.web.config import Settings, deadlines_from, models_from
+from tests.reference_profile import DEEPSEEK, QWEN
 
 BASE = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
 ENV = {"GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "s", "GITHUB_WEBHOOK_SECRET": "w", "BOODLETON_API_KEY": "b",

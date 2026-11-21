@@ -12,6 +12,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--finder", help="provider:model that finds problems")
     parser.add_argument("--checker", help="different provider:model that verifies findings")
+    parser.add_argument("--overflow", help="optional overflow finder spec, independent of the checker")
+    parser.add_argument("--overflow-url", metavar="URL", help="override the endpoint for a local:<id> overflow finder")
+    parser.add_argument("--overflow-lanes", type=int, help="maximum concurrent overflow requests (default: uncapped)")
     parser.add_argument("--local-context", type=int, metavar="TOKENS", help="served window per local model")
     parser.add_argument("--local-url", metavar="URL", help="default endpoint for local:<id> models")
     parser.add_argument("--finder-url", metavar="URL", help="override the endpoint for a local:<id> finder")
@@ -23,25 +26,33 @@ def main(argv: list[str] | None = None) -> None:
     try:
         finder = args.finder or input("Finder model (provider:model): ").strip()
         checker = args.checker or input("Checker model (provider:model): ").strip()
-        lanes = {
-            spec: count
-            for spec, count in ((finder, args.finder_lanes), (checker, args.checker_lanes))
-            if count is not None
-        }
+        roles = [
+            ("finder", finder, args.finder_url, args.finder_lanes),
+            ("checker", checker, args.checker_url, args.checker_lanes),
+            ("overflow", args.overflow, args.overflow_url, args.overflow_lanes),
+        ]
+        lanes = {}
         endpoints = {}
         used_default = False
-        for role, spec, url in (("finder", finder, args.finder_url), ("checker", checker, args.checker_url)):
+        for role, spec, url, count in roles:
+            if spec is None:
+                if url is not None or count is not None:
+                    parser.error(f"--{role}-url and --{role}-lanes require --{role}")
+                continue
+            if count is not None and lanes.setdefault(spec, count) != count:
+                parser.error(f"conflicting lane counts for {spec}")
             if not spec.startswith("local:"):
                 if url is not None:
                     parser.error(f"--{role}-url requires --{role} to use local:<id>")
-            elif url is not None:
-                endpoints[spec] = url
-            elif args.local_url is not None:
-                endpoints[spec] = args.local_url
+                continue
+            if url is None and args.local_url is not None:
+                url = args.local_url
                 used_default = True
+            if url is not None and endpoints.setdefault(spec, url) != url:
+                parser.error(f"conflicting endpoints for {spec}")
         if args.local_url is not None and not used_default:
             parser.error("--local-url needs a local:<id> role without a role-specific URL")
-        options: dict[str, object] = {"finder": finder, "checker": checker, "lanes": lanes}
+        options: dict[str, object] = {"finder": finder, "checker": checker, "overflow": args.overflow, "lanes": lanes}
         if args.local_context is not None:
             if not endpoints:
                 parser.error("--local-context requires a local model endpoint")

@@ -101,6 +101,25 @@ def test_reply_reservation() -> None:
         PrismConfig(finder=spec, checker=CHECKER, compact_at={spec: 2049}).resolve(spec)
 
 
+@pytest.mark.parametrize("explicit", [True, False])
+def test_overflow_only_model_is_uncapped_unless_lanes_are_set(explicit: bool) -> None:
+    spec = f"factory:{__name__}:small_window"
+    config = PrismConfig(
+        finder=FINDER, checker=CHECKER, overflow=spec, lanes={spec: 3} if explicit else {}, compact_at={spec: 128}
+    )
+    model, target = config.resolve(spec)
+    assert target == 128
+    assert isinstance(model, ConcurrencyLimitedModel) == explicit
+    if isinstance(model, ConcurrencyLimitedModel):
+        assert model._limiter is _lanes(spec, 3)
+
+
+def test_overflow_on_the_finders_model_keeps_its_cap() -> None:
+    """Lanes belong to the model: naming the finder as its own overflow must not lift its one-request default."""
+    model, _ = PrismConfig(finder=FINDER, checker=CHECKER, overflow=FINDER).resolve(FINDER)
+    assert isinstance(model, ConcurrencyLimitedModel) and model._limiter is _lanes(FINDER, 1)
+
+
 @pytest.mark.parametrize(
     "override",
     [

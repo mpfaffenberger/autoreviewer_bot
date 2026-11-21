@@ -132,7 +132,7 @@ class ReviewDeps:
     bot_login: str
     """Our own GitHub login, e.g. example-reviewer[bot]; used to avoid reviewing a commit twice."""
     models_note: str
-    """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
+    """Shown in the review footer: which model found and which verified, per lens (web/app.py models_note)."""
     memory: ReviewMemory | None = None
     """Where each PR's lens conversation is kept, so a new commit continues the last review."""
     lens_version: str = ""
