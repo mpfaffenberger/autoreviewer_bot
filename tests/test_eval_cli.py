@@ -11,10 +11,10 @@ from tests.test_reasoning import effort
 
 def test_the_time_limits_default_to_the_bots_env_included() -> None:
     """From the bot's review of #33: Settings' class defaults ignored PRISM_*_DEADLINE_MINUTES."""
-    assert (arguments([], {}).soft_minutes, arguments([], {}).hard_minutes) == (30, 50)
+    assert (arguments([], {}).soft_minutes, arguments([], {}).hard_minutes) == (9, 10)
     env = {"PRISM_SOFT_DEADLINE_MINUTES": "20", "PRISM_HARD_DEADLINE_MINUTES": "40"}
     args = arguments([], env)
-    assert (args.soft_minutes, args.hard_minutes) == (20, 40)
+    assert (args.soft_minutes, args.hard_minutes) == (9, 10)
 
 
 @pytest.mark.parametrize(

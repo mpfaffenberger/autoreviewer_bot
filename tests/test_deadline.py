@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
@@ -95,6 +96,105 @@ async def test_before_the_deadline_nothing_changes(workspace: Workspace) -> None
 
 def pull(repo: GitRepo) -> PullRequestUpdated:
     return PullRequestUpdated(installation_id=1, owner="mpfaffenberger", repo="demo", number=7, head_sha=repo.head)
+
+
+@pytest.mark.parametrize("remaining, warning", [(500, None), (320, FIVE_MINUTES), (100, ONE_MINUTE), (30, WRAP_UP)])
+async def test_recovered_job_counts_elapsed_time_toward_soft_warnings(
+    repo: GitRepo, tmp_path: Path, remaining: float, warning: str | None
+) -> None:
+    notices: list[str] = []
+
+    def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        last = messages[-1]
+        assert isinstance(last, ModelRequest)
+        notices.extend(
+            p.content
+            for p in last.parts
+            if isinstance(p, UserPromptPart)
+            and isinstance(p.content, str)
+            and p.content in (FIVE_MINUTES, ONE_MINUTE, WRAP_UP)
+        )
+        return ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, {"findings": [], "overall_correct": True, "reviewed": []})]
+        )
+
+    github = FakeGitHub(repo)
+    deps = replace(
+        job_deps(github, tmp_path),
+        hard_deadline_s=900,  # capped at 600: wrap-up is 60s before the effective hard limit
+        soft_deadline_s=540,
+        agents=lambda ws: (
+            correctness_agent(FunctionModel(lens), ws),
+            verifier_agent(verifier_model(lambda f: True), ws),
+        ),
+    )
+    result = await review_and_post(deps, pull(repo), remaining_s=remaining)
+    assert notices == ([warning] if warning else [])
+    assert result.conclusion == ("neutral" if warning in (ONE_MINUTE, WRAP_UP) else "success")
+
+
+async def test_expired_job_does_not_start(repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    github = FakeGitHub(repo)
+    state = AsyncMock()
+    monkeypatch.setattr(github, "get_pull", state)
+    result = await review_and_post(job_deps(github, tmp_path), pull(repo), remaining_s=0)
+    assert (result.title, result.conclusion) == ("Review timed out", "neutral")
+    state.assert_not_awaited()
+
+
+async def test_initial_state_and_progress_publisher_share_the_budget(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github = FakeGitHub(repo)
+
+    async def hang(*_: object) -> None:
+        await asyncio.Event().wait()
+
+    state = AsyncMock(side_effect=hang)
+    publisher = AsyncMock(side_effect=hang)
+    monkeypatch.setattr(github, "get_pull", state)
+    monkeypatch.setattr(job, "_publish", publisher)
+    async with asyncio.timeout(2):
+        result = await review_and_post(job_deps(github, tmp_path), pull(repo), 1, remaining_s=0.05)
+    state.assert_awaited_once()
+    publisher.assert_awaited_once()
+    assert (result.title, result.conclusion) == ("Review timed out", "neutral")
+
+
+async def test_external_cancellation_is_not_a_timeout(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github = FakeGitHub(repo)
+    started = asyncio.Event()
+
+    async def wait_for_cancel(*_: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(github, "get_pull", wait_for_cancel)
+    async with asyncio.timeout(2):
+        task = asyncio.create_task(review_and_post(job_deps(github, tmp_path), pull(repo), 1))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not github.reviews
+
+
+async def test_posting_the_verdict_is_inside_the_cap(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github = FakeGitHub(repo)
+
+    async def hung_post(*args: object, **kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    post = AsyncMock(side_effect=hung_post)
+    monkeypatch.setattr(job, "post_review", post)
+    async with asyncio.timeout(3):
+        result = await review_and_post(replace(job_deps(github, tmp_path), hard_deadline_s=1), pull(repo))
+    post.assert_awaited_once()
+    assert (result.title, result.conclusion) == ("Review timed out", "neutral")
 
 
 async def test_a_review_cut_short_never_approves(repo: GitRepo, tmp_path: Path) -> None:

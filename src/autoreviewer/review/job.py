@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +51,7 @@ from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 logger = logging.getLogger("autoreviewer.job")
 
+MAX_REVIEW_S = 600.0
 SUPERSEDED_CHECK_S = 60.0
 """How often a running review checks whether its PR moved on (a newer push, or closed)."""
 PROGRESS_INTERVAL_S = 30.0
@@ -140,9 +142,9 @@ class ReviewDeps:
     """Optional one-click simplifications (see simplify.py); None skips them."""
     lenses: tuple[Lens, ...] = ()
     """Extra lenses (security, DRY) beside correctness."""
-    soft_deadline_s: float = 30 * 60
+    soft_deadline_s: float = 9 * 60
     """After this, every lens wraps up with what it has (see deadline.py)."""
-    hard_deadline_s: float = 50 * 60
+    hard_deadline_s: float = MAX_REVIEW_S
     """After this, the review is cancelled: no verdict (findings already posted stay)."""
 
 
@@ -186,14 +188,43 @@ async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int
     )
 
 
-async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None) -> CheckResult:
-    """Never raises: every outcome, including a crash, becomes the check run's result.
+async def review_and_post(
+    deps: ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None, *, remaining_s: float | None = None
+) -> CheckResult:
+    """Review within one wall-clock budget, including GitHub reads, posting and progress updates.
 
-    With `check_id`, the check run shows what the review is doing while it runs (see progress.py).
+    On recovery, `remaining_s` is the time left on the durable hard deadline; neither clock restarts.
+    External cancellation propagates rather than becoming a verdict.
     """
+    started = asyncio.get_running_loop().time()
+    hard_s = min(deps.hard_deadline_s, MAX_REVIEW_S)
+    budget = hard_s if remaining_s is None else min(hard_s, remaining_s)
+    elapsed = hard_s - budget
+    deadline = Deadline(deps.soft_deadline_s, started=time.monotonic() - elapsed)
     progress = Progress()
-    async with _publishing(deps, repo_of(pull), check_id, progress):
-        result = await _guarded_review(deps, pull, progress)
+    repo = repo_of(pull)
+    try:
+        if budget <= 0:
+            raise TimeoutError
+        async with asyncio.timeout_at(started + budget), _publishing(deps, repo, check_id, progress):
+            result = await _review(deps, repo, pull, progress, deadline)
+    except Superseded:
+        result = CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
+    except TimeoutError:
+        logger.warning("reviewing %s/%s#%d at %s timed out", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
+        result = CheckResult(
+            "Review timed out",
+            f"Stopped after {hard_s / 60:g} minutes, before a verdict. Findings confirmed until then "
+            "are posted as comments. Push again to retry.",
+            "neutral",
+        )
+    except Exception:
+        logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
+        result = CheckResult(
+            "Review failed",
+            "The review could not be completed. Push again to retry; the bot's logs have the details.",
+            "neutral",
+        )
     return replace(result, details=progress.details())
 
 
@@ -207,33 +238,14 @@ async def _publishing(deps: ReviewDeps, repo: Repo, check_id: int | None, progre
     publisher = asyncio.create_task(_publish(deps, repo, check_id, progress, done))
     try:
         yield
+    except asyncio.CancelledError:
+        publisher.cancel()  # The review was cancelled; an in-flight update must not hold it open.
+        raise
     finally:
         done.set()
-        # Wait, don't cancel: an update cut off mid-request could still reach GitHub after the final result
+        # On normal completion, wait: an update cut off mid-request could still reach GitHub after the final result
         # and overwrite it with progress.
         await publisher
-
-
-async def _guarded_review(deps: ReviewDeps, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
-    try:
-        return await _review(deps, repo_of(pull), pull, progress)
-    except Superseded:
-        return CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
-    except TimeoutError:
-        logger.warning("reviewing %s/%s#%d at %s timed out", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
-        return CheckResult(
-            "Review timed out",
-            f"Stopped after {deps.hard_deadline_s / 60:g} minutes, before a verdict. Findings confirmed until then "
-            "are posted as comments. Push again to retry.",
-            "neutral",
-        )
-    except Exception:
-        logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
-        return CheckResult(
-            "Review failed",
-            "The review could not be completed. Push again to retry; the bot's logs have the details.",
-            "neutral",
-        )
 
 
 async def _publish(deps: ReviewDeps, repo: Repo, check_id: int, progress: Progress, done: asyncio.Event) -> None:
@@ -455,37 +467,38 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
     )
 
 
-async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
+async def _review(
+    deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress, deadline: Deadline
+) -> CheckResult:
     state = await _current(deps, repo, pull)
     conversation = conversation_id(repo, pull.number)
     publisher = Publisher(
         deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, block_at=deps.block_at
     )
     try:
-        async with asyncio.timeout(deps.hard_deadline_s):
-            result = await _unless_superseded(
-                deps,
-                repo,
-                pull,
-                review_change(
-                    reader=deps.github,
-                    source=deps.source,
-                    agents=deps.agents,
-                    work_dir=deps.work_dir,
-                    repo=repo,
-                    number=pull.number,
-                    state=state,
-                    head_sha=pull.head_sha,
-                    memory=deps.memory,
-                    lens_version=deps.lens_version,
-                    block_at=deps.block_at,
-                    progress=progress,
-                    simplifier=deps.simplifier,
-                    lenses=deps.lenses,
-                    publish=publisher,
-                    deadline=Deadline(deps.soft_deadline_s),
-                ),
-            )
+        result = await _unless_superseded(
+            deps,
+            repo,
+            pull,
+            review_change(
+                reader=deps.github,
+                source=deps.source,
+                agents=deps.agents,
+                work_dir=deps.work_dir,
+                repo=repo,
+                number=pull.number,
+                state=state,
+                head_sha=pull.head_sha,
+                memory=deps.memory,
+                lens_version=deps.lens_version,
+                block_at=deps.block_at,
+                progress=progress,
+                simplifier=deps.simplifier,
+                lenses=deps.lenses,
+                publish=publisher,
+                deadline=deadline,
+            ),
+        )
 
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close

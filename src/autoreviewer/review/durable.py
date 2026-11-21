@@ -16,6 +16,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Coroutine
 from pathlib import Path
+from time import time
 from typing import Any
 
 from dbos import DBOS, SetWorkflowID, WorkflowHandleAsync, WorkflowStatusString
@@ -70,7 +71,17 @@ async def _start_check(pull: PullRequestUpdated) -> int:
 
 @DBOS.step()  # no retries: review_and_post never raises, and model time isn't free
 async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.CheckResult:
-    return await job.review_and_post(_require_deps(), pull, check_id)
+    # DBOS already timestamped step 1, after dequeue. Read its checkpoint *inside* step 2:
+    # no extra workflow operation on replay, and even old integer check IDs need no migration.
+    run_id = DBOS.workflow_id
+    assert run_id is not None
+    steps = await DBOS.list_workflow_steps_async(run_id, limit=1, load_output=False)
+    if not steps or steps[0]["function_id"] != 1 or (started_ms := steps[0]["started_at_epoch_ms"]) is None:
+        raise RuntimeError(f"Missing durable check start for {run_id}")
+    elapsed_s = max(0.0, time() - started_ms / 1000)
+    deps = _require_deps()
+    budget_s = min(deps.hard_deadline_s, job.MAX_REVIEW_S)
+    return await job.review_and_post(deps, pull, check_id, remaining_s=max(0.0, budget_s - elapsed_s))
 
 
 @DBOS.step(retries_allowed=True, max_attempts=3)

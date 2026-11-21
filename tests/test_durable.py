@@ -195,7 +195,8 @@ def test_workflow_ids_are_per_head_and_case_insensitive() -> None:
     assert durable.workflow_id(PULL) == durable.workflow_id(shouted)
 
 
-def test_a_review_interrupted_by_a_crash_finishes_after_restart_exactly_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("expired", [False, True], ids=["within-budget", "after-deadline"])
+def test_a_review_interrupted_by_a_crash_finishes_after_restart_exactly_once(tmp_path: Path, expired: bool) -> None:
     """Process 1 dies (os._exit) inside the review; process 2 recovers it. One check run, one review."""
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])}
 
@@ -212,12 +213,16 @@ def test_a_review_interrupted_by_a_crash_finishes_after_restart_exactly_once(tmp
     assert first.returncode == 9, first.stderr[-2000:]
     assert json.loads((tmp_path / "github.json").read_text())["reviews"] == []  # died before posting
 
-    second = run("recover")
+    second = run("recover-after-deadline" if expired else "recover")
     assert second.returncode == 0, second.stderr[-2000:]
 
     state = json.loads((tmp_path / "github.json").read_text())
     assert [c["status"] for c in state["checks"]] == ["completed"], "the check run must be created once and finished"
-    assert [r["event"] for r in state["reviews"]] == ["REQUEST_CHANGES"]
+    if expired:
+        assert state["checks"][0]["title"] == "Review timed out"
+        assert state["reviews"] == []
+    else:
+        assert [r["event"] for r in state["reviews"]] == ["REQUEST_CHANGES"]
 
 
 def test_old_sqlite_is_refused_with_a_clear_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

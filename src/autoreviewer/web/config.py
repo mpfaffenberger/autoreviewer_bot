@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -72,9 +73,9 @@ class Settings:
     """Post optional one-click simplifications of the code a PR adds (see review/simplify.py)."""
     block_at_priority: int = 1
     """Confirmed findings at this priority or more urgent (0 = P0 ... 3 = P3) block the merge; 3 blocks on all."""
-    soft_deadline_minutes: float = 30
+    soft_deadline_minutes: float = 9
     """After this, every lens wraps up with what it has; a review cut short never approves."""
-    hard_deadline_minutes: float = 50
+    hard_deadline_minutes: float = 10
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
     model_lanes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_MODEL_LANES))
     """At most this many requests at once to each model, across every review (PRISM_MODEL_LANES,
@@ -195,7 +196,11 @@ def deadlines_from(env: Mapping[str, str]) -> tuple[float, float]:
     """(soft, hard) review time limits in minutes: PRISM_SOFT_DEADLINE_MINUTES and
     PRISM_HARD_DEADLINE_MINUTES over Settings' defaults. Shared by the bot and the evals."""
     soft = float(env.get("PRISM_SOFT_DEADLINE_MINUTES", Settings.soft_deadline_minutes))
-    return soft, float(env.get("PRISM_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
+    hard = float(env.get("PRISM_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
+    if not all(math.isfinite(value) and value > 0 for value in (soft, hard)):
+        raise ValueError("review deadlines must be positive finite minutes")
+    hard = min(hard, Settings.hard_deadline_minutes)
+    return min(soft, hard * 0.9), hard
 
 
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:

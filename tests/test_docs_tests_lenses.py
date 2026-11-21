@@ -25,10 +25,10 @@ def with_lenses(**switches: bool) -> Settings:
 
 def test_the_bots_time_limits_come_from_its_env() -> None:
     """From the bot's review of #47: Settings.from_env reads them through config.deadlines_from."""
-    assert (Settings.from_env(ENV).soft_deadline_minutes, Settings.from_env(ENV).hard_deadline_minutes) == (30, 50)
+    assert (Settings.from_env(ENV).soft_deadline_minutes, Settings.from_env(ENV).hard_deadline_minutes) == (9, 10)
     limits = {"PRISM_SOFT_DEADLINE_MINUTES": "20", "PRISM_HARD_DEADLINE_MINUTES": "40"}
     settings = Settings.from_env({**ENV, **limits})
-    assert (settings.soft_deadline_minutes, settings.hard_deadline_minutes) == (20, 40)
+    assert (settings.soft_deadline_minutes, settings.hard_deadline_minutes) == (9, 10)
 
 
 def test_off_by_default_and_switched_on_by_env() -> None:
