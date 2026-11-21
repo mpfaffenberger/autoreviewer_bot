@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from dbos import DBOS
 
 from autoreviewer.github import Repo
-from autoreviewer.review import durable
+from autoreviewer.review import durable, job
 from autoreviewer.review.posting import Publisher
 from autoreviewer.review.schemas import Finding
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
@@ -131,7 +133,7 @@ async def test_only_an_explicit_request_retries_a_crashed_review(launch: Launch)
     assert (await handle.get_status()).status == "ERROR" and github.check_attempts == attempts
 
     github.fail_start_check = False
-    assert await durable.enqueue_review(pull, retry_failed=True) is False  # "@bot review": runs again
+    assert await durable.enqueue_review(pull, comment_id=99) is False  # "@bot review": runs again
     for _ in range(200):
         if github.reviews:
             break
@@ -139,53 +141,139 @@ async def test_only_an_explicit_request_retries_a_crashed_review(launch: Launch)
     assert [r["event"] for r in github.reviews] == ["APPROVE"]
 
 
-async def test_an_explicit_request_resumes_a_cancelled_review_on_its_check_run(launch: Launch) -> None:
+async def test_an_explicit_request_starts_fresh_after_cancellation(launch: Launch) -> None:
     github = await launch([])
     github.check_update_delay = 0
     pull = pull_for(github.repo)
     handle = await durable.enqueue(pull)
     await DBOS.cancel_workflow_async(handle.workflow_id)
     assert (await handle.get_status()).status == "CANCELLED"
-    await durable.enqueue_review(pull, retry_failed=True)
-    assert (await handle.get_status()).queue_name == durable.QUEUE  # so the concurrency limit applies
-    await (await DBOS.retrieve_workflow_async(handle.workflow_id)).get_result()
+    await durable.enqueue_review(pull, comment_id=99)
+    retry = await DBOS.retrieve_workflow_async(f"{handle.workflow_id}:attempt:2")
+    assert (await retry.get_status()).queue_name == durable.QUEUE
+    await retry.get_result()
+    assert (await handle.get_status()).status == "CANCELLED"
     assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1
 
 
-async def test_an_explicit_request_reruns_a_review_that_ended_without_a_verdict(launch: Launch) -> None:
+async def test_a_request_after_timeout_gets_a_new_check_and_clock(
+    launch: Launch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     github = await launch([])
-    github.fail_get_pull = True  # the review fails: "Review failed", a neutral check and no verdict
     pull = pull_for(github.repo)
-    result = await (await durable.enqueue(pull)).get_result()
-    assert result.title == "Review failed" and github.reviews == []
+    clock = durable.time
+    with monkeypatch.context() as patch:
+        patch.setattr(durable, "time", lambda: clock() + 601)
+        original = await durable.enqueue(pull)
+        assert (await original.get_result()).title == "Review timed out"
     assert await durable.enqueue_review(pull) is True  # a redelivered push: finished, left alone
 
-    github.fail_get_pull = False
-    assert await durable.enqueue_review(pull, retry_failed=True) is False
-    for _ in range(200):
-        if github.reviews:
-            break
-        await asyncio.sleep(0.05)
-    assert [r["event"] for r in github.reviews] == ["APPROVE"] and len(github.checks) == 1  # same check run
+    # Make the persisted start genuinely old: inheriting step 1 would immediately time out again.
+    with sqlite3.connect(tmp_path / "dbos.sqlite") as db:
+        db.execute(
+            "UPDATE operation_outputs SET started_at_epoch_ms = started_at_epoch_ms - 601000 "
+            "WHERE workflow_uuid = ? AND function_id = 1",
+            (original.workflow_id,),
+        )
+    assert not await durable.enqueue_review(pull, comment_id=99)
+    retry = await DBOS.retrieve_workflow_async(f"{original.workflow_id}:attempt:2")
+    await retry.get_result()
+    assert [r["event"] for r in github.reviews] == ["APPROVE"]
+    assert len(github.checks) == 2 and github.checks[0]["title"] == "Review timed out"
 
 
-async def test_asking_again_while_a_retry_runs_or_after_it_succeeded_changes_nothing(launch: Launch) -> None:
+async def test_concurrent_comments_and_pushes_share_attempts_and_remember_deliveries(
+    launch: Launch, monkeypatch: pytest.MonkeyPatch
+) -> None:
     github = await launch([])
-    github.fail_get_pull = True  # "Review failed": no verdict
     pull = pull_for(github.repo)
-    original = await durable.enqueue(pull)
-    await original.get_result()
-    github.fail_get_pull = False
-    assert await durable.enqueue_review(pull, retry_failed=True) is False
-    assert await durable.enqueue_review(pull, retry_failed=True) is False  # asked twice: still one retry
-    for _ in range(200):
-        if github.reviews:
-            break
-        await asyncio.sleep(0.05)
-    await asyncio.sleep(0.2)
-    assert await durable.enqueue_review(pull, retry_failed=True) is True  # the retry reached a verdict: done
-    forks = await DBOS.list_workflows_async(forked_from=original.workflow_id)
-    assert len(forks) == 1 and [r["event"] for r in github.reviews] == ["APPROVE"]
+    base = durable.workflow_id(pull)
+    gate = asyncio.Event()
+    start = FakeGitHub.start_check
+
+    async def gated_start(self: FakeGitHub, repo: Repo, head_sha: str) -> int:
+        await gate.wait()
+        return await start(self, repo, head_sha)
+
+    monkeypatch.setattr(FakeGitHub, "start_check", gated_start)
+    for number, ids in enumerate(((10, 11, 10), (20, 21, 20), (30,)), start=1):
+        gate.clear()
+        requests = [durable.enqueue_review(pull, comment_id=i) for i in ids]
+        if number == 1:
+            requests.append(durable.enqueue_review(pull))
+        try:
+            assert not any(await asyncio.gather(*requests))
+            assert not await durable.enqueue_review(pull)  # push joins the active retry, too
+        finally:
+            gate.set()
+        attempt = base if number == 1 else f"{base}:attempt:{number}"
+        await (await DBOS.retrieve_workflow_async(attempt)).get_result()
+        for comment_id in ids:
+            assert await durable.enqueue_review(pull, comment_id=comment_id)
+        assert len(github.checks) == number
+    moved = PullRequestUpdated(pull.installation_id, pull.owner, pull.repo, pull.number, "b" * 40)
+    assert await durable.enqueue_review(moved, comment_id=10)
+    assert await DBOS.get_workflow_status_async(durable.workflow_id(moved)) is None
+
+
+@pytest.mark.parametrize(
+    "read",
+    [AsyncMock(side_effect=sqlite3.OperationalError("database is locked")), AsyncMock(return_value=[])],
+    ids=["read-fails", "no-row"],
+)
+async def test_an_unreadable_start_time_does_not_strand_the_check(
+    launch: Launch, monkeypatch: pytest.MonkeyPatch, read: AsyncMock
+) -> None:
+    """From the bot's review of #61: raising here skipped `_finish_check`, leaving the check in progress for good."""
+    github = await launch([])
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", read)
+    result = await (await durable.enqueue(pull_for(github.repo))).get_result()
+    assert result.conclusion == "success"
+    assert [c["status"] for c in github.checks] == ["completed"]
+    assert [r["event"] for r in github.reviews] == ["APPROVE"]
+
+
+async def test_a_retry_forked_by_the_previous_version_is_joined(
+    launch: Launch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From the bot's review of #61: at deploy time a fork from the old retry path may still be reviewing this
+    head. A push or a request must join it, not start a second review beside it."""
+    github = await launch([])
+    pull = pull_for(github.repo)
+    base = durable.workflow_id(pull)
+    await (await durable.enqueue(pull)).get_result()
+    entered, gate, review = asyncio.Event(), asyncio.Event(), job.review_and_post
+
+    async def gated(
+        deps: job.ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None, *, remaining_s: float | None = None
+    ) -> job.CheckResult:
+        entered.set()
+        await gate.wait()
+        return await review(deps, pull, check_id, remaining_s=remaining_s)
+
+    monkeypatch.setattr(job, "review_and_post", gated)
+    # Step 2 is the review itself: the old retry path forked there, keeping step 1's check run.
+    fork = await DBOS.fork_workflow_async(base, 2, queue_name=durable.QUEUE)
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        assert await durable.enqueue_review(pull) is False  # running: joined
+        assert await durable.enqueue_review(pull, comment_id=5) is False
+        assert await DBOS.get_workflow_status_async(f"{base}:attempt:2") is None
+    finally:
+        gate.set()
+    await fork.get_result()
+    assert len(github.checks) == 1  # the fork kept the original check run
+
+
+async def test_a_push_after_a_second_attempt_starts_no_third(launch: Launch) -> None:
+    github = await launch([])
+    pull = pull_for(github.repo)
+    base = durable.workflow_id(pull)
+    await (await durable.enqueue(pull)).get_result()
+    assert await durable.enqueue_review(pull, comment_id=5) is False
+    await (await DBOS.retrieve_workflow_async(f"{base}:attempt:2")).get_result()
+    assert await durable.enqueue_review(pull) is True  # the latest attempt finished: nothing new runs
+    assert await DBOS.get_workflow_status_async(f"{base}:attempt:3") is None and len(github.checks) == 2
 
 
 def test_workflow_ids_are_per_head_and_case_insensitive() -> None:
@@ -195,7 +283,8 @@ def test_workflow_ids_are_per_head_and_case_insensitive() -> None:
     assert durable.workflow_id(PULL) == durable.workflow_id(shouted)
 
 
-def test_a_review_interrupted_by_a_crash_finishes_after_restart_exactly_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("expired", [False, True], ids=["within-budget", "after-deadline"])
+def test_a_review_interrupted_by_a_crash_finishes_after_restart_exactly_once(tmp_path: Path, expired: bool) -> None:
     """Process 1 dies (os._exit) inside the review; process 2 recovers it. One check run, one review."""
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])}
 
@@ -212,12 +301,16 @@ def test_a_review_interrupted_by_a_crash_finishes_after_restart_exactly_once(tmp
     assert first.returncode == 9, first.stderr[-2000:]
     assert json.loads((tmp_path / "github.json").read_text())["reviews"] == []  # died before posting
 
-    second = run("recover")
+    second = run("recover-after-deadline" if expired else "recover")
     assert second.returncode == 0, second.stderr[-2000:]
 
     state = json.loads((tmp_path / "github.json").read_text())
     assert [c["status"] for c in state["checks"]] == ["completed"], "the check run must be created once and finished"
-    assert [r["event"] for r in state["reviews"]] == ["REQUEST_CHANGES"]
+    if expired:
+        assert state["checks"][0]["title"] == "Review timed out"
+        assert state["reviews"] == []
+    else:
+        assert [r["event"] for r in state["reviews"]] == ["REQUEST_CHANGES"]
 
 
 def test_old_sqlite_is_refused_with_a_clear_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

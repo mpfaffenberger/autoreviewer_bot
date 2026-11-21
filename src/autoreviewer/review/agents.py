@@ -32,7 +32,7 @@ from autoreviewer.review.schemas import (
     Verification,
 )
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import COMPACT_AT, DEEPSEEK, QWEN, REPLY_TOKENS, ReasoningEffort
+from autoreviewer.servers import REPLY_TOKENS, ReasoningEffort, default_compact_at
 
 PROMPTS = Path(__file__).parent / "prompts"
 PSTACK = PROMPTS / "vendor" / "pstack"
@@ -154,13 +154,13 @@ def lens_version(model_name: str, reasoning: ReasoningEffort | None = None) -> s
 
 
 def correctness_agent(
-    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[QWEN]
+    model: Model, workspace: Workspace, *, compact_at: int = default_compact_at("correctness")
 ) -> Agent[None, LensReport]:
     return _agent(model, workspace, LensReport, _prompt("correctness.md"), compact_at)
 
 
 def verifier_agent(
-    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[DEEPSEEK]
+    model: Model, workspace: Workspace, *, compact_at: int = default_compact_at("correctness.verifier")
 ) -> Agent[None, Verification]:
     return checker_agent("correctness", model, workspace, compact_at=compact_at)
 
@@ -184,8 +184,8 @@ def lens_pair(
     verifier_model: Model,
     workspace: Workspace,
     *,
-    lens_compact_at: int = COMPACT_AT[QWEN],
-    verifier_compact_at: int = COMPACT_AT[DEEPSEEK],
+    lens_compact_at: int = default_compact_at("correctness"),
+    verifier_compact_at: int = default_compact_at("correctness.verifier"),
 ) -> tuple[Agent[None, LensReport], Agent[None, Verification]]:
     """(lens, verifier) for one extra lens. The security lens also wants `security_references` as run
     instructions."""
@@ -230,14 +230,14 @@ def security_references(paths: Iterable[str]) -> str:
 
 
 def simplify_agent(
-    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[QWEN]
+    model: Model, workspace: Workspace, *, compact_at: int = default_compact_at("simplify")
 ) -> Agent[None, SimplifyReport]:
     principles = "\n\n".join(_body(path.read_text()) for path in sorted(PSTACK.glob("principle-*.md")))
     return _agent(model, workspace, SimplifyReport, f"{_prompt('simplify.md')}\n{principles}", compact_at)
 
 
 def simplify_checker_agent(
-    model: Model, workspace: Workspace, *, compact_at: int = COMPACT_AT[DEEPSEEK]
+    model: Model, workspace: Workspace, *, compact_at: int = default_compact_at("simplify.verifier")
 ) -> Agent[None, SimplifyVerdict]:
     return _agent(model, workspace, SimplifyVerdict, _prompt("simplify_checker.md"), compact_at)
 
@@ -250,7 +250,7 @@ def conversation_agent(
     model: Model,
     workspace: Workspace,
     *,
-    compact_at: int = COMPACT_AT[DEEPSEEK],
+    compact_at: int = default_compact_at("conversation"),
     thinking: ReasoningEffort | None = None,
 ) -> Agent[None, ThreadAnswer]:
     """Answers a reply under one of the bot's findings, re-checking the code it's about (see conversation.py)."""

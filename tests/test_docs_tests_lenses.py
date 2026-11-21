@@ -10,9 +10,9 @@ from autoreviewer.review.agents import LENS_PROMPTS, PROMPTS, lens_pair  # pyrig
 from autoreviewer.review.pipeline import blocks
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import DEEPSEEK, QWEN
 from autoreviewer.web.app import MAX_ADVISORY_POSTED, build_lenses, models_note
-from autoreviewer.web.config import Settings, models_from
+from autoreviewer.web.config import Settings, deadlines_from, models_from
+from tests.reference_profile import DEEPSEEK, QWEN
 
 BASE = Settings(app_id=1, app_slug="s", webhook_secret="w", private_key="k", boodleton_api_key="b")
 ENV = {"GITHUB_APP_ID": "1", "GITHUB_APP_SLUG": "s", "GITHUB_WEBHOOK_SECRET": "w", "BOODLETON_API_KEY": "b",
@@ -25,10 +25,22 @@ def with_lenses(**switches: bool) -> Settings:
 
 def test_the_bots_time_limits_come_from_its_env() -> None:
     """From the bot's review of #47: Settings.from_env reads them through config.deadlines_from."""
-    assert (Settings.from_env(ENV).soft_deadline_minutes, Settings.from_env(ENV).hard_deadline_minutes) == (30, 50)
-    limits = {"PRISM_SOFT_DEADLINE_MINUTES": "20", "PRISM_HARD_DEADLINE_MINUTES": "40"}
+    assert (Settings.from_env(ENV).soft_deadline_minutes, Settings.from_env(ENV).hard_deadline_minutes) == (9, 10)
+    limits = {"PRISM_SOFT_DEADLINE_MINUTES": "3", "PRISM_HARD_DEADLINE_MINUTES": "7"}
     settings = Settings.from_env({**ENV, **limits})
-    assert (settings.soft_deadline_minutes, settings.hard_deadline_minutes) == (20, 40)
+    assert (settings.soft_deadline_minutes, settings.hard_deadline_minutes) == (3, 7)
+
+
+def test_deadlines_cap_hard_and_reserve_time_after_soft() -> None:
+    assert deadlines_from({"PRISM_SOFT_DEADLINE_MINUTES": "20", "PRISM_HARD_DEADLINE_MINUTES": "40"}) == (9, 10)
+    assert deadlines_from({"PRISM_HARD_DEADLINE_MINUTES": "5"}) == (4.5, 5)
+
+
+@pytest.mark.parametrize("key", ["PRISM_SOFT_DEADLINE_MINUTES", "PRISM_HARD_DEADLINE_MINUTES"])
+@pytest.mark.parametrize("bad", ["0", "-1", "nan", "inf"])
+def test_deadline_rejects_invalid_values(key: str, bad: str) -> None:
+    with pytest.raises(ValueError, match="positive finite"):
+        deadlines_from({key: bad})
 
 
 def test_off_by_default_and_switched_on_by_env() -> None:

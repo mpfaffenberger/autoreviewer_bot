@@ -13,6 +13,7 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
+from typing import cast
 
 from autoreviewer.github import (
     PostedComment,
@@ -34,6 +35,9 @@ VERDICT_MARKER = "<!-- autoreviewer:verdict -->"
 creates around single comments, and from a partial one."""
 PARTIAL_MARKER = "<!-- autoreviewer:partial -->"
 """Ends a "partially reviewed" COMMENT: it never stops a later full review of the commit from posting."""
+CHECK_MARKER = "<!-- autoreviewer:check {} -->"
+"""Names the attempt that posted a verdict (its check run's id goes in the braces), on the line before the
+marker that ends it. GitHub's check run id is checkpointed: the same across a recovery, new for a fresh attempt."""
 _MARKER = re.compile(r"<!-- autoreviewer:([0-9a-f]{16}) p([0-3])(?: ([a-z]+))? -->\Z")
 """Only the marker that ends a comment counts: code appends it last, after any model text or suggestion code,
 so a marker an attacker plants in the PR (and gets quoted) can't make a real finding look already posted."""
@@ -43,8 +47,11 @@ def fingerprint(head_sha: str, finding: Finding) -> str:
     """Identifies a finding's comment on one commit, so replaying a review never posts it twice. Priority isn't
     part of it (a replay's verifier may rank the same finding differently); the marker records it separately,
     so only a more urgent restatement is posted again."""
-    key = f"{head_sha}|{finding.kind}|{finding.path}|{finding.line}"
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+    return _fingerprint(head_sha, finding.kind, finding.path, finding.line)
+
+
+def _fingerprint(head_sha: str, kind: str | None, path: str, line: int | None) -> str:
+    return hashlib.sha256(f"{head_sha}|{kind}|{path}|{line}".encode()).hexdigest()[:16]
 
 
 WITHDRAWN_MARKER = "<!-- autoreviewer:withdrawn -->"
@@ -58,10 +65,12 @@ _ANSWER_END = re.compile(
 led to write can claim an answer or withdraw a finding."""
 _VERDICT_STATE = re.compile(
     r"<!-- autoreviewer:state (APPROVE|REQUEST_CHANGES|COMMENT) outside=(\d+) complete=([01]) -->\n"
-    + re.escape(VERDICT_MARKER)
-    + r"\Z"
+    + "(?:"
+    + re.escape(CHECK_MARKER).replace(r"\{\}", r"(\d+)")
+    + r"\n)?"
+    + rf"(?:{re.escape(VERDICT_MARKER)}|{re.escape(PARTIAL_MARKER)})\Z"
 )
-"""The line before a verdict's own marker, at the very end of its body (anchored there for the same reason): its
+"""The state in a verdict's footer, at the very end of its body (anchored there for the same reason): its
 event, how many blocking findings it listed with no thread to withdraw them in, and whether the review covered
 the whole change. A withdrawal only ever overturns a complete verdict that requested changes with outside=0."""
 
@@ -98,6 +107,22 @@ def withdrawals(comments: Iterable[PostedComment]) -> tuple[Withdrawal, ...]:
         if root.line is not None and match and match[3] and title is not None:  # outdated, or no kind recorded
             found.append(Withdrawal(root.path, root.line, match[3], int(match[2]), normal_title(title)))
     return tuple(found)
+
+
+def standing_blockers(comments: Iterable[PostedComment], block_at: int) -> list[tuple[PostedComment, re.Match[str]]]:
+    """The bot's blocking finding comments GitHub still shows on the current head that their thread hasn't
+    withdrawn, each with its marker."""
+    comments = list(comments)
+    withdrawn = withdrawn_threads(comments)
+    return [
+        (comment, match)
+        for comment in comments
+        if comment.in_reply_to is None
+        and comment.line is not None
+        and comment.id not in withdrawn
+        and (match := finding_marker(comment.body))
+        and blocks_at(match[3], int(match[2]), block_at)
+    ]
 
 
 def finding_marker(body: str) -> re.Match[str] | None:
@@ -158,8 +183,11 @@ class Publisher:
         async with self._lock:
             try:
                 existing = self._existing if self._existing is not None else await self._load_existing()
-                if covered(existing, key, finding) or covered(self.posted, key, finding):
-                    self.posted[key] = min(finding.priority, existing.get(key, 3), self.posted.get(key, 3))
+                if covered(self.posted, key, finding):
+                    return
+                if covered(existing, key, finding):
+                    self._findings.append(finding)  # reconfirmed this attempt, even if its lens later fails
+                    self.posted[key] = existing[key]
                     return
                 where = placement(finding.path, finding.line, finding.kind)
                 if covered(self._placed, where, finding):  # posted for an earlier commit, still on this line
@@ -191,6 +219,25 @@ class Publisher:
             logger.warning("could not read the PR's comments; withdrawals not applied", exc_info=True)
             return ()
 
+    async def standing(self) -> bool:
+        """Whether an earlier review of this same commit left a blocking finding standing: a finding comment
+        its thread hasn't withdrawn, or one the latest verdict listed with no thread to withdraw it in. The code
+        hasn't changed, so a rerun that misses a confirmed finding hasn't cleared it. Without this, asking for
+        review after review until one pass misses the finding would turn a blocked commit green.
+
+        Raises if GitHub can't be read: an approval must not rest on not having looked."""
+        comments = await self._github.posted_comments(self._repo, self._number, author=self._author)
+        if any(
+            match[1] == _fingerprint(self._head_sha, match[3], comment.path, comment.line)
+            for comment, match in standing_blockers(comments, self._block_at)
+        ):
+            return True
+        bodies = await self._github.review_bodies(
+            self._repo, self._number, commit_sha=self._head_sha, author=self._author
+        )
+        decided = [match for body in bodies if (match := _VERDICT_STATE.search(body)) and match[1] != "COMMENT"]
+        return bool(decided) and decided[-1][1] == "REQUEST_CHANGES" and int(decided[-1][2]) > 0
+
     async def _load_existing(self) -> dict[str, int]:
         """Fingerprints (and placements) of the bot's comments on the PR. Recorded only once the fetch succeeds,
         so a failed fetch is retried with the next finding instead of switching dedupe off for the review."""
@@ -208,6 +255,14 @@ class Publisher:
         return existing
 
 
+def published_event(bodies: Iterable[str], check_id: int) -> ReviewEvent | None:
+    """The verdict actually posted by this attempt (not another review of the same commit)."""
+    for body in bodies:
+        if (match := _VERDICT_STATE.search(body)) and match[4] == str(check_id):
+            return cast(ReviewEvent, match[1])
+    return None
+
+
 async def post_review(
     github: PullRequests,
     repo: Repo,
@@ -218,19 +273,24 @@ async def post_review(
     models_note: str,
     outcome: Outcome,
     posted: Mapping[str, int] | None = None,
-) -> None:
+    check_id: int | None = None,
+) -> ReviewEvent | None:
     """The verdict, computed and never generated: a confirmed finding at the blocking priority blocks the
     merge. Inline findings already posted (`posted` fingerprints) aren't repeated."""
     # A review cut short by the time limit never approves: it hasn't seen the whole change. Its verdict is
     # partial: a later full review of the same commit (a retry) must still post its own.
     partial = outcome.cut_short and not outcome.blocking
-    marker = PARTIAL_MARKER if partial else VERDICT_MARKER
+    prefix = CHECK_MARKER.format(check_id) + "\n" if check_id is not None else ""
+    marker = prefix + (PARTIAL_MARKER if partial else VERDICT_MARKER)
     bodies = await github.review_bodies(repo, number, commit_sha=head_sha, author=author)
-    if any(body.endswith(VERDICT_MARKER) or (partial and body.endswith(PARTIAL_MARKER)) for body in bodies):
-        # A replay after a crash between posting and checkpointing: this verdict is already there. (GitHub
-        # also wraps each early inline comment in an empty review of its own; those never count.)
-        logger.info("%s/%s#%d at %s already reviewed; not posting again", repo.owner, repo.name, number, head_sha[:7])
-        return
+    if check_id is not None:
+        if previous := published_event(bodies, check_id):
+            return previous  # return the published decision, not the replay's recomputed outcome
+    else:
+        # Legacy (unscoped) callers: a full verdict can follow a partial.
+        prior = (VERDICT_MARKER, PARTIAL_MARKER) if partial else (VERDICT_MARKER,)
+        if any(body.endswith(prior) for body in bodies):
+            return None
     event: ReviewEvent = "REQUEST_CHANGES" if outcome.blocking else "COMMENT" if partial else "APPROVE"
     unposted = [f for f in outcome.inline if not covered(posted or {}, fingerprint(head_sha, f), f)]
 
@@ -262,6 +322,7 @@ async def post_review(
             body=review_body(listed, footer=footer(outside)),
             comments=[],
         )
+    return None
 
 
 def state_marker(event: ReviewEvent, *, outside: int, complete: bool) -> str:
@@ -282,21 +343,10 @@ async def reconsider(github: PullRequests, repo: Repo, number: int, *, author: s
     if state.state != "open":
         return False
     bodies = await github.review_bodies(repo, number, commit_sha=state.head_sha, author=author)
-    verdicts = [match.groups() for body in bodies if (match := _VERDICT_STATE.search(body))]
+    verdicts = [match.group(1, 2, 3) for body in bodies if (match := _VERDICT_STATE.search(body))]
     if not verdicts or verdicts[-1] != ("REQUEST_CHANGES", "0", "1"):
         return False
-    comments = await github.posted_comments(repo, number, author=author)
-    withdrawn = withdrawn_threads(comments)
-    standing = [
-        comment
-        for comment in comments
-        if comment.in_reply_to is None
-        and comment.line is not None
-        and comment.id not in withdrawn
-        and (match := finding_marker(comment.body))
-        and blocks_at(match[3], int(match[2]), block_at)
-    ]
-    if standing:
+    if standing_blockers(await github.posted_comments(repo, number, author=author), block_at):
         return False
     # The green check first: a retry after a failure here never leaves an approval beside a red check.
     check = await github.start_check(repo, state.head_sha)

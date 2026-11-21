@@ -25,7 +25,7 @@
 <rect x="54" y="343" width="631" height="110" rx="12" fill="#153638" stroke="#3b6963" stroke-width="1.5" />
 <text x="73" y="375" class="head" >01   Verify and enqueue</text>
 <text x="73" y="407" class="body" >FastAPI verifies the webhook signature and routes the event.</text>
-<text x="73" y="432" class="body" >DBOS deduplicates jobs per PR head and resumes after restart.</text>
+<text x="73" y="432" class="body" >Active requests share a review; crash recovery resumes its budget.</text>
 <path class="wire" d="M88 251V289"/>
 <path class="wire" d="M365 453V482"/>
 <rect x="54" y="484" width="631" height="231" rx="12" fill="#143b37" stroke="#6ab596" stroke-width="1.5" />

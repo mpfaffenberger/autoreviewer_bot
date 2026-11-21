@@ -9,9 +9,10 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.compaction import TieredCompaction
 
 from autoreviewer.review.workspace import Workspace
-from autoreviewer.servers import COMPACT_AT, DEEPSEEK, QWEN
+from autoreviewer.servers import COMPACT_AT
 from autoreviewer.web.app import ModelPlan, build_agent_factory, build_lenses, build_simplifier_factory, models_note
 from autoreviewer.web.config import AGENT_ROLES, Settings, models_from
+from tests.reference_profile import DEEPSEEK, QWEN
 
 PINS = f" security={DEEPSEEK}, security.verifier={QWEN} ,simplify.verifier={QWEN},simplify={DEEPSEEK}"
 PINNED = {"PRISM_MODELS": PINS}

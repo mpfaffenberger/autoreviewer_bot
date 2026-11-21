@@ -117,6 +117,9 @@ class Outcome:
     withdrawn: tuple[Withdrawal, ...] = ()
     """Findings withdrawn in conversation on unchanged code (posting.Publisher.withdrawn): one found again is not
     posted again, and doesn't block."""
+    standing: bool = False
+    """An earlier review of this same commit left a blocking finding that still stands
+    (posting.Publisher.standing): unchanged code can't be approved over it, whatever this review found."""
 
     @property
     def posted(self) -> list[Finding]:
@@ -173,7 +176,7 @@ class Outcome:
 
     @property
     def blocking(self) -> bool:
-        return any(self.is_blocking(f) for f in self.posted)
+        return self.standing or any(self.is_blocking(f) for f in self.posted)
 
 
 @dataclass(frozen=True)

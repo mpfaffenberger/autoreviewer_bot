@@ -45,6 +45,18 @@ def _claude_code_model(name: str) -> Model:
     return ClaudeCodeModel(name)
 
 
+def check_model_spec(spec: str) -> str:
+    """`spec` if it is `provider:model` or `factory:module:function`; the one definition of a model spec."""
+    provider, sep, name = spec.partition(":")
+    if not sep or not provider or not name or any(c.isspace() for c in spec):
+        raise ValueError("expected provider:model or factory:module:function")
+    if provider == "factory":
+        module, _, function = name.partition(":")
+        if not function.isidentifier() or not all(part.isidentifier() for part in module.split(".")):
+            raise ValueError("expected factory:module:function")
+    return spec
+
+
 def preferred_roles(pool: dict[str, int], finder: str | None, checker: str | None) -> tuple[str | None, str | None]:
     if finder is None:
         finder = next((spec for spec in pool if spec != checker), None)
@@ -59,6 +71,7 @@ class PrismConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     finder: str
     checker: str
+    overflow: str | None = None
     pool: Annotated[dict[str, Annotated[int, Field(gt=0)]], Field(min_length=2)] | None = None
     local_context: dict[str, Annotated[int, Field(ge=16)]] = Field(default_factory=dict)
     endpoints: dict[str, str] = Field(default_factory=dict)
@@ -73,17 +86,10 @@ class PrismConfig(BaseModel):
             return {"finder": finder, "checker": checker, **data}
         return data
 
-    @field_validator("finder", "checker")
+    @field_validator("finder", "checker", "overflow")
     @classmethod
-    def model_spec(cls, spec: str) -> str:
-        provider, sep, name = spec.partition(":")
-        if not sep or not provider or not name or any(c.isspace() for c in spec):
-            raise ValueError("expected provider:model or factory:module:function")
-        if provider == "factory":
-            module, _, function = name.partition(":")
-            if not function.isidentifier() or not all(part.isidentifier() for part in module.split(".")):
-                raise ValueError("expected factory:module:function")
-        return spec
+    def model_spec(cls, spec: str | None) -> str | None:
+        return None if spec is None else check_model_spec(spec)
 
     @field_validator("endpoints")
     @classmethod
@@ -111,10 +117,14 @@ class PrismConfig(BaseModel):
             raise ValueError("finder and checker must use different models")
         pool = self.pool or {}
         for spec, capacity in pool.items():
-            self.model_spec(spec)
+            check_model_spec(spec)
             if spec in self.lanes and self.lanes[spec] != capacity:
                 raise ValueError(f"lanes for {spec} conflict with pool capacity {capacity}")
         specs = {self.finder, self.checker, *pool}
+        if self.overflow is not None:
+            if self.overflow == self.checker:
+                raise ValueError("overflow finder and checker must use different models")
+            specs.add(self.overflow)
         local_specs = {spec for spec in specs if spec.startswith("local:")}
         if self.local_context.keys() - local_specs:
             raise ValueError("local_context only applies to configured local models")
@@ -137,27 +147,51 @@ class PrismConfig(BaseModel):
         return self.lanes.get(spec, 1)
 
     def resolve(self, spec: str) -> tuple[Model, int]:
-        from pydantic_ai.models import Model, infer_model
+        # A model that only takes overflow exists to absorb a queue, so it is uncapped unless lanes are set.
+        # One that is also the finder or a pool member keeps that cap: lanes belong to the model, not the role.
+        overflow_only = spec == self.overflow != self.finder and spec not in (self.pool or {})
+        return resolve_model(
+            spec,
+            endpoint=self.endpoints.get(spec),
+            local_context=self.local_context.get(spec),
+            compact_at=self.compact_at.get(spec),
+            lanes=self.lanes.get(spec) if overflow_only else self.lane_count(spec),
+        )
 
-        from autoreviewer.review.agents import with_lanes
 
-        if spec.startswith("factory:"):
-            _, module, function = spec.split(":")
-            model = getattr(import_module(module), function)()
-            if not isinstance(model, Model):
-                raise TypeError(f"{spec} must return a pydantic_ai Model")
-        elif spec.startswith("local:"):
-            model = _local_model(spec.removeprefix("local:"), self.endpoints[spec])
-        elif spec.startswith("claude-code:"):
-            model = _claude_code_model(spec.split(":", 1)[1])
-        else:
-            model = infer_model(spec)
+def resolve_model(
+    spec: str,
+    *,
+    endpoint: str | None = None,
+    local_context: int | None = None,
+    compact_at: int | None = None,
+    lanes: int | None = None,
+) -> tuple[Model, int]:
+    from pydantic_ai.models import Model, infer_model
 
-        # Leave at least half of a known window for output, tool schemas and counting error.
-        # For unknown models use a small default; the operator can supply a measured target.
-        window = self.local_context.get(spec) if spec.startswith("local:") else model.profile.get("context_window")
-        limit = None if window is None else min(window // 2, window - ((model.settings or {}).get("max_tokens") or 0))
-        target = self.compact_at.get(spec, limit if limit is not None else 4096)
-        if target < 8 or (limit is not None and target > limit):
-            raise ValueError(f"compact_at={target} for {spec} leaves insufficient room in its {window}-token window")
-        return with_lanes(model, spec, self.lane_count(spec)), target
+    from autoreviewer.review.agents import with_lanes
+
+    if spec.startswith("factory:"):
+        _, module, function = spec.split(":")
+        model = getattr(import_module(module), function)()
+        if not isinstance(model, Model):
+            raise TypeError(f"{spec} must return a pydantic_ai Model")
+    elif spec.startswith("local:"):
+        if endpoint is None:
+            raise ValueError(f"missing endpoint for {spec}")
+        model = _local_model(spec.removeprefix("local:"), endpoint)
+    elif spec.startswith("claude-code:"):
+        model = _claude_code_model(spec.split(":", 1)[1])
+    else:
+        model = infer_model(spec)
+
+    # Leave at least half of a known window for output, tool schemas and counting error.
+    # For unknown models use a small default; the operator can supply a measured target.
+    window = local_context if spec.startswith("local:") else model.profile.get("context_window")
+    limit = None if window is None else min(window // 2, window - ((model.settings or {}).get("max_tokens") or 0))
+    target = compact_at if compact_at is not None else limit if limit is not None else 4096
+    if target < 8 or (limit is not None and target > limit):
+        raise ValueError(f"compact_at={target} for {spec} leaves insufficient room in its {window}-token window")
+    if lanes is not None:
+        model = with_lanes(model, spec, lanes)
+    return model, target

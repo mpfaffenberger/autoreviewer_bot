@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai import ModelRetry
@@ -19,14 +22,15 @@ from autoreviewer.review.diff import (
     split_git_diff,
 )
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.job import _summary, review_and_post
+from autoreviewer.review.job import _summary, finish_check, review_and_post, start_check
 from autoreviewer.review.pipeline import PullRequestText, lens_prompt, review
 from autoreviewer.review.posting import VERDICT_MARKER
 from autoreviewer.review.render import comment_body, sanitize
 from autoreviewer.review.schemas import Finding
 from autoreviewer.review.workspace import BASE, HEAD, Workspace, read_changes, run_git
 from autoreviewer.web.routing import PullRequestUpdated
-from tests.review_fakes import BOT, FakeGitHub, GitRepo, agents, finding, job_deps
+from tests.review_fakes import BOT, HEAD_SOURCE, FakeGitHub, GitRepo, add_commit, agents, finding, job_deps
+from tests.test_withdrawals import withdraw
 
 pytestmark = pytest.mark.anyio
 
@@ -218,6 +222,25 @@ async def test_a_clean_pr_is_approved(repo: GitRepo, tmp_path: Path) -> None:
     assert result.conclusion == "success"
 
 
+@pytest.mark.parametrize("hung", ["settle_fixed", "_publish"])
+async def test_expiring_after_a_blocking_verdict_preserves_the_failed_check(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hung: str
+) -> None:
+    github = FakeGitHub(repo)
+
+    async def hang(*args: object, **kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    cleanup = AsyncMock(side_effect=hang)
+    monkeypatch.setattr(f"autoreviewer.review.job.{hung}", cleanup)
+    async with asyncio.timeout(5):
+        result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo), 1, remaining_s=1)
+
+    cleanup.assert_awaited_once()
+    assert [r["event"] for r in github.reviews] == ["REQUEST_CHANGES"]
+    assert (result.conclusion, result.title) == ("failure", "1 blocking issue(s)")
+
+
 async def test_rejected_inline_comments_fall_back_to_the_body(repo: GitRepo, tmp_path: Path) -> None:
     github = FakeGitHub(repo, reject_inline=True)
     result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
@@ -235,6 +258,114 @@ async def test_a_commit_already_reviewed_is_not_reviewed_again(repo: GitRepo, tm
     )
     await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo))
     assert len(github.reviews) == 1
+
+
+async def test_same_head_attempt_posts_its_own_verdict_but_replay_does_not(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    clean = job_deps(github, tmp_path)
+    blocking = job_deps(github, tmp_path, [finding(5)])
+    await review_and_post(clean, event, check_id=1)
+    for deps, check_id in ((blocking, 2), (clean, 2), (blocking, 3)):
+        # A replay must retain the published REQUEST_CHANGES even if a second model run would approve.
+        result = await review_and_post(deps, event, check_id=check_id)
+        assert result.conclusion == "failure"
+    assert [r["event"] for r in github.reviews] == ["APPROVE", "REQUEST_CHANGES", "REQUEST_CHANGES"]
+    assert len(github.review_comments) == 1
+
+
+async def test_expired_recovery_finishes_check_from_published_verdict(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    deps = job_deps(github, tmp_path, [finding(5)])
+    check = await start_check(deps, event)
+    await review_and_post(deps, event, check)
+    # Lost the step checkpoint and stayed down beyond the hard deadline.
+    await finish_check(deps, event, check, await review_and_post(deps, event, check, remaining_s=0))
+    assert github.checks[-1]["conclusion"] == "failure"
+    fresh = await start_check(deps, event)
+    await finish_check(deps, event, fresh, await review_and_post(deps, event, fresh, remaining_s=0))
+    assert github.checks[-1]["title"] == "Review timed out"  # cannot borrow the previous check's verdict
+    assert len(github.reviews) == 1
+
+
+@pytest.mark.parametrize(
+    ("soft_deadline_s", "conclusion", "title"),
+    [(540.0, "success", "No blocking issues"), (0.0, "neutral", "Partially reviewed")],
+    ids=["approval", "partial"],
+)
+async def test_expired_recovery_reports_a_published_approval_or_partial(
+    repo: GitRepo, tmp_path: Path, soft_deadline_s: float, conclusion: str, title: str
+) -> None:
+    """From the bot's review of #61: only a recovered REQUEST_CHANGES was covered."""
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    deps = replace(job_deps(github, tmp_path), soft_deadline_s=soft_deadline_s)
+    check = await start_check(deps, event)
+    await review_and_post(deps, event, check)
+    await finish_check(deps, event, check, await review_and_post(deps, event, check, remaining_s=0))
+    assert (github.checks[-1]["conclusion"], github.checks[-1]["title"]) == (conclusion, title)
+    assert len(github.reviews) == 1
+
+
+async def test_asking_again_cannot_approve_over_a_standing_finding(repo: GitRepo, tmp_path: Path) -> None:
+    """From the bot's review of #61: a rerun on unchanged code that misses a confirmed blocker must not turn
+    the commit green, or asking until one pass misses it would clear any finding."""
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    blocked = await review_and_post(job_deps(github, tmp_path, [finding(5)]), event, check_id=1)
+    again = await review_and_post(job_deps(github, tmp_path), event, check_id=2)  # this pass finds nothing
+    assert (blocked.conclusion, again.conclusion) == ("failure", "failure")
+    assert again.title == "Earlier blocking finding stands"
+    assert [r["event"] for r in github.reviews] == ["REQUEST_CHANGES", "REQUEST_CHANGES"]
+    assert "**Still blocked:**" in github.reviews[-1]["body"] and "No new issues found." in github.reviews[-1]["body"]
+    assert len(github.review_comments) == 1  # the standing comment is not posted again
+
+
+async def test_a_finding_withdrawn_in_its_thread_no_longer_stands(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    await review_and_post(job_deps(github, tmp_path, [finding(5)]), event, check_id=1)
+    withdraw(github, 1)
+    again = await review_and_post(job_deps(github, tmp_path), event, check_id=2)
+    assert again.conclusion == "success" and github.reviews[-1]["event"] == "APPROVE"
+
+
+async def test_a_blocker_listed_without_a_thread_stands_too(repo: GitRepo, tmp_path: Path) -> None:
+    """Its verdict counted it as `outside`: nobody can withdraw it in a thread, so only a new commit clears it."""
+    github = FakeGitHub(repo, fail_review_comments=True, reject_inline=True)
+    event = pull(repo)
+    await review_and_post(job_deps(github, tmp_path, [finding(5)]), event, check_id=1)
+    assert "outside=1" in github.reviews[-1]["body"] and github.review_comments == []
+    again = await review_and_post(job_deps(github, tmp_path), event, check_id=2)
+    assert again.conclusion == "failure" and github.reviews[-1]["event"] == "REQUEST_CHANGES"
+
+
+async def test_a_new_commit_is_judged_on_its_own(repo: GitRepo, tmp_path: Path) -> None:
+    """The earlier commit's comment still shows on its line, but it is not a finding against this code."""
+    github = FakeGitHub(repo)
+    await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo), check_id=1)
+    github.repo = replace(repo, head=add_commit(repo, {"stats.py": HEAD_SOURCE.replace(" - 1", "")}))
+    fixed = await review_and_post(job_deps(github, tmp_path), pull(github.repo), check_id=2)
+    assert fixed.conclusion == "success" and github.reviews[-1]["event"] == "APPROVE"
+
+
+async def test_no_approval_when_standing_findings_cannot_be_read(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo, fail_posted_comments=2)  # the withdrawals read, then the standing-findings read
+    result = await review_and_post(job_deps(github, tmp_path), pull(repo), check_id=1)
+    assert (result.title, result.conclusion) == ("Review failed", "neutral") and github.reviews == []
+
+
+async def test_timeout_finishes_even_if_review_lookup_fails(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    deps = job_deps(github, tmp_path)
+    check = await start_check(deps, event)
+    monkeypatch.setattr(github, "review_bodies", AsyncMock(side_effect=OSError("unavailable")))
+    await finish_check(deps, event, check, await review_and_post(deps, event, check, remaining_s=0))
+    assert github.checks[-1]["status"] == "completed" and github.checks[-1]["conclusion"] == "neutral"
 
 
 async def test_early_comments_do_not_count_as_the_verdict(repo: GitRepo, tmp_path: Path) -> None:

@@ -3,7 +3,7 @@
     start_check  ->  review_and_post  ->  finish_check
 
 Each phase is safe to replay after a crash: the check run is created once (its step's result is
-checkpointed), and posting skips a commit the bot already reviewed.
+checkpointed), and posting recognizes a verdict from the same check run.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -25,8 +26,9 @@ from autoreviewer.github import (
     PullRequests,
     PullRequestState,
     Repo,
+    ReviewEvent,
 )
-from autoreviewer.review.deadline import Deadline
+from autoreviewer.review.deadline import DEFAULT_SOFT_S, MAX_REVIEW_S, Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
 from autoreviewer.review.lint import LINT_KINDS, MAX_LINT_FINDINGS, LintError, lint_findings
 from autoreviewer.review.memory import PriorReview, ReviewMemory, conversation_id
@@ -42,7 +44,7 @@ from autoreviewer.review.pipeline import (
     review,
     review_lens,
 )
-from autoreviewer.review.posting import Publisher, post_review, settle_fixed
+from autoreviewer.review.posting import Publisher, post_review, published_event, settle_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.sessions import RoleSessions
@@ -133,7 +135,7 @@ class ReviewDeps:
     bot_login: str
     """Our own GitHub login, e.g. example-reviewer[bot]; used to avoid reviewing a commit twice."""
     models_note: str
-    """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
+    """Shown in the review footer: which model found and which verified, per lens (web/app.py models_note)."""
     memory: ReviewMemory | None = None
     """Where each PR's lens conversation is kept, so a new commit continues the last review."""
     session_namespace: str = "primary"
@@ -146,9 +148,9 @@ class ReviewDeps:
     """Optional one-click simplifications (see simplify.py); None skips them."""
     lenses: tuple[Lens, ...] = ()
     """Extra lenses (security, DRY) beside correctness."""
-    soft_deadline_s: float = 30 * 60
+    soft_deadline_s: float = DEFAULT_SOFT_S
     """After this, every lens wraps up with what it has (see deadline.py)."""
-    hard_deadline_s: float = 50 * 60
+    hard_deadline_s: float = MAX_REVIEW_S
     """After this, the review is cancelled: no verdict (findings already posted stay)."""
 
 
@@ -182,7 +184,30 @@ async def start_check(deps: ReviewDeps, pull: PullRequestUpdated) -> int:
     return await deps.github.start_check(repo_of(pull), pull.head_sha)
 
 
+async def _published_result(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int) -> CheckResult | None:
+    bodies = await deps.github.review_bodies(
+        repo_of(pull), pull.number, commit_sha=pull.head_sha, author=deps.bot_login
+    )
+    return _recovered_result(event) if (event := published_event(bodies, check_id)) else None
+
+
+def _recovered_result(event: ReviewEvent) -> CheckResult:
+    if event == "APPROVE":
+        return CheckResult("No blocking issues", "Approved; see the published review.", "success")
+    if event == "REQUEST_CHANGES":
+        return CheckResult("Changes requested", "See the blocking findings in the published review.", "failure")
+    return CheckResult("Partially reviewed", "The published review was incomplete; not approved.", "neutral")
+
+
 async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int, result: CheckResult) -> None:
+    timed_out = result.title == "Review timed out"
+    if timed_out or result.title == "Review failed":
+        # No review budget left, or the POST response was lost. Reconcile the external write in the
+        # retriable completion step, without running models or granting the review extra time.
+        try:
+            result = await _published_result(deps, pull, check_id) or result
+        except Exception:
+            logger.exception("Could not reconcile check %s; keeping its neutral result", check_id)
     await deps.github.finish_check(
         repo_of(pull),
         check_id,
@@ -191,16 +216,63 @@ async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int
         summary=result.summary,
         text=result.details,
     )
+    if timed_out:
+        # The timeout cancels the review step. Clean up in the completion step, after publishing the check.
+        repo = repo_of(pull)
+        await _forget_if_closed(deps, repo, pull, conversation_id(repo, pull.number))
 
 
-async def review_and_post(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None) -> CheckResult:
-    """Never raises: every outcome, including a crash, becomes the check run's result.
+async def review_and_post(
+    deps: ReviewDeps, pull: PullRequestUpdated, check_id: int | None = None, *, remaining_s: float | None = None
+) -> CheckResult:
+    """Review within one wall-clock budget, including GitHub reads, posting and progress updates.
 
-    With `check_id`, the check run shows what the review is doing while it runs (see progress.py).
+    On recovery, `remaining_s` is the time left on the durable hard deadline; neither clock restarts.
+    External cancellation propagates rather than becoming a verdict.
     """
+    started = asyncio.get_running_loop().time()
+    hard_s = min(deps.hard_deadline_s, MAX_REVIEW_S)
+    budget = hard_s if remaining_s is None else min(hard_s, remaining_s)
+    elapsed = hard_s - budget
+    deadline = Deadline(deps.soft_deadline_s, started=time.monotonic() - elapsed)
     progress = Progress()
-    async with _publishing(deps, repo_of(pull), check_id, progress):
-        result = await _guarded_review(deps, pull, progress)
+    repo = repo_of(pull)
+    result: CheckResult | None = None
+    try:
+        if budget <= 0:
+            raise TimeoutError
+        async with asyncio.timeout_at(started + budget), _publishing(deps, repo, check_id, progress):
+            reviewed = await _review(deps, repo, pull, progress, deadline, check_id)
+            if isinstance(reviewed, CheckResult):
+                result = reviewed
+            else:
+                # Posting succeeded. Neither thread cleanup nor a pending progress write changes that verdict.
+                result = _summary(reviewed)
+                try:
+                    await settle_fixed(
+                        deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=reviewed
+                    )
+                except Exception:
+                    logger.warning("could not settle fixed findings for %s#%d", repo, pull.number, exc_info=True)
+    except Superseded:
+        result = CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
+    except TimeoutError:
+        if result is not None:
+            return replace(result, details=progress.details())
+        logger.warning("reviewing %s/%s#%d at %s timed out", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
+        result = CheckResult(
+            "Review timed out",
+            f"Stopped after {hard_s / 60:g} minutes, before a verdict. Findings confirmed until then "
+            "are posted as comments. Push again or request another review to retry.",
+            "neutral",
+        )
+    except Exception:
+        logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
+        result = CheckResult(
+            "Review failed",
+            "Push again or request another review to retry. The bot's logs have the failure details.",
+            "neutral",
+        )
     return replace(result, details=progress.details())
 
 
@@ -214,33 +286,14 @@ async def _publishing(deps: ReviewDeps, repo: Repo, check_id: int | None, progre
     publisher = asyncio.create_task(_publish(deps, repo, check_id, progress, done))
     try:
         yield
+    except asyncio.CancelledError:
+        publisher.cancel()  # The review was cancelled; an in-flight update must not hold it open.
+        raise
     finally:
         done.set()
-        # Wait, don't cancel: an update cut off mid-request could still reach GitHub after the final result
+        # On normal completion, wait: an update cut off mid-request could still reach GitHub after the final result
         # and overwrite it with progress.
         await publisher
-
-
-async def _guarded_review(deps: ReviewDeps, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
-    try:
-        return await _review(deps, repo_of(pull), pull, progress)
-    except Superseded:
-        return CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
-    except TimeoutError:
-        logger.warning("reviewing %s/%s#%d at %s timed out", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
-        return CheckResult(
-            "Review timed out",
-            f"Stopped after {deps.hard_deadline_s / 60:g} minutes, before a verdict. Findings confirmed until then "
-            "are posted as comments. Push again to retry.",
-            "neutral",
-        )
-    except Exception:
-        logger.exception("reviewing %s/%s#%d at %s failed", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
-        return CheckResult(
-            "Review failed",
-            "The review could not be completed. Push again to retry; the bot's logs have the details.",
-            "neutral",
-        )
 
 
 async def _publish(deps: ReviewDeps, repo: Repo, check_id: int, progress: Progress, done: asyncio.Event) -> None:
@@ -489,7 +542,11 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
     )
 
 
-async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress) -> CheckResult:
+async def _review(
+    deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress, deadline: Deadline, check_id: int | None
+) -> CheckResult | Outcome:
+    if check_id is not None and (published := await _published_result(deps, pull, check_id)) is not None:
+        return published  # crashed after posting: never run models or post findings for this attempt again
     state = await _current(deps, repo, pull)
     agents, version = deps.select_correctness() if deps.select_correctness else (deps.agents, deps.lens_version)
     conversation = conversation_id(repo, pull.number)
@@ -497,31 +554,30 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, block_at=deps.block_at
     )
     try:
-        async with asyncio.timeout(deps.hard_deadline_s):
-            result = await _unless_superseded(
-                deps,
-                repo,
-                pull,
-                review_change(
-                    reader=deps.github,
-                    source=deps.source,
-                    agents=agents,
-                    work_dir=deps.work_dir,
-                    repo=repo,
-                    number=pull.number,
-                    state=state,
-                    head_sha=pull.head_sha,
-                    memory=deps.memory,
-                    session_namespace=deps.session_namespace,
-                    lens_version=version,
-                    block_at=deps.block_at,
-                    progress=progress,
-                    simplifier=deps.simplifier,
-                    lenses=deps.lenses,
-                    publish=publisher,
-                    deadline=Deadline(deps.soft_deadline_s),
-                ),
-            )
+        result = await _unless_superseded(
+            deps,
+            repo,
+            pull,
+            review_change(
+                reader=deps.github,
+                source=deps.source,
+                agents=agents,
+                work_dir=deps.work_dir,
+                repo=repo,
+                number=pull.number,
+                state=state,
+                head_sha=pull.head_sha,
+                memory=deps.memory,
+                session_namespace=deps.session_namespace,
+                lens_version=version,
+                block_at=deps.block_at,
+                progress=progress,
+                simplifier=deps.simplifier,
+                lenses=deps.lenses,
+                publish=publisher,
+                deadline=deadline,
+            ),
+        )
 
     except Exception:
         await _forget_if_closed(deps, repo, pull, conversation)  # snapshots written mid-run must not outlive a close
@@ -546,9 +602,11 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
     # A finding withdrawn in conversation and found again on unchanged code doesn't block (the verdict and the
     # check below both count with it).
     result.outcome.withdrawn = await publisher.withdrawn()
+    # Asking again without pushing gets a fresh attempt, but never a way around a finding that still stands.
+    result.outcome.standing = await publisher.standing()
     # A lens that failed after posting: its comments are on the PR, so the verdict counts them (#43's review).
     result.outcome.absorb(Outcome(inline=[f for f in publisher.findings if f not in result.outcome.posted]))
-    await post_review(
+    previous = await post_review(
         deps.github,
         repo,
         pull.number,
@@ -557,14 +615,9 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         models_note=deps.models_note,
         outcome=result.outcome,
         posted=publisher.posted,
+        check_id=check_id,
     )
-    try:  # tidying up, after the verdict: a failure here must never cost the review
-        await settle_fixed(
-            deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=result.outcome
-        )
-    except Exception:
-        logger.warning("%s at %s: could not settle fixed findings", conversation, pull.head_sha[:7], exc_info=True)
-    return _summary(result.outcome)
+    return _recovered_result(previous) if previous else result.outcome
 
 
 async def _unless_superseded(
@@ -635,6 +688,12 @@ def _summary(outcome: Outcome) -> CheckResult:
     if blocking:
         return CheckResult(
             f"{len(blocking)} blocking issue(s)", f"Changes requested; see the review comments.{notes}", "failure"
+        )
+    if outcome.standing:
+        return CheckResult(
+            "Earlier blocking finding stands",
+            f"Changes requested: a blocking finding from an earlier review of this commit still stands.{notes}",
+            "failure",
         )
     if outcome.cut_short:
         return CheckResult(

@@ -21,6 +21,7 @@ def test_cli_roundtrip_and_no_overwrite(tmp_path: Path, monkeypatch: pytest.Monk
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
+        (["--overflow", "openai:burst", "--overflow-lanes", "4"], {"openai:burst": 4}),
         (["--finder-lanes", "3"], {"openai:first": 3}),
         (["--checker-lanes", "2"], {"openai:other": 2}),
         (["--finder-lanes", "3", "--checker-lanes", "2"], {"openai:first": 3, "openai:other": 2}),
@@ -56,6 +57,13 @@ OTHER = "http://localhost:9000/v1"
 @pytest.mark.parametrize(
     ("finder", "checker", "flags", "expected"),
     [
+        ("openai:a", "openai:b", ["--overflow", "local:c", "--local-url", SHARED], {"local:c": SHARED}),
+        (
+            "local:a",
+            "openai:b",
+            ["--local-url", SHARED, "--overflow", "local:c", "--overflow-url", OTHER],
+            {"local:a": SHARED, "local:c": OTHER},
+        ),
         ("local:a", "openai:b", ["--local-url", SHARED], {"local:a": SHARED}),
         ("openai:a", "local:b", ["--local-url", SHARED], {"local:b": SHARED}),
         ("local:a", "local:b", ["--local-url", SHARED], {"local:a": SHARED, "local:b": SHARED}),
