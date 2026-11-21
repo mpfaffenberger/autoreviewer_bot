@@ -45,6 +45,7 @@ from autoreviewer.review.pipeline import (
 from autoreviewer.review.posting import Publisher, post_review, settle_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
+from autoreviewer.review.sessions import RoleSessions
 from autoreviewer.review.simplify import SimplifierFactory, suggest
 from autoreviewer.review.workspace import RepoSource, Workspace, read_changes, read_changes_since_previous
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
@@ -83,6 +84,7 @@ async def _run_lens(
     block_at: int,
     publish: Publish | None,
     deadline: Deadline | None,
+    sessions: RoleSessions | None = None,
 ) -> Outcome:
     """One extra lens over `pr`."""
     lens, verifier = spec.agents(workspace)
@@ -98,6 +100,7 @@ async def _run_lens(
         publish=publish,
         capabilities=[deadline.watch(spec.kind)] if deadline else (),
         max_posted=spec.max_posted,
+        sessions=sessions,
     )
 
 
@@ -133,6 +136,7 @@ class ReviewDeps:
     """Shown in the review footer, e.g. "correctness by qwen3.8-flash-next, verified by deepseek-v4.1-flash"."""
     memory: ReviewMemory | None = None
     """Where each PR's lens conversation is kept, so a new commit continues the last review."""
+    session_namespace: str = "primary"
     select_correctness: Callable[[], tuple[AgentFactory, str]] | None = None
     lens_version: str = ""
     """Fingerprint of the lens prompt and model (see agents.lens_version)."""
@@ -161,6 +165,7 @@ class CheckResult:
 class Reviewed:
     outcome: Outcome
     remember: PriorReview | None
+    sessions: RoleSessions | None = None
     """What to save for the next review of this PR; None without memory."""
 
 
@@ -268,6 +273,7 @@ async def review_change(
     state: PullRequestState,
     head_sha: str,
     memory: ReviewMemory | None = None,
+    session_namespace: str = "primary",
     lens_version: str = "",
     block_at: int = BLOCK_AT_PRIORITY,
     progress: Progress | None = None,
@@ -286,6 +292,29 @@ async def review_change(
     """
     base = (await reader.compare(repo, state.base_sha, head_sha)).merge_base
     conversation = conversation_id(repo, number)
+    comparisons: dict[str, bool] = {}
+    ancestry_lock = asyncio.Lock()
+
+    async def compatible(previous: str) -> bool:
+        async with ancestry_lock:
+            if previous not in comparisons:
+                try:
+                    comparisons[previous] = (await reader.compare(repo, previous, head_sha)).status == "ahead"
+                except Exception:
+                    logger.warning("cannot verify history ancestry for %s; starting fresh", conversation)
+                    comparisons[previous] = False
+            return comparisons[previous]
+
+    sessions = (
+        RoleSessions(
+            memory.directory(conversation), head_sha, base, compatible, f"{repo.installation_id}:{session_namespace}"
+        )
+        if memory
+        else None
+    )
+    # Overflow may reuse its own sessions but must neither read nor overwrite the primary continuation index.
+    if session_namespace != "primary":
+        memory = None
     prior = await _resumable(memory, reader, repo, conversation, base=base, head_sha=head_sha, version=lens_version)
 
     with tempfile.TemporaryDirectory(prefix="review-", dir=work_dir) as scratch:
@@ -334,6 +363,7 @@ async def review_change(
                         lens,
                         verifier,
                         continuation=continuation,
+                        sessions=sessions,
                         lens_capabilities=[
                             *([persistence] if persistence else ()),
                             *([deadline.watch("reviewer")] if deadline else ()),
@@ -360,6 +390,7 @@ async def review_change(
                         block_at=block_at,
                         publish=publish,
                         deadline=deadline,
+                        sessions=sessions,
                     )
                     paths = [change.path for change in target.reviewable]
                     extra.append(lenses_group.create_task(_survive(spec.kind, block_at, run, paths)))
@@ -372,6 +403,7 @@ async def review_change(
                         workspace.root,
                         progress,
                         paths=scope,
+                        sessions=sessions,
                         publish=publish,
                         capabilities=[deadline.watch("simplifier")] if deadline else (),
                     )
@@ -406,7 +438,7 @@ async def review_change(
     remember = None
     if memory is not None and not outcome.cut_short:
         remember = _prior_review(run_id, head_sha, base, lens_version, outcome)
-    return Reviewed(outcome, remember)
+    return Reviewed(outcome, remember, sessions)
 
 
 async def _resumable(
@@ -480,6 +512,7 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
                     state=state,
                     head_sha=pull.head_sha,
                     memory=deps.memory,
+                    session_namespace=deps.session_namespace,
                     lens_version=version,
                     block_at=deps.block_at,
                     progress=progress,
@@ -504,6 +537,8 @@ async def _review(deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progre
         if deps.memory is not None:
             deps.memory.forget(conversation)
         raise Superseded
+    if result.sessions is not None:
+        result.sessions.commit()  # context only, never proof of coverage
     if deps.memory is not None and result.remember is not None:
         deps.memory.remember(conversation, result.remember)
     if latest.head_sha != pull.head_sha:
