@@ -161,9 +161,11 @@ async def test_a_lens_that_fails_after_posting_still_counts_what_it_posted(repo:
         )
 
     github = FakeGitHub(repo)
-    result = await review_and_post(replace(job_deps(github, tmp_path), agents=failing), pull(repo))
+    for check_id in (1, 2):  # fresh request reconfirms the same finding without posting it twice
+        result = await review_and_post(replace(job_deps(github, tmp_path), agents=failing), pull(repo), check_id)
+        assert (result.conclusion, github.reviews[-1]["event"]) == ("failure", "REQUEST_CHANGES")
     assert len(github.review_comments) == 1
-    assert (result.conclusion, github.reviews[-1]["event"]) == ("failure", "REQUEST_CHANGES")
+    assert len(github.reviews) == 2
 
 
 async def test_a_lens_that_cant_even_start_leaves_the_review_partial(repo: GitRepo, tmp_path: Path) -> None:

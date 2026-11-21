@@ -1,32 +1,32 @@
-"""Facts about the model servers in the reference deployment. Change them here when a server is reconfigured.
-DESIGN.md §7 ("Lanes") has the measurements behind them."""
+"""The gateway deployment's model facts, loaded once from its profile (deployment_profile.py).
 
-from typing import Literal, get_args
+No model is named here. Edit deployment_profile.json, or point PRISM_DEPLOYMENT_PROFILE at a replacement.
+DESIGN.md §7 ("Lanes") has the measurements behind the reference values.
+"""
 
-QWEN = "qwen3.8-flash-next"
-DEEPSEEK = "deepseek-v4.1-flash"
-QWEN_CONTEXT_WINDOW = 172_032
-"""5 streams of 168k tokens on Qwen's server (DESIGN.md §7); it was 4 of 224k until Nov 20."""
-DEEPSEEK_CONTEXT_WINDOW = 1_048_576
-"""As reported by its serving engine's /v1/models (max_model_len), 2026-11-16."""
-CONTEXT_WINDOWS = {QWEN: QWEN_CONTEXT_WINDOW, DEEPSEEK: DEEPSEEK_CONTEXT_WINDOW}
-"""Every model an agent may be pinned to (config.models_from): an agent's context window follows its model.
+from typing import get_args
 
-Real names only. Boodleton also serves aliases: `qwen3.8-27b` is this Qwen and `glm53` is this DeepSeek. They
-stay out because the rule that a finder and its checker differ, and the per-model lanes, compare names, so a
-pin to an alias stops startup."""
-REPLY_TOKENS = 16_384
-"""The longest reply any request may ask for (`max_tokens`). Qwen's server reserves it in the window before it
-accepts a prompt, and reserves 32,768 for a request that doesn't say. Of 18,632 Qwen replies to the bot by
-Nov 20, the longest was 13,090 tokens (99.9% under 9,335); DeepSeek's, 6,279."""
-COMPACT_AT = {QWEN: 140_000, DEEPSEEK: int(DEEPSEEK_CONTEXT_WINDOW * 0.6)}
+from autoreviewer.deployment_profile import ReasoningEffort as ReasoningEffort
+from autoreviewer.deployment_profile import load_deployment_profile
+
+_profile = load_deployment_profile()
+DEFAULT_BASE_URL = _profile.base_url
+CONTEXT_WINDOWS = {model.id: model.context_window for model in _profile.models.values()}
+"""Every model an agent may be pinned to (config.models_from): an agent's context window follows its model."""
+COMPACT_AT = {model.id: model.compact_at for model in _profile.models.values()}
 """The history, in tokens, above which an agent compacts its conversation (compaction.review_compaction): low
-enough that the prompt plus REPLY_TOKENS always fits the window. Qwen's is Mike's 140k (Nov 20), well above 60%
-of its window, so its reviewers compact less often; DeepSeek keeps 60% of its long window."""
-DEFAULT_MODEL_LANES = {QWEN: 5, DEEPSEEK: 4}
-"""Requests at once per model, across every review: Qwen's stream count, and DeepSeek's share of a shared server."""
-
-ReasoningEffort = Literal["low", "medium", "high"]
-"""Efforts a request may ask for. DeepSeek thinks at any of them and not at all without one (2026-11-18: 43-59
-reasoning tokens at each level on the same question, 0 without); Qwen thinks by default."""
+enough that the prompt plus REPLY_TOKENS always fits the window."""
+DEFAULT_MODEL_LANES = {model.id: model.lanes for model in _profile.models.values()}
+"""Requests at once per model, across every review."""
+REPLY_TOKENS = _profile.reply_tokens
+"""The longest reply any request may ask for (`max_tokens`)."""
+DEFAULT_MODELS = {role: _profile.models[slot].id for role, slot in _profile.roles.items()}
+"""Role -> model. PRISM_MODELS pins individual roles over it (config.models_from)."""
+DEFAULT_REASONING = _profile.reasoning
+DEFAULT_OVERFLOW_MODEL = _profile.overflow_model
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = get_args(ReasoningEffort)
+
+
+def default_compact_at(role: str) -> int:
+    """Where the model the profile assigns to `role` compacts: the default for an agent built without a plan."""
+    return COMPACT_AT[DEFAULT_MODELS[role]]

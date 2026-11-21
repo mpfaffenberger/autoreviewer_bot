@@ -15,6 +15,7 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from time import time
 
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -92,6 +93,9 @@ async def main() -> None:
     deps = type(deps)(**{**deps.__dict__, "agents": lambda root: (
         correctness_agent(FunctionModel(crashing_lens), root), verifier_agent(verifier_model(lambda f: True), root)
     )})  # fmt: skip
+    if MODE == "recover-after-deadline":
+        # Advance only the review clock: simulate ten minutes of downtime without sleeping.
+        durable.time = lambda: time() + 600
     durable.configure(DIR / "dbos.sqlite")
     await durable.launch(deps, concurrency=2)
     try:

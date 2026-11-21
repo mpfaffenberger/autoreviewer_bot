@@ -97,7 +97,7 @@ Not used, on purpose (YAGNI):
 
 ## 4. The review pipeline
 
-1. **Gate.** Is the installation active and the repo enabled? Is the PR not a draft? Is the head not already reviewed?
+1. **Gate.** Is the installation active and the repo enabled? Is the PR non-draft or the request explicit? Is this a new push or an explicit review request?
 2. **Fetch** (code, installation token):
    - the diff: `pulls/{n}/files`, or `compare/{last_reviewed_sha}...{head}` for incremental runs (fall back to the full diff after a force-push);
    - the repo snapshot: `GET /repos/{o}/{r}/tarball/{head_sha}` into a size-capped tmpfs dir. No git binary, and no token in a remote URL.
@@ -234,9 +234,9 @@ Every lens gets one shared scope rule (`agents.FOCUS`): review the lines the PR 
 affect, and read the rest of the codebase only to understand them. Runaway reviews were scope drift, or a model stuck in a loop: verifiers get an 80-step budget
 and every agent the harness's `DetectLoops`, so the deadlines are only a backstop.
 
-`review/deadline.py`: after the **soft deadline** (`PRISM_SOFT_DEADLINE_MINUTES`, 30) every lens
-wraps up. A capability removes its tools and tells it time is up, so it returns its final report with what
-it found. After the **hard deadline** (`PRISM_HARD_DEADLINE_MINUTES`, 50) the job cancels the review:
+`review/deadline.py`: the **soft deadline** defaults to 9 minutes (`PRISM_SOFT_DEADLINE_MINUTES`),
+capped at 90% of the hard deadline. With five minutes left, lenses are asked to focus; with one minute
+left, they lose their tools and must report what they found. Both windows shrink for shorter budgets. After the **hard deadline** (`PRISM_HARD_DEADLINE_MINUTES`, at most 10 per attempt) the job cancels the review:
 "Review timed out", no verdict, and findings already posted stay. A review whose correctness or security lens was cut short, or failed outright (a model error after the
 client's retries), **never approves**: it requests changes if it found blocking issues, and otherwise
 posts a neutral COMMENT ("partially reviewed") with a neutral check, and isn't remembered for continuing
@@ -245,9 +245,9 @@ bot's limits.
 
 A running review checks every minute whether its PR moved on (a newer push, or closed) and stops at
 once if so: its result would be thrown away, and the newer head's review may be waiting for its slot.
-`@YOUR-APP-SLUG review` re-runs a review of the current commit that ended without a verdict
-(cancelled, crashed, partially reviewed, timed out, failed). It resumes or forks the durable workflow,
-reusing the check run; a redelivered push never does.
+Crash recovery uses the original check and remaining time. A fresh explicit request after completion
+starts a new check and budget, even if the commit already has a verdict. Publication recognizes the
+check ID in the bot's review footer so recovery does not repeat that attempt's verdict.
 
 ### Deterministic checks (no model)
 
@@ -303,11 +303,13 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
 
 - Accepted from the PR's author (human or bot) and from OWNER / MEMBER / COLLABORATOR; anyone else is
   ignored. The bot's own comments, edits, and quoted (`>`) lines never count as commands.
-- It looks up the PR's current head and enqueues **the push path's review**, with the same workflow ID.
-  Asking about a commit twice is a no-op, so the command can't be used to burn the GPU. Drafts are
-  reviewed too, because the request is explicit.
-- It acknowledges with a reaction: 👀 means a review is queued or running, 👍 means that commit's review
-  already finished. Reactions are cosmetic, so if one fails the delivery doesn't.
+- The command targets the current head, including drafts. If an attempt is queued or running, the
+  request joins it. After it finishes, a new command requests a fresh review of that head; redelivery
+  of the same comment does not. A reaction acknowledges the command; reaction failures are cosmetic.
+- A fresh attempt never approves over a blocking finding that still stands on the same commit
+  (`posting.Publisher.standing`): one whose thread hasn't withdrawn it, or one the latest verdict listed
+  with no thread. The code is unchanged, so a pass that misses the finding hasn't cleared it; otherwise
+  asking until one pass misses it would turn a blocked commit green. A withdrawal or a new commit clears it.
 
 **Built: answers in the bot's threads** (`review/conversation.py`, `PRISM_CONVERSATIONS`).
 
@@ -333,7 +335,7 @@ Events: `pull_request_review_comment` (thread replies) and `issue_comment`
 - A finding stands withdrawn when the latest answer in its own thread withdrew it. Answers end with code-written
   markers (`<!-- autoreviewer:answers <id> -->`, then `<!-- autoreviewer:withdrawn -->` for a withdrawal), and
   only markers at the very end of an answer count: text the model was led to write can't withdraw anything.
-- Every verdict ends with a state line just before its marker: `<!-- autoreviewer:state EVENT outside=N
+- Every verdict footer records its state: `<!-- autoreviewer:state EVENT outside=N
   complete=0|1 -->`. N counts blocking findings listed with no thread to withdraw them in.
 - After a withdrawal, a separate durable step reconsiders the head: if its latest verdict requested changes
   after a complete review with outside=0, and no blocking finding comment on the head is left standing (each
@@ -433,13 +435,16 @@ the model names in reviewer config. Prefer the allowlist.
 
 **Lanes (measured 2026-11-18, widened Nov 20).** Qwen's server runs 5 streams of 168k tokens; DeepSeek's has
 more but is shared. Every request goes through one process-wide limiter per model (`agents.with_lanes`, pydantic-ai's
-`ConcurrencyLimitedModel`): `PRISM_MODEL_LANES`, default Qwen 5 and DeepSeek 4 (`servers.py`).
+`ConcurrencyLimitedModel`): `PRISM_MODEL_LANES`, default Qwen 5 and DeepSeek 4. Those defaults, and every other
+model name and limit in this section, are the reference values in `deployment_profile.json`, which
+`PRISM_DEPLOYMENT_PROFILE` replaces without a code change (docs/providers.md).
 
 **Compaction points and reply room (Nov 20).** An agent compacts its history above `servers.COMPACT_AT`: 140k on
 Qwen (Mike's call, higher than the old 60% of the window, so reviewers compact less), 60% of DeepSeek's 1M window.
 Every request asks for at most `REPLY_TOKENS` (16,384): Qwen's server reserves `max_tokens` in the window before it
 accepts a prompt, and 32,768 when a request doesn't say, which would cap prompts at 139k on a 168k window. Of 18,632
-Qwen replies to the bot, the longest was 13,090 tokens. `COMPACT_AT + REPLY_TOKENS <= window` is tested.
+Qwen replies to the bot, the longest was 13,090 tokens. `COMPACT_AT + REPLY_TOKENS <= window` is checked when the
+profile loads, and startup stops if it fails.
 
 The Qwen server pre-budgets each stream's full window (fp8 KV, about 3.24 GiB at 168k; 4.32 GiB at 224k until
 Nov 20) but only touches pages as contexts grow, so peak use stays well under the budget. Four full 262k windows don't fit, but four 224k windows do with the

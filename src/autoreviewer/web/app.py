@@ -14,9 +14,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from githubkit.webhooks import verify
 
-from autoreviewer.model_config import PrismConfig
+from autoreviewer.model_config import PrismConfig, resolve_model
 from autoreviewer.servers import COMPACT_AT, ReasoningEffort
-from autoreviewer.web.config import AGENT_KINDS, CONVERSATION, AgentKind, Settings, verifier_role
+from autoreviewer.web.config import AGENT_KINDS, CONVERSATION, OVERFLOW_REPOS, AgentKind, Settings, verifier_role
 
 if TYPE_CHECKING:
     from pydantic_ai import Agent
@@ -113,9 +113,6 @@ def create_app(
     return app
 
 
-SOL = "openai-codex:gpt-6.2-sol"
-
-
 @dataclass(frozen=True)
 class ModelPlan:
     """The models, compaction targets and request limits used to build the review agents."""
@@ -128,7 +125,7 @@ class ModelPlan:
     """Role -> reasoning effort (config.reasoning_from)."""
 
     prism: PrismConfig | None = None
-    overflow_finders: bool = False
+    overflow_finder: tuple[Model, int] | None = None
     _resolved: dict[str, tuple[Model, int]] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -159,24 +156,11 @@ class ModelPlan:
         from autoreviewer.review.agents import boodleton_model
 
         name = self.models[role]
-        if self.overflow_finders and role in AGENT_KINDS:
-            from pydantic_ai.models import infer_model
-
-            key = "overflow:" + name  # Do not reuse a primary client with a request semaphore.
-            if key not in self._resolved:
-                model = infer_model(name)
-                self._resolved[key] = model, (model.profile.get("context_window") or 8192) // 2
-            return self._resolved[key]
+        if self.overflow_finder is not None and role in AGENT_KINDS:
+            return self.overflow_finder
         if self.prism is not None:
             if name not in self._resolved:
                 self._resolved[name] = self.prism.resolve(name)
-            return self._resolved[name]
-        if name == SOL:
-            from pydantic_ai.models import infer_model
-
-            if name not in self._resolved:
-                model = infer_model(name)
-                self._resolved[name] = model, (model.profile.get("context_window") or 8192) // 2
             return self._resolved[name]
         if role not in self._resolved:
             self._resolved[role] = (
@@ -328,37 +312,43 @@ def conversation_deps(settings: Settings, github: GitHubApp, plan: ModelPlan | N
     )
 
 
-def sol_overflow_deps(settings: Settings, normal: ReviewDeps, plan: ModelPlan) -> ReviewDeps | None:
+def overflow_deps(settings: Settings, normal: ReviewDeps, plan: ModelPlan) -> ReviewDeps | None:
     """Change only finders; keep the normal checkout policy, checkers and review limits."""
     from autoreviewer.review.agents import lens_version
 
-    if not settings.sol_overflow_repos:
+    if not settings.overflow_repos:
         return None
-    if any(plan.models[verifier_role(kind)] == SOL for kind in AGENT_KINDS):
-        raise ValueError(f"PRISM_SOL_OVERFLOW_REPOS: overflow checker cannot also be {SOL}")
+    spec = settings.overflow_model
+    if spec is None:
+        raise ValueError(
+            f"{OVERFLOW_REPOS} is set but no overflow model is configured: "
+            "add `overflow` to prism.json, or `overflow_model` to the deployment profile"
+        )
+    if any(plan.models[verifier_role(kind)] == spec for kind in AGENT_KINDS):
+        raise ValueError(f"{OVERFLOW_REPOS}: overflow checker cannot also be {spec}")
     # A factory or another provider spec can expose the same underlying model.
     active: list[AgentKind] = ["correctness", *enabled_lenses(settings)]
     if settings.simplify:
         active.append("simplify")
+    finder = plan.prism.resolve(spec) if plan.prism is not None else resolve_model(spec)
     for kind in active:
-        if plan.verifier(kind)[0].model_name == SOL.split(":", 1)[1]:
-            raise ValueError(f"PRISM_SOL_OVERFLOW_REPOS: {kind} checker resolves to the Sol finder")
-    models = {**plan.models, **dict.fromkeys(AGENT_KINDS, SOL)}
-    overflow = replace(plan, models=models, overflow_finders=True)  # Shares the normal plan's resolved checker clients.
+        if plan.verifier(kind)[0].model_name == finder[0].model_name:
+            raise ValueError(f"{OVERFLOW_REPOS}: {kind} checker resolves to the overflow finder")
+    models = {**plan.models, **dict.fromkeys(AGENT_KINDS, spec)}
+    # Shares the normal plan's resolved checker clients.
+    overflow = replace(plan, models=models, overflow_finder=finder)
     return replace(
         normal,
         agents=correctness_agents(overflow),
         simplifier=simplifier_agents(overflow) if settings.simplify else None,
         lenses=build_lenses(settings, overflow),
         models_note=models_note(replace(settings, models=models)),
-        memory=None,  # Always start fresh; never send local lens history to Sol or persist its replies.
-        lens_version=lens_version(SOL),
+        memory=None,  # Always start fresh; never send local lens history to overflow or persist its replies.
+        lens_version=lens_version(spec),
     )
 
 
 def main() -> None:
-    import functools
-
     import logfire
     import uvicorn
 
@@ -395,7 +385,7 @@ def main() -> None:
         soft_deadline_s=settings.soft_deadline_minutes * 60,
         hard_deadline_s=settings.hard_deadline_minutes * 60,
     )
-    overflow = sol_overflow_deps(settings, deps, plan)
+    overflow = overflow_deps(settings, deps, plan)
     durable.configure(settings.database)
 
     @contextlib.asynccontextmanager
@@ -406,7 +396,7 @@ def main() -> None:
             conversation_deps(settings, github, plan),
             concurrency=settings.max_concurrent_jobs,
             overflow_deps=overflow,
-            overflow_repos=settings.sol_overflow_repos,
+            overflow_repos=settings.overflow_repos,
         )
         try:
             yield
@@ -415,7 +405,7 @@ def main() -> None:
 
     async def review_requested(request: ReviewRequested) -> None:
         # An explicit request retries a review of this commit that was cancelled or crashed.
-        await request_review(github, request, functools.partial(durable.enqueue_review, retry_failed=True))
+        await request_review(github, request, durable.enqueue_review)
 
     async def forget(closed: PullRequestClosed) -> None:
         repo = Repo(closed.installation_id, closed.owner, closed.repo)

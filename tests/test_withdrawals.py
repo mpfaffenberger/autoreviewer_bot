@@ -131,6 +131,16 @@ async def test_approves_once_nothing_blocking_is_left_standing(repo: GitRepo) ->
     assert not await reconsider(github, REPO, 7, author=BOT, block_at=1)  # already approved: a replay is a no-op
 
 
+async def test_a_new_partial_review_prevents_approval_from_an_older_verdict(repo: GitRepo) -> None:
+    github = await reviewed(repo, blocking(5))
+    await post_review(
+        github, REPO, 7, head_sha=repo.head, author=BOT, models_note="m", outcome=Outcome(cut_short=True), check_id=2
+    )
+    withdraw(github, 1)
+    assert github.reviews[-1]["event"] == "COMMENT"
+    assert not await reconsider(github, REPO, 7, author=BOT, block_at=1)
+
+
 async def test_the_check_turns_green_before_the_approval_is_posted(
     repo: GitRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

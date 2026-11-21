@@ -2,48 +2,30 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, get_args
 
 from autoreviewer.model_config import PrismConfig
+from autoreviewer.review.deadline import DEFAULT_SOFT_S, MAX_REVIEW_S
+from autoreviewer.roles import AGENT_KINDS, AGENT_ROLES, verifier_role
+from autoreviewer.roles import CONVERSATION as CONVERSATION
+from autoreviewer.roles import AgentKind as AgentKind
 from autoreviewer.servers import (
     CONTEXT_WINDOWS,
-    DEEPSEEK,
+    DEFAULT_BASE_URL,
     DEFAULT_MODEL_LANES,
-    QWEN,
+    DEFAULT_MODELS,
+    DEFAULT_OVERFLOW_MODEL,
+    DEFAULT_REASONING,
     REASONING_EFFORTS,
     ReasoningEffort,
 )
 
 DEFAULT_PRIVATE_KEY_PATH = "/run/prism/github-app.pem"
-
-AgentKind = Literal["correctness", "security", "dry", "docs", "tests", "simplify"]
-"""Each kind has a finder (the role named after it) and a checker (`<kind>.verifier`)."""
-AGENT_KINDS: tuple[AgentKind, ...] = get_args(AgentKind)
-
-
-def verifier_role(kind: AgentKind) -> str:
-    """The role of the agent that checks `kind`'s findings: the one place the `<kind>.verifier` name is made."""
-    return f"{kind}.verifier"
-
-
-CONVERSATION = "conversation"
-"""The role that answers replies under the bot's findings (review/conversation.py)."""
-AGENT_ROLES = (*AGENT_KINDS, *map(verifier_role, AGENT_KINDS), CONVERSATION)
-_FOUND_BY_DEEPSEEK: tuple[AgentKind, ...] = ("docs", "tests")
-DEFAULT_MODELS = {
-    **dict.fromkeys(AGENT_KINDS, QWEN),
-    **dict.fromkeys(map(verifier_role, AGENT_KINDS), DEEPSEEK),
-    **dict.fromkeys(_FOUND_BY_DEEPSEEK, DEEPSEEK),
-    **dict.fromkeys(map(verifier_role, _FOUND_BY_DEEPSEEK), QWEN),
-    CONVERSATION: DEEPSEEK,
-}
-"""Finders on Qwen (fast), checkers on DeepSeek (better). Docs and tests are found by DeepSeek and checked by Qwen,
-the other model (DESIGN.md §7). Pin any role to change it (PRISM_MODELS)."""
 
 
 @dataclass(frozen=True)
@@ -73,17 +55,18 @@ class Settings:
     """Post optional one-click simplifications of the code a PR adds (see review/simplify.py)."""
     block_at_priority: int = 1
     """Confirmed findings at this priority or more urgent (0 = P0 ... 3 = P3) block the merge; 3 blocks on all."""
-    soft_deadline_minutes: float = 30
+    soft_deadline_minutes: float = DEFAULT_SOFT_S / 60
     """After this, every lens wraps up with what it has; a review cut short never approves."""
-    hard_deadline_minutes: float = 50
+    hard_deadline_minutes: float = MAX_REVIEW_S / 60
     """After this, the review is cancelled without a verdict (findings already posted stay)."""
     model_lanes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_MODEL_LANES))
     """At most this many requests at once to each model, across every review (PRISM_MODEL_LANES,
     "model=n,..."; defaults in servers.DEFAULT_MODEL_LANES). Models not listed are unlimited."""
     max_concurrent_jobs: int = 1
-    """One review at a time: each already runs a Qwen agent per lens in parallel, about as many as Qwen has lanes
-    (servers.DEFAULT_MODEL_LANES). Two at once left most requests waiting and pushed both past their deadline."""
-    boodleton_base_url: str = "http://boodleton:8000/v1"
+    """One review at a time: each already runs a finder per lens in parallel, about as many as the finders' model
+    has lanes (servers.DEFAULT_MODEL_LANES). Two at once left most requests waiting and pushed both past their
+    deadline."""
+    boodleton_base_url: str = DEFAULT_BASE_URL
     boodleton_api_key: str = field(default="", repr=False)
     models: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     """The model each agent role runs on (see models_from); its context window follows (servers.CONTEXT_WINDOWS)."""
@@ -96,7 +79,13 @@ class Settings:
     """Per-PR lens conversations, so a new commit continues the last review (see review/memory.py)."""
 
     prism: PrismConfig | None = None
-    sol_overflow_repos: frozenset[str] = frozenset()
+    overflow_repos: frozenset[str] = frozenset()
+    """Repositories whose reviews may run on the overflow model when the normal workers are busy
+    (see overflow_repos_from); `{"*"}` is every repository."""
+    overflow_model: str | None = None
+    """The model spec whose finders take those reviews: prism.json's `overflow` under PRISM_CONFIG, else the
+    deployment profile's `overflow_model`. Never the profile's under PRISM_CONFIG, so a portable deployment
+    cannot send code to a provider its own config didn't name."""
 
     @property
     def bot_login(self) -> str:
@@ -109,7 +98,8 @@ class Settings:
         prism = PrismConfig.from_file(prism_path) if prism_path else None
         return cls(
             prism=prism,
-            sol_overflow_repos=sol_overflow_repos_from(env),
+            overflow_repos=overflow_repos_from(env),
+            overflow_model=prism.overflow if prism else DEFAULT_OVERFLOW_MODEL,
             app_id=int(env["GITHUB_APP_ID"]),
             app_slug=env["GITHUB_APP_SLUG"],
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
@@ -144,8 +134,18 @@ class Settings:
         )
 
 
-def sol_overflow_repos_from(env: Mapping[str, str]) -> frozenset[str]:
-    value = env.get("PRISM_SOL_OVERFLOW_REPOS", "").strip()
+OVERFLOW_REPOS = "PRISM_OVERFLOW_REPOS"
+LEGACY_OVERFLOW_REPOS = "PRISM_SOL_OVERFLOW_REPOS"
+"""OVERFLOW_REPOS's name from when one overflow model was built in. Still read, so a deployed unit keeps working."""
+
+
+def overflow_repos_from(env: Mapping[str, str]) -> frozenset[str]:
+    """PRISM_OVERFLOW_REPOS: comma-separated exact owner/repo names, or `*` for every repository. Blank is off.
+    Which model takes the overflow is configured separately (prism.json's `overflow`, or the deployment profile)."""
+    value, legacy = (env.get(key, "").strip() for key in (OVERFLOW_REPOS, LEGACY_OVERFLOW_REPOS))
+    if value and legacy and value != legacy:
+        raise ValueError(f"{OVERFLOW_REPOS} and {LEGACY_OVERFLOW_REPOS} disagree; set only {OVERFLOW_REPOS}")
+    value = value or legacy
     if not value:
         return frozenset()
     repos = set[str]()
@@ -154,7 +154,7 @@ def sol_overflow_repos_from(env: Mapping[str, str]) -> frozenset[str]:
     for entry in value.split(","):
         repo = entry.strip()
         if not re.fullmatch(r"[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*/[a-zA-Z0-9._-]+", repo) or repo.endswith(("/.", "/..")):
-            raise ValueError(f"PRISM_SOL_OVERFLOW_REPOS: expected exact owner/repo, got {entry!r}")
+            raise ValueError(f"{OVERFLOW_REPOS}: expected exact owner/repo, got {entry!r}")
         repos.add(repo.lower())
     return frozenset(repos)
 
@@ -189,8 +189,7 @@ def parse_lanes(value: str) -> dict[str, int]:
 
 
 def models_from(env: Mapping[str, str]) -> dict[str, str]:
-    """Each agent role's model: DEFAULT_MODELS, with PRISM_MODELS ("role=model,...", e.g.
-    "security=deepseek-v4.1-flash,security.verifier=qwen3.8-flash-next") pinning roles. Stops startup on an unknown
+    """Each agent role's model: DEFAULT_MODELS, with PRISM_MODELS ("role=model,...") pinning roles. Reject an unknown
     role, a model without a known context window, or a finder on the same model as its checker (different models
     make different mistakes; that's the point of checking). Shared by the bot and the evals."""
     models = dict(DEFAULT_MODELS)
@@ -204,16 +203,17 @@ def models_from(env: Mapping[str, str]) -> dict[str, str]:
     return models
 
 
-DEFAULT_REASONING: dict[str, ReasoningEffort] = {CONVERSATION: "high"}
-"""The conversation agent decides withdrawals, so it thinks. Thinking didn't help the docs or tests finders
-(evals docs-v3 and tests-v2, Nov 19: same recall, as much noise or more), so they don't."""
-
-
 def deadlines_from(env: Mapping[str, str]) -> tuple[float, float]:
-    """(soft, hard) review time limits in minutes: PRISM_SOFT_DEADLINE_MINUTES and
-    PRISM_HARD_DEADLINE_MINUTES over Settings' defaults. Shared by the bot and the evals."""
+    """Return (soft, hard) minutes for the receiver and evals. Both settings must be positive and finite.
+
+    Cap the hard limit at `deadline.MAX_REVIEW_S` and the soft limit at 90% of the effective hard limit.
+    """
     soft = float(env.get("PRISM_SOFT_DEADLINE_MINUTES", Settings.soft_deadline_minutes))
-    return soft, float(env.get("PRISM_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
+    hard = float(env.get("PRISM_HARD_DEADLINE_MINUTES", Settings.hard_deadline_minutes))
+    if not all(math.isfinite(value) and value > 0 for value in (soft, hard)):
+        raise ValueError("review deadlines must be positive finite minutes")
+    hard = min(hard, MAX_REVIEW_S / 60)
+    return min(soft, hard * 0.9), hard
 
 
 def reasoning_from(env: Mapping[str, str]) -> dict[str, ReasoningEffort]:
