@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai import ModelRetry
@@ -216,6 +218,25 @@ async def test_a_clean_pr_is_approved(repo: GitRepo, tmp_path: Path) -> None:
     result = await review_and_post(job_deps(github, tmp_path, []), pull(repo))
     assert github.reviews[0]["event"] == "APPROVE" and github.reviews[0]["comments"] == []
     assert result.conclusion == "success"
+
+
+@pytest.mark.parametrize("hung", ["settle_fixed", "_publish"])
+async def test_expiring_after_a_blocking_verdict_preserves_the_failed_check(
+    repo: GitRepo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hung: str
+) -> None:
+    github = FakeGitHub(repo)
+
+    async def hang(*args: object, **kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    cleanup = AsyncMock(side_effect=hang)
+    monkeypatch.setattr(f"autoreviewer.review.job.{hung}", cleanup)
+    async with asyncio.timeout(5):
+        result = await review_and_post(job_deps(github, tmp_path, [finding(5)]), pull(repo), 1, remaining_s=1)
+
+    cleanup.assert_awaited_once()
+    assert [r["event"] for r in github.reviews] == ["REQUEST_CHANGES"]
+    assert (result.conclusion, result.title) == ("failure", "1 blocking issue(s)")
 
 
 async def test_rejected_inline_comments_fall_back_to_the_body(repo: GitRepo, tmp_path: Path) -> None:

@@ -203,14 +203,28 @@ async def review_and_post(
     deadline = Deadline(deps.soft_deadline_s, started=time.monotonic() - elapsed)
     progress = Progress()
     repo = repo_of(pull)
+    result: CheckResult | None = None
     try:
         if budget <= 0:
             raise TimeoutError
         async with asyncio.timeout_at(started + budget), _publishing(deps, repo, check_id, progress):
-            result = await _review(deps, repo, pull, progress, deadline)
+            reviewed = await _review(deps, repo, pull, progress, deadline)
+            if isinstance(reviewed, CheckResult):
+                result = reviewed
+            else:
+                # Posting succeeded. Neither thread cleanup nor a pending progress write changes that verdict.
+                result = _summary(reviewed)
+                try:
+                    await settle_fixed(
+                        deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=reviewed
+                    )
+                except Exception:
+                    logger.warning("could not settle fixed findings for %s#%d", repo, pull.number, exc_info=True)
     except Superseded:
         result = CheckResult("Superseded", "A newer push replaced this commit before the review finished.", "neutral")
     except TimeoutError:
+        if result is not None:
+            return replace(result, details=progress.details())
         logger.warning("reviewing %s/%s#%d at %s timed out", pull.owner, pull.repo, pull.number, pull.head_sha[:7])
         result = CheckResult(
             "Review timed out",
@@ -469,7 +483,7 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
 
 async def _review(
     deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress, deadline: Deadline
-) -> CheckResult:
+) -> CheckResult | Outcome:
     state = await _current(deps, repo, pull)
     conversation = conversation_id(repo, pull.number)
     publisher = Publisher(
@@ -533,13 +547,7 @@ async def _review(
         outcome=result.outcome,
         posted=publisher.posted,
     )
-    try:  # tidying up, after the verdict: a failure here must never cost the review
-        await settle_fixed(
-            deps.github, repo, pull.number, head_sha=pull.head_sha, author=deps.bot_login, outcome=result.outcome
-        )
-    except Exception:
-        logger.warning("%s at %s: could not settle fixed findings", conversation, pull.head_sha[:7], exc_info=True)
-    return _summary(result.outcome)
+    return result.outcome
 
 
 async def _unless_superseded(

@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.tools import ToolDefinition
 
 from autoreviewer.github import PullRequestState
 from autoreviewer.review import job
@@ -58,18 +59,31 @@ async def test_a_lens_past_the_deadline_returns_its_report(workspace: Workspace)
     assert deadline.wrapped_up == {"reviewer"}
 
 
-async def test_countdown_is_once_per_stage_and_final_minute_is_report_only(workspace: Workspace) -> None:
-    deadline = Deadline(soft_s=300)
+@pytest.mark.parametrize(("budget", "focus", "stop"), [(540, 300, 60), (54, 30, 6)])
+async def test_countdown_is_once_per_stage_and_final_minute_is_report_only(
+    workspace: Workspace, budget: int, focus: int, stop: int
+) -> None:
+    deadline = Deadline(soft_s=budget)
     notices: list[list[str]] = []
 
     def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         last = messages[-1]
         assert isinstance(last, ModelRequest)
-        notices.append([p.content for p in last.parts if isinstance(p, UserPromptPart) and isinstance(p.content, str)])
-        if len(notices) < 3:
+        notices.append(
+            [
+                p.content
+                for p in last.parts
+                if isinstance(p, UserPromptPart)
+                and isinstance(p.content, str)
+                and p.content in (FIVE_MINUTES, ONE_MINUTE, WRAP_UP)
+            ]
+        )
+        if len(notices) < 4:
             assert info.function_tools and not deadline.wrapped_up
-            if len(notices) == 2:
-                deadline.soft_s = 60
+            if len(notices) == 1:
+                deadline.started -= budget - focus
+            elif len(notices) == 3:
+                deadline.started -= focus - stop
             return ModelResponse(parts=[ToolCallPart("changed_files", {})])
         assert not info.function_tools and deadline.wrapped_up == {"reviewer"}
         return ModelResponse(
@@ -77,7 +91,18 @@ async def test_countdown_is_once_per_stage_and_final_minute_is_report_only(works
         )
 
     await correctness_agent(FunctionModel(lens), workspace).run("review", capabilities=[deadline.watch("reviewer")])
-    assert notices == [["review", FIVE_MINUTES], [], [ONE_MINUTE]]
+    assert notices == [[], [FIVE_MINUTES], [], [ONE_MINUTE]]
+
+
+async def test_tool_removal_alone_marks_the_lens_forced_to_report() -> None:
+    deadline = Deadline(soft_s=540)
+    capability = deadline.watch("reviewer")
+    tools = [ToolDefinition(name="explore")]
+    assert await capability.prepare_tools(Mock(), tools) == tools
+    assert not deadline.wrapped_up
+    deadline.started -= 481
+    assert await capability.prepare_tools(Mock(), tools) == []
+    assert deadline.wrapped_up == {"reviewer"}
 
 
 async def test_before_the_deadline_nothing_changes(workspace: Workspace) -> None:
