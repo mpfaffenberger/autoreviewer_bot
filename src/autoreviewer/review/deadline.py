@@ -17,6 +17,15 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
+FIVE_MINUTES = (
+    "Five minutes or less remain before review wrap-up. Prioritize unresolved high-impact evidence; "
+    "finish your report as soon as coverage is complete. Do not start speculative investigations."
+)
+ONE_MINUTE = (
+    "One minute or less remains before review wrap-up. Finish immediately: return the final structured "
+    "result using evidence already gathered. Do not claim coverage you did not complete."
+)
+
 WRAP_UP = (
     "Time is up for this review. Stop exploring: return your final report now with what you have found so "
     "far, and list in `reviewed` only the files you actually inspected."
@@ -32,8 +41,12 @@ class Deadline:
     """Labels of the lenses that were told to wrap up."""
 
     @property
+    def remaining(self) -> float:
+        return self.soft_s - (time.monotonic() - self.started)
+
+    @property
     def passed(self) -> bool:
-        return time.monotonic() - self.started >= self.soft_s
+        return self.remaining <= 0
 
     def watch(self, label: str) -> AbstractCapability[None]:
         """A capability that makes the lens labelled `label` wrap up once the deadline has passed."""
@@ -44,16 +57,23 @@ class Deadline:
 class _WrapUp(AbstractCapability[None]):
     deadline: Deadline
     label: str
+    last_warning: str | None = None
 
     async def prepare_tools(self, ctx: RunContext[None], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
-        return [] if self.deadline.passed else tool_defs  # output tools aren't function tools: the report stays
+        # Output tools are separate: the final report stays available.
+        return [] if self.deadline.remaining <= 60 else tool_defs
 
     async def before_model_request(
         self, ctx: RunContext[None], request_context: ModelRequestContext
     ) -> ModelRequestContext:
-        if self.deadline.passed and self.label not in self.deadline.wrapped_up:
-            self.deadline.wrapped_up.add(self.label)
-            last = request_context.messages[-1]
-            if isinstance(last, ModelRequest):
-                last.parts = [*last.parts, UserPromptPart(WRAP_UP)]
+        remaining = self.deadline.remaining
+        if remaining > 300:
+            return request_context
+        warning = WRAP_UP if remaining <= 0 else ONE_MINUTE if remaining <= 60 else FIVE_MINUTES
+        last = request_context.messages[-1]
+        if isinstance(last, ModelRequest) and warning != self.last_warning:
+            last.parts = [*last.parts, UserPromptPart(warning)]
+            self.last_warning = warning
+            if remaining <= 60:
+                self.deadline.wrapped_up.add(self.label)
         return request_context

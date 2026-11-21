@@ -13,7 +13,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from autoreviewer.github import PullRequestState
 from autoreviewer.review import job
 from autoreviewer.review.agents import REPORT_TOOL, correctness_agent, verifier_agent
-from autoreviewer.review.deadline import WRAP_UP, Deadline
+from autoreviewer.review.deadline import FIVE_MINUTES, ONE_MINUTE, WRAP_UP, Deadline
 from autoreviewer.review.job import Lens, Reviewed, repo_of, review_and_post, review_change
 from autoreviewer.review.memory import ReviewMemory, conversation_id
 from autoreviewer.review.workspace import Workspace
@@ -55,6 +55,28 @@ async def test_a_lens_past_the_deadline_returns_its_report(workspace: Workspace)
     )
     assert tools_offered == [0] and [f.line for f in run.output.findings] == [5]
     assert deadline.wrapped_up == {"reviewer"}
+
+
+async def test_countdown_is_once_per_stage_and_final_minute_is_report_only(workspace: Workspace) -> None:
+    deadline = Deadline(soft_s=300)
+    notices: list[list[str]] = []
+
+    def lens(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        last = messages[-1]
+        assert isinstance(last, ModelRequest)
+        notices.append([p.content for p in last.parts if isinstance(p, UserPromptPart) and isinstance(p.content, str)])
+        if len(notices) < 3:
+            assert info.function_tools and not deadline.wrapped_up
+            if len(notices) == 2:
+                deadline.soft_s = 60
+            return ModelResponse(parts=[ToolCallPart("changed_files", {})])
+        assert not info.function_tools and deadline.wrapped_up == {"reviewer"}
+        return ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, {"findings": [], "overall_correct": True, "reviewed": []})]
+        )
+
+    await correctness_agent(FunctionModel(lens), workspace).run("review", capabilities=[deadline.watch("reviewer")])
+    assert notices == [["review", FIVE_MINUTES], [], [ONE_MINUTE]]
 
 
 async def test_before_the_deadline_nothing_changes(workspace: Workspace) -> None:
