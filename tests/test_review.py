@@ -21,7 +21,7 @@ from autoreviewer.review.diff import (
     split_git_diff,
 )
 from autoreviewer.review.gittools import git_tools
-from autoreviewer.review.job import _summary, review_and_post
+from autoreviewer.review.job import _summary, finish_check, review_and_post, start_check
 from autoreviewer.review.pipeline import PullRequestText, lens_prompt, review
 from autoreviewer.review.posting import VERDICT_MARKER
 from autoreviewer.review.render import comment_body, sanitize
@@ -264,11 +264,27 @@ async def test_same_head_attempt_posts_its_own_verdict_but_replay_does_not(repo:
     clean = job_deps(github, tmp_path)
     blocking = job_deps(github, tmp_path, [finding(5)])
     await review_and_post(clean, event, check_id=1)
-    for check_id in (2, 2, 3):  # fresh request, crash recovery, another fresh request
-        result = await review_and_post(blocking, event, check_id=check_id)
+    for deps, check_id in ((blocking, 2), (clean, 2), (blocking, 3)):
+        # A replay must retain the published REQUEST_CHANGES even if a second model run would approve.
+        result = await review_and_post(deps, event, check_id=check_id)
         assert result.conclusion == "failure"
     assert [r["event"] for r in github.reviews] == ["APPROVE", "REQUEST_CHANGES", "REQUEST_CHANGES"]
     assert len(github.review_comments) == 1
+
+
+async def test_expired_recovery_finishes_check_from_published_verdict(repo: GitRepo, tmp_path: Path) -> None:
+    github = FakeGitHub(repo)
+    event = pull(repo)
+    deps = job_deps(github, tmp_path, [finding(5)])
+    check = await start_check(deps, event)
+    await review_and_post(deps, event, check)
+    # Lost the step checkpoint and stayed down beyond the hard deadline.
+    await finish_check(deps, event, check, await review_and_post(deps, event, check, remaining_s=0))
+    assert github.checks[-1]["conclusion"] == "failure"
+    fresh = await start_check(deps, event)
+    await finish_check(deps, event, fresh, await review_and_post(deps, event, fresh, remaining_s=0))
+    assert github.checks[-1]["title"] == "Review timed out"  # cannot borrow the previous check's verdict
+    assert len(github.reviews) == 1
 
 
 async def test_early_comments_do_not_count_as_the_verdict(repo: GitRepo, tmp_path: Path) -> None:

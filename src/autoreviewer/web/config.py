@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,6 +97,7 @@ class Settings:
     """Per-PR lens conversations, so a new commit continues the last review (see review/memory.py)."""
 
     prism: PrismConfig | None = None
+    sol_overflow_repos: frozenset[str] = frozenset()
 
     @property
     def bot_login(self) -> str:
@@ -108,6 +110,7 @@ class Settings:
         prism = PrismConfig.from_file(prism_path) if prism_path else None
         return cls(
             prism=prism,
+            sol_overflow_repos=sol_overflow_repos_from(env),
             app_id=int(env["GITHUB_APP_ID"]),
             app_slug=env["GITHUB_APP_SLUG"],
             webhook_secret=env["GITHUB_WEBHOOK_SECRET"],
@@ -140,6 +143,21 @@ class Settings:
             database=Path(env.get("PRISM_DATABASE", str(cls.database))),
             steps_dir=Path(env.get("PRISM_STEPS_DIR", str(cls.steps_dir))),
         )
+
+
+def sol_overflow_repos_from(env: Mapping[str, str]) -> frozenset[str]:
+    value = env.get("PRISM_SOL_OVERFLOW_REPOS", "").strip()
+    if not value:
+        return frozenset()
+    repos = set[str]()
+    if value == "*":
+        return frozenset({"*"})
+    for entry in value.split(","):
+        repo = entry.strip()
+        if not re.fullmatch(r"[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*/[a-zA-Z0-9._-]+", repo) or repo.endswith(("/.", "/..")):
+            raise ValueError(f"PRISM_SOL_OVERFLOW_REPOS: expected exact owner/repo, got {entry!r}")
+        repos.add(repo.lower())
+    return frozenset(repos)
 
 
 _TRUE, _FALSE = frozenset({"true", "1", "yes", "on"}), frozenset({"false", "0", "no", "off"})

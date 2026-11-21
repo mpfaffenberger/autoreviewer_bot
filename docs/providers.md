@@ -15,6 +15,12 @@ The native `OpenAICodexModel` calls the Responses endpoint; it does not start `c
 
 A read-only snapshot is not durable token rotation: refreshed credentials live only in memory and a consumed refresh token can fail after restart. For a long-lived deployment, return `OpenAICodexModel(name, provider=OpenAICodexProvider(credential_source=store))` from a factory backed by an operator-managed secret store implementing `OpenAICodexCredentialSource`. Persist refreshed credentials atomically and avoid independent workers racing on one rotating grant. Do not share a provider instance across event loops.
 
+### Burst queued reviews to Sol
+
+Provision the dedicated Codex identity above, then set `PRISM_SOL_OVERFLOW_REPOS` in the receiver environment to a comma-separated list of exact repositories approved to send code to OpenAI (for example `your-org/public-project,your-org/another-project`). Set `PRISM_SOL_OVERFLOW_REPOS=*` to authorize Sol overflow for **all repositories this receiver reviews**, including private and future installations. Local review capacity is still used first. Restart the receiver to apply it. Blank or unset keeps overflow off; a GitHub App installation alone does not opt a repository in.
+
+Prism prefers its normal review workers. When they are busy, all eligible queued reviews can concurrently use `openai-codex:gpt-6.2-sol` for its finders, including the simplifier. The usual independent checkers still verify findings; thread replies stay on the normal plan. Overflow reviews start without saved lens history. No active review is moved or duplicated. Previously queued eligible work can use the extra slot, but older local-only jobs ahead of it may delay pickup. Sol requests consume the service identity’s quota; there is no Prism concurrency cap on overflow finders. Receiver memory, disk, provider quotas, checker capacity and review deadlines still apply.
+
 ### Copilot: supply a separate inference credential
 
 Set `GITHUB_COPILOT_API_KEY` in the model worker's secret environment. The native provider also accepts `GITHUB_COPILOT_API_TOKEN` and `COPILOT_GITHUB_TOKEN`; it does not need the PR-publishing GitHub App token. Choose an ID the account can actually use at `/chat/completions` (the account's `GET https://api.githubcopilot.com/models` catalog identifies supported endpoints). Entitlement to a model in a different Copilot interface is not sufficient.

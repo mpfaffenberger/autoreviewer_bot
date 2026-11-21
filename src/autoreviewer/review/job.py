@@ -26,6 +26,7 @@ from autoreviewer.github import (
     PullRequests,
     PullRequestState,
     Repo,
+    ReviewEvent,
 )
 from autoreviewer.review.deadline import Deadline
 from autoreviewer.review.diff import MAX_CHANGED_LINES, added_lines, select
@@ -42,7 +43,7 @@ from autoreviewer.review.pipeline import (
     review,
     review_lens,
 )
-from autoreviewer.review.posting import Publisher, post_review, settle_fixed
+from autoreviewer.review.posting import Publisher, post_review, published_event, settle_fixed
 from autoreviewer.review.progress import Progress
 from autoreviewer.review.schemas import ADVISORY_KINDS, LensKind, LensReport, Verification
 from autoreviewer.review.simplify import SimplifierFactory, suggest
@@ -177,7 +178,28 @@ async def start_check(deps: ReviewDeps, pull: PullRequestUpdated) -> int:
     return await deps.github.start_check(repo_of(pull), pull.head_sha)
 
 
+async def _published_result(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int) -> CheckResult | None:
+    bodies = await deps.github.review_bodies(
+        repo_of(pull), pull.number, commit_sha=pull.head_sha, author=deps.bot_login
+    )
+    event = published_event(bodies, check_id)
+    return _recovered_result(event) if event else None
+
+
+def _recovered_result(event: ReviewEvent) -> CheckResult:
+    if event == "APPROVE":
+        return CheckResult("No blocking issues", "Approved; see the published review.", "success")
+    if event == "REQUEST_CHANGES":
+        return CheckResult("Changes requested", "See the blocking findings in the published review.", "failure")
+    return CheckResult("Partially reviewed", "The published review was incomplete; not approved.", "neutral")
+
+
 async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int, result: CheckResult) -> None:
+    timed_out = result.title == "Review timed out"
+    if timed_out or result.title == "Review failed":
+        # No review budget left, or the POST response was lost. Reconcile the external write in the
+        # retriable completion step, without running models or granting the review extra time.
+        result = await _published_result(deps, pull, check_id) or result
     await deps.github.finish_check(
         repo_of(pull),
         check_id,
@@ -186,7 +208,7 @@ async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int
         summary=result.summary,
         text=result.details,
     )
-    if result.title == "Review timed out":
+    if timed_out:
         # The timeout cancels the review step. Clean up in the completion step, after publishing the check.
         repo = repo_of(pull)
         await _forget_if_closed(deps, repo, pull, conversation_id(repo, pull.number))
@@ -488,6 +510,8 @@ def _prior_review(run_id: str, head_sha: str, base: str, version: str, outcome: 
 async def _review(
     deps: ReviewDeps, repo: Repo, pull: PullRequestUpdated, progress: Progress, deadline: Deadline, check_id: int | None
 ) -> CheckResult | Outcome:
+    if check_id is not None and (published := await _published_result(deps, pull, check_id)) is not None:
+        return published  # crashed after posting: never run models or post findings for this attempt again
     state = await _current(deps, repo, pull)
     conversation = conversation_id(repo, pull.number)
     publisher = Publisher(
@@ -541,7 +565,7 @@ async def _review(
     result.outcome.withdrawn = await publisher.withdrawn()
     # A lens that failed after posting: its comments are on the PR, so the verdict counts them (#43's review).
     result.outcome.absorb(Outcome(inline=[f for f in publisher.findings if f not in result.outcome.posted]))
-    await post_review(
+    previous = await post_review(
         deps.github,
         repo,
         pull.number,
@@ -552,7 +576,7 @@ async def _review(
         posted=publisher.posted,
         check_id=check_id,
     )
-    return result.outcome
+    return _recovered_result(previous) if previous else result.outcome
 
 
 async def _unless_superseded(

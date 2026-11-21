@@ -12,8 +12,10 @@ minute of GPU time and nothing else.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
 from typing import Any
@@ -24,6 +26,7 @@ from autoreviewer.review import conversation, job
 from autoreviewer.web.routing import PullRequestUpdated, ThreadReply
 
 QUEUE = "reviews"
+LOCAL_QUEUE = "reviews-local"
 ANSWER_QUEUE = "answers"
 """Answers to replies run beside reviews, never behind one: a reply shouldn't wait for a 15-minute review."""
 ANSWER_CONCURRENCY = 2
@@ -39,6 +42,43 @@ failing with an obscure NOT NULL error at launch (hit on Debian bookworm's 3.40)
 MAX_RECOVERY_ATTEMPTS = 3
 """A review that keeps crashing the process is parked after this many recoveries instead of looping on the GPU."""
 
+
+class _ReviewSlots:
+    """Per worker, not per queue: either queue may contain work admitted under an older allowlist."""
+
+    def __init__(self, concurrency: int, overflow: job.ReviewDeps | None, repos: frozenset[str]) -> None:
+        if concurrency < 1:
+            raise ValueError("review concurrency must be positive")
+        self.primary_free = concurrency
+        self.overflow = overflow
+        self.repos = repos
+        self.changed = asyncio.Condition()
+
+    def eligible(self, pull: PullRequestUpdated) -> bool:
+        return self.overflow is not None and ("*" in self.repos or f"{pull.owner}/{pull.repo}".lower() in self.repos)
+
+    @asynccontextmanager
+    async def claim(self, pull: PullRequestUpdated) -> AsyncIterator[job.ReviewDeps]:
+        eligible = self.eligible(pull)
+        async with self.changed:
+            await self.changed.wait_for(lambda: self.primary_free > 0 or eligible)
+            primary = self.primary_free > 0
+            if primary:
+                deps = _require_deps()
+                self.primary_free -= 1
+            else:
+                assert self.overflow is not None
+                deps = self.overflow
+        try:
+            yield deps
+        finally:
+            if primary:
+                async with self.changed:
+                    self.primary_free += 1
+                    self.changed.notify_all()
+
+
+_slots: _ReviewSlots | None = None
 _deps: job.ReviewDeps | None = None
 _conversation_deps: conversation.ConversationDeps | None = None
 
@@ -74,10 +114,13 @@ async def _review_and_post(pull: PullRequestUpdated, check_id: int) -> job.Check
     steps = await DBOS.list_workflow_steps_async(run_id, limit=1, load_output=False)
     if not steps or steps[0]["function_id"] != 1 or (started_ms := steps[0]["started_at_epoch_ms"]) is None:
         raise RuntimeError(f"Missing durable check start for {run_id}")
-    elapsed_s = max(0.0, time() - started_ms / 1000)
-    deps = _require_deps()
-    budget_s = min(deps.hard_deadline_s, job.MAX_REVIEW_S)
-    return await job.review_and_post(deps, pull, check_id, remaining_s=max(0.0, budget_s - elapsed_s))
+    if _slots is None:
+        raise RuntimeError("durable.launch() must run before reviews are executed")
+    async with _slots.claim(pull) as deps:
+        # Waiting for a worker slot after the check starts spends this attempt's budget.
+        elapsed_s = max(0.0, time() - started_ms / 1000)
+        budget_s = min(deps.hard_deadline_s, job.MAX_REVIEW_S)
+        return await job.review_and_post(deps, pull, check_id, remaining_s=max(0.0, budget_s - elapsed_s))
 
 
 @DBOS.step(retries_allowed=True, max_attempts=3)
@@ -141,18 +184,37 @@ def configure(database: Path) -> None:
 
 
 async def launch(
-    deps: job.ReviewDeps, conversation_deps: conversation.ConversationDeps | None = None, *, concurrency: int
+    deps: job.ReviewDeps,
+    conversation_deps: conversation.ConversationDeps | None = None,
+    *,
+    concurrency: int,
+    overflow_deps: job.ReviewDeps | None = None,
+    overflow_repos: frozenset[str] = frozenset(),
 ) -> None:
     """Start DBOS (recovering interrupted reviews and answers) and register the queues."""
-    global _deps, _conversation_deps
+    global _deps, _conversation_deps, _slots
+    _slots = _ReviewSlots(concurrency, overflow_deps, overflow_repos)
     _deps, _conversation_deps = deps, conversation_deps
     DBOS.launch()
-    await DBOS.register_queue_async(QUEUE, worker_concurrency=concurrency)
+    enabled = overflow_deps is not None and bool(overflow_repos)
+    await DBOS.register_queue_async(QUEUE, worker_concurrency=None if enabled else concurrency)
+    # Register even when disabled so any previously queued local work can drain.
+    await DBOS.register_queue_async(
+        LOCAL_QUEUE, worker_concurrency=None if enabled and "*" in overflow_repos else concurrency
+    )
     await DBOS.register_queue_async(ANSWER_QUEUE, worker_concurrency=ANSWER_CONCURRENCY)
 
 
+def _review_queue(pull: PullRequestUpdated) -> str:
+    # Separate new local-only waiters so they cannot fill the eligible queue's admission window.
+    # Old mixed backlogs can still head-of-line block; we never migrate or duplicate durable jobs.
+    if _slots and _slots.overflow is not None and _slots.repos and not _slots.eligible(pull):
+        return LOCAL_QUEUE
+    return QUEUE
+
+
 async def enqueue(pull: PullRequestUpdated) -> WorkflowHandleAsync[job.CheckResult]:
-    return await _enqueue(QUEUE, workflow_id(pull), review_workflow, pull)
+    return await _enqueue(_review_queue(pull), workflow_id(pull), review_workflow, pull)
 
 
 async def _enqueue[Arg, Result](
@@ -180,7 +242,7 @@ async def _select_attempt(pull: PullRequestUpdated, *, explicit: bool) -> str:
             if previous is not None and not explicit:
                 return previous  # pushes never allocate another attempt
             # Concurrent selectors finding the same empty slot enqueue the same DBOS ID.
-            return (await _enqueue(QUEUE, attempt, review_workflow, pull)).workflow_id
+            return (await _enqueue(_review_queue(pull), attempt, review_workflow, pull)).workflow_id
         if status.status in _RUNNING:
             return attempt
         if number == 1:
