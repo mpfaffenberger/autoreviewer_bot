@@ -399,7 +399,7 @@ def sol_overflow_deps(settings: Settings, normal: ReviewDeps, plan: ModelPlan) -
         simplifier=simplifier_agents(overflow) if settings.simplify else None,
         lenses=build_lenses(settings, overflow),
         models_note=models_note(replace(settings, models=models)),
-        memory=None,  # Always start fresh; never send local lens history to Sol or persist its replies.
+        session_namespace="sol-overflow",  # No local transcript is sent to an overflow finder.
         lens_version=lens_version(SOL),
     )
 

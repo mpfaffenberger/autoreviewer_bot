@@ -51,11 +51,11 @@ class ReviewMemory:
     def __init__(self, root: Path) -> None:
         self._root = root
 
-    def _dir(self, conversation: str) -> Path:
+    def directory(self, conversation: str) -> Path:
         return self._root / hashlib.sha256(conversation.encode()).hexdigest()[:32]
 
     def _store(self, conversation: str) -> FileStepStore:
-        directory = self._dir(conversation) / "steps"
+        directory = self.directory(conversation) / "steps"
         directory.mkdir(parents=True, exist_ok=True)
         return FileStepStore(directory)
 
@@ -66,7 +66,7 @@ class ReviewMemory:
 
     def last(self, conversation: str) -> PriorReview | None:
         try:
-            data = json.loads((self._dir(conversation) / "index.json").read_text())
+            data = json.loads((self.directory(conversation) / "index.json").read_text())
             return PriorReview(**data)
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             return None  # nothing usable: the next review starts fresh
@@ -75,11 +75,11 @@ class ReviewMemory:
         return await continue_run(self._store(conversation), run_id=prior.run_id)
 
     def remember(self, conversation: str, review: PriorReview) -> None:
-        directory = self._dir(conversation)
+        directory = self.directory(conversation)
         directory.mkdir(parents=True, exist_ok=True)
         temporary = directory / f".index.{uuid.uuid4().hex}.json"
         temporary.write_text(json.dumps(asdict(review)))
         os.replace(temporary, directory / "index.json")  # atomic: a crash leaves the old index intact
 
     def forget(self, conversation: str) -> None:
-        shutil.rmtree(self._dir(conversation), ignore_errors=True)
+        shutil.rmtree(self.directory(conversation), ignore_errors=True)

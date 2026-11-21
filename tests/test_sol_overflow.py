@@ -45,7 +45,7 @@ def test_sol_overrides_only_finders(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     settings = replace(settings, sol_overflow_repos=frozenset({"org/repo"}))
     (tmp_path / "auth.json").write_text('{"tokens":{"account_id":"fake","access_token":"fake","refresh_token":"fake"}}')
     overflow = sol_overflow_deps(settings, normal, plan)
-    assert overflow and overflow.memory is None and normal.memory is not None
+    assert overflow and overflow.memory is normal.memory and overflow.session_namespace != normal.session_namespace
     assert overflow.source is normal.source and overflow.github is normal.github
     assert overflow.lens_version == lens_version(SOL) and SOL in overflow.models_note
     workspace = Workspace(tmp_path, "base", "head")
