@@ -186,6 +186,10 @@ async def finish_check(deps: ReviewDeps, pull: PullRequestUpdated, check_id: int
         summary=result.summary,
         text=result.details,
     )
+    if result.title == "Review timed out":
+        # The timeout cancels the review step. Clean up in the completion step, after publishing the check.
+        repo = repo_of(pull)
+        await _forget_if_closed(deps, repo, pull, conversation_id(repo, pull.number))
 
 
 async def review_and_post(

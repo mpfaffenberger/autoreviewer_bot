@@ -307,3 +307,15 @@ async def test_a_retry_after_a_partial_review_posts_the_full_verdict(repo: GitRe
     await review_and_post(replace(job_deps(github, tmp_path), soft_deadline_s=0), pull(repo))  # cut short again
     await review_and_post(job_deps(github, tmp_path), pull(repo))  # the retry gets through
     assert [r["event"] for r in github.reviews] == ["COMMENT", "APPROVE"]  # one partial, then the verdict
+
+
+@pytest.mark.parametrize("state", ["closed", "open"])
+async def test_timeout_cleanup_only_for_closed_pr(repo: GitRepo, tmp_path: Path, state: str) -> None:
+    memory = ReviewMemory(tmp_path / "history")
+    deps = replace(job_deps(FakeGitHub(repo, pr_state=state), tmp_path), memory=memory)
+    event = pull(repo)
+    memory.persistence(conversation_id(repo_of(event), event.number))
+    check = await job.start_check(deps, event)
+    result = await review_and_post(deps, event, check, remaining_s=0)
+    await job.finish_check(deps, event, check, result)
+    assert any((tmp_path / "history").iterdir()) == (state == "open")
