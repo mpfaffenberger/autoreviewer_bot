@@ -11,11 +11,12 @@ Snapshots hold compacted history, so compaction done for an earlier turn isn't r
 repeated together with the compaction that prepared it: a summary made for that request is paid for again, because
 the harness's token estimate is anchored on the last response's reported usage, which predates the summary.
 
-Keyed by the attempt (the DBOS workflow id: one try at one head), the role, the subject (a checker's candidate),
-the session namespace, the merge base and the agent's identity (`sessions._key`: provider and model, prompts,
-output schema). So a recovered attempt whose run lands on another model, in the overflow namespace, or on a moved
-merge base starts that run fresh instead of reusing a transcript that no longer applies. Kept with the PR's review
-memory, which closing the PR deletes; `discard` drops an attempt's checkpoints once it has its verdict.
+The checkpoint key includes the attempt's DBOS workflow ID (one try at one head), the role, the candidate a
+checker verifies, the session namespace, the merge base, and the agent's identity (`sessions._key`: provider and
+model, prompts, output schema). If any of these changes, for example when a recovered run uses another model or
+runs in the overflow namespace, the run starts fresh instead of reusing the checkpoint. Checkpoints live in the
+PR's review memory, which closing the PR deletes, and `discard` drops an attempt's checkpoints once it has its
+verdict.
 """
 
 from __future__ import annotations

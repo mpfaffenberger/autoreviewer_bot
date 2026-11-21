@@ -233,10 +233,11 @@ async def review_and_post(
 ) -> CheckResult:
     """Review within one wall-clock budget, including GitHub reads, posting and progress updates.
 
-    On recovery, `remaining_s` is the time left on the durable hard deadline; neither clock restarts. With an
-    `attempt` (the DBOS workflow id), each agent run checkpoints its settled turns, so a recovery resumes them
-    instead of repeating them. External cancellation propagates rather than becoming a verdict, and keeps the
-    checkpoints for that recovery.
+    On recovery, `remaining_s` is the time left on the durable hard deadline; neither clock restarts. When review
+    memory is configured and `attempt` gives the DBOS workflow ID, each agent run checkpoints its settled turns, so
+    a recovery resumes them instead of repeating them. Without memory, nothing is checkpointed and a recovery runs
+    every turn again. External cancellation propagates rather than becoming a verdict, and keeps the checkpoints
+    for that recovery.
     """
     result = await _review_within_budget(deps, pull, check_id, remaining_s=remaining_s, attempt=attempt)
     if attempt is not None and deps.memory is not None:
